@@ -1,0 +1,21 @@
+{
+  "name": "rx-verify",
+  "version": "0.1.0",
+  "description": "Deterministic matching engine comparing an incoming e-prescription against pharmacy-entered data, producing per-field GREEN/YELLOW/RED verdicts. SYNTHETIC DATA ONLY.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5",
+    "tsx": "^4.16.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
