@@ -1,0 +1,83 @@
+{
+  "description": "90-day quantity on source, entered as a 30-day insurance-limited fill; sig math reconciles.",
+  "source": {
+    "patientName": "Carlos Ramirez",
+    "drug": {
+      "ndc": "00093715801"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 90,
+    "quantityUnit": "tab",
+    "daysSupply": 45,
+    "refills": 1
+  },
+  "entered": {
+    "patientName": "Carlos Ramirez",
+    "drug": {
+      "ndc": "00093715801"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 30,
+    "quantityUnit": "tab",
+    "daysSupply": 15,
+    "refills": 1
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "sig",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "quantity_adjusted"
+    },
+    {
+      "field": "daysSupply",
+      "status": "red",
+      "reasonCode": "days_supply_mismatch"
+    },
+    {
+      "field": "refills",
+      "status": "green",
+      "reasonCode": "exact_match"
+    }
+  ],
+  "expectedSummary": {
+    "green": 4,
+    "yellow": 5,
+    "red": 1,
+    "total": 10
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "description": "Prescriber NPI matches exactly but the name is spelled/abbreviated differently.",
+  "source": {
+    "prescriber": {
+      "name": "Jonathan A. Reyes, MD",
+      "npi": "1720345678"
+    }
+  },
+  "entered": {
+    "prescriber": {
+      "name": "Jon Reyes",
+      "npi": "1720345678"
+    }
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "green",
+      "reasonCode": "name_variant"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 1,
+    "yellow": 9,
+    "red": 0,
+    "total": 10
+  }
+}

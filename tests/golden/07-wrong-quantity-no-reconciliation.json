@@ -1,0 +1,77 @@
+{
+  "description": "Quantity differs and does not reconcile with sig-based dosing math.",
+  "source": {
+    "drug": {
+      "ndc": "00071015523"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 60,
+    "quantityUnit": "tab"
+  },
+  "entered": {
+    "drug": {
+      "ndc": "00071015523"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 47,
+    "quantityUnit": "tab"
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "sig",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "quantity",
+      "status": "red",
+      "reasonCode": "quantity_mismatch"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 2,
+    "yellow": 7,
+    "red": 1,
+    "total": 10
+  }
+}

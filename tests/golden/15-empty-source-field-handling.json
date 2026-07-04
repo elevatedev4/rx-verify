@@ -1,0 +1,86 @@
+{
+  "description": "Source is missing several fields entirely; every corresponding verdict is yellow not_provided, never a mismatch.",
+  "source": {
+    "patientName": "Ava Brooks"
+  },
+  "entered": {
+    "patientName": "Ava Brooks",
+    "patientDOB": "02/02/1995",
+    "patientAddress": {
+      "street": "1 Test Way",
+      "city": "Nowhere",
+      "state": "TX",
+      "zip": "75001"
+    },
+    "prescriber": {
+      "name": "Dr. Kim",
+      "npi": "1112223330"
+    },
+    "dateWritten": "07/01/2026",
+    "drug": {
+      "ndc": "00071015523"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 60,
+    "daysSupply": 30,
+    "refills": 2
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 1,
+    "yellow": 9,
+    "red": 0,
+    "total": 10
+  }
+}

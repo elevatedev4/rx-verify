@@ -1,0 +1,67 @@
+{
+  "description": "Sig written in full-word form on one side, abbreviated on the other — semantically equal.",
+  "source": {
+    "sig": "take 1 tablet by mouth twice daily"
+  },
+  "entered": {
+    "sig": "take 1 tab po bid"
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 1,
+    "yellow": 9,
+    "red": 0,
+    "total": 10
+  }
+}

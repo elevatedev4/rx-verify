@@ -1,0 +1,107 @@
+{
+  "description": "Everything matches exactly — all-green baseline.",
+  "source": {
+    "patientName": "John Smith",
+    "patientDOB": "07/02/1980",
+    "patientAddress": {
+      "street": "123 N Main St",
+      "city": "Springfield",
+      "state": "IL",
+      "zip": "62704"
+    },
+    "prescriber": {
+      "name": "Dr. Jane Doe",
+      "npi": "1234567890"
+    },
+    "dateWritten": "07/01/2026",
+    "drug": {
+      "ndc": "00071015523"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 60,
+    "quantityUnit": "tab",
+    "daysSupply": 30,
+    "refills": 2
+  },
+  "entered": {
+    "patientName": "John Smith",
+    "patientDOB": "07/02/1980",
+    "patientAddress": {
+      "street": "123 N Main St",
+      "city": "Springfield",
+      "state": "IL",
+      "zip": "62704"
+    },
+    "prescriber": {
+      "name": "Dr. Jane Doe",
+      "npi": "1234567890"
+    },
+    "dateWritten": "07/01/2026",
+    "drug": {
+      "ndc": "00071015523"
+    },
+    "sig": "take 1 tab po bid",
+    "quantity": 60,
+    "quantityUnit": "tab",
+    "daysSupply": 30,
+    "refills": 2
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientDOB",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientAddress",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "prescriber",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "dateWritten",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "drug",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "sig",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "quantity",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "daysSupply",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "refills",
+      "status": "green",
+      "reasonCode": "exact_match"
+    }
+  ],
+  "expectedSummary": {
+    "green": 10,
+    "yellow": 0,
+    "red": 0,
+    "total": 10
+  }
+}

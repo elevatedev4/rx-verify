@@ -1,0 +1,67 @@
+{
+  "description": "One side has an unparseable/ambiguous sig — needs human review.",
+  "source": {
+    "sig": "use as directed"
+  },
+  "entered": {
+    "sig": "take 1 tab po bid"
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "sig_ambiguous"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 0,
+    "yellow": 10,
+    "red": 0,
+    "total": 10
+  }
+}

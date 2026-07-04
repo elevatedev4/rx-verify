@@ -1,0 +1,71 @@
+{
+  "description": "Same ingredient, different strength — a real contradiction.",
+  "source": {
+    "drug": {
+      "name": "Synthroid 50mcg tablet"
+    }
+  },
+  "entered": {
+    "drug": {
+      "name": "Amlodipine 5mg tablet"
+    }
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "red",
+      "reasonCode": "drug_mismatch"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 0,
+    "yellow": 9,
+    "red": 1,
+    "total": 10
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "description": "Source e-prescription omits days supply (normal NCPDP-optional field).",
+  "source": {
+    "quantity": 30,
+    "refills": 1
+  },
+  "entered": {
+    "quantity": 30,
+    "daysSupply": 30,
+    "refills": 1
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "quantity",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "green",
+      "reasonCode": "exact_match"
+    }
+  ],
+  "expectedSummary": {
+    "green": 2,
+    "yellow": 8,
+    "red": 0,
+    "total": 10
+  }
+}

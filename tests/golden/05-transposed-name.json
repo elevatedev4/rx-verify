@@ -1,0 +1,67 @@
+{
+  "description": "Name order transposed (Last, First vs First Last) — still a match.",
+  "source": {
+    "patientName": "Nguyen, Anh"
+  },
+  "entered": {
+    "patientName": "Anh Nguyen"
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientDOB",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 1,
+    "yellow": 9,
+    "red": 0,
+    "total": 10
+  }
+}

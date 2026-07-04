@@ -1,0 +1,69 @@
+{
+  "description": "Patient first name is a common nickname variant.",
+  "source": {
+    "patientName": "William Turner",
+    "patientDOB": "03/03/1990"
+  },
+  "entered": {
+    "patientName": "Bill Turner",
+    "patientDOB": "03/03/1990"
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "yellow",
+      "reasonCode": "nickname_match"
+    },
+    {
+      "field": "patientDOB",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "quantity",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "daysSupply",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "refills",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    }
+  ],
+  "expectedSummary": {
+    "green": 1,
+    "yellow": 9,
+    "red": 0,
+    "total": 10
+  }
+}

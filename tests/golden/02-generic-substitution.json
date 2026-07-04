@@ -1,0 +1,83 @@
+{
+  "description": "Brand prescribed, generic entered — same ingredient/strength/form.",
+  "source": {
+    "patientName": "Mary Johnson",
+    "patientDOB": "01/15/1975",
+    "drug": {
+      "ndc": "00071015523"
+    },
+    "sig": "take 1 tab po qd",
+    "quantity": 30,
+    "daysSupply": 30,
+    "refills": 3
+  },
+  "entered": {
+    "patientName": "Mary Johnson",
+    "patientDOB": "01/15/1975",
+    "drug": {
+      "ndc": "00093715601"
+    },
+    "sig": "take 1 tab po qd",
+    "quantity": 30,
+    "daysSupply": 30,
+    "refills": 3
+  },
+  "expected": [
+    {
+      "field": "patientName",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientDOB",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "patientAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriber",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "dateWritten",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "generic_substitution"
+    },
+    {
+      "field": "sig",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "quantity",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "daysSupply",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "refills",
+      "status": "green",
+      "reasonCode": "exact_match"
+    }
+  ],
+  "expectedSummary": {
+    "green": 6,
+    "yellow": 4,
+    "red": 0,
+    "total": 10
+  }
+}
