@@ -171,7 +171,10 @@ function foldCase(s: string): string {
  * components for partial-overlap detection.
  */
 export interface ParsedName {
+  /** Full given name, hyphens normalized to spaces ("mary jane"). */
   first: string;
+  /** Hyphenation-tolerant given-name parts, e.g. ["mary", "jane"]. */
+  firstParts: string[];
   last: string;
   /** Hyphenation-tolerant surname parts, e.g. ["garcia", "lopez"]. */
   lastParts: string[];
@@ -224,15 +227,22 @@ export function parseName(raw: string): ParsedName {
     }
   }
 
-  first = first.replace(/-/g, ' ').split(' ')[0] ?? first;
+  // A hyphenated given name ("Mary-Jane") is kept WHOLE, hyphens
+  // normalized to spaces — truncating it to its first component would
+  // silently equate Mary-Jane with Mary (false green).
+  first = first.replace(/-/g, ' ').trim();
   last = last.replace(/-/g, ' ');
 
+  const firstParts = first
+    .split(/[\s]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
   const lastParts = last
     .split(/[\s]+/)
     .map((p) => p.trim())
     .filter(Boolean);
 
-  return { first, last, lastParts, suffix };
+  return { first, firstParts, last, lastParts, suffix };
 }
 
 function canonicalsOf(first: string): Set<string> {
@@ -290,6 +300,34 @@ export function compareNames(
   const a = parseName(sourceRaw);
   const b = parseName(enteredRaw);
 
+  // Whole-name normalized equality first: after case/punctuation/order/
+  // hyphen/title folding, an identical full token sequence is the same
+  // name regardless of how we would have split it into given/middle/
+  // surname ("Mary-Jane Smith" vs "Mary Jane Smith").
+  const fullA = `${a.first} ${a.last}`.trim();
+  const fullB = `${b.first} ${b.last}`.trim();
+  if (fullA && fullA === fullB) {
+    if (a.suffix && b.suffix && a.suffix !== b.suffix) {
+      return {
+        status: 'red',
+        reasonCode: 'suffix_mismatch',
+        explanation: `Generational suffix differs ("${a.suffix}" vs "${b.suffix}") — Jr/Sr/II with the same name usually means a different person.`
+      };
+    }
+    if ((a.suffix === null) !== (b.suffix === null)) {
+      return {
+        status: 'yellow',
+        reasonCode: 'suffix_dropped',
+        explanation: `Name matches but the generational suffix ("${a.suffix ?? b.suffix}") appears on only one side — confirm this is not a Jr/Sr mixup.`
+      };
+    }
+    return {
+      status: 'green',
+      reasonCode: 'exact_match',
+      explanation: 'Name matches exactly after case/punctuation/order normalization.'
+    };
+  }
+
   const surnameLevel = surnameMatchLevel(a, b);
   if (surnameLevel === 'none') {
     return {
@@ -299,13 +337,17 @@ export function compareNames(
     };
   }
 
-  // Classify the first-name relationship.
-  type FirstLevel = 'exact' | 'nickname' | 'fuzzy' | 'mismatch';
+  // Classify the first-name relationship. Full match required for
+  // exact; a shared component of a hyphenated/compound given name
+  // (Mary-Jane vs Mary) is only ever partial — same rule as surnames.
+  type FirstLevel = 'exact' | 'nickname' | 'partial' | 'fuzzy' | 'mismatch';
   let firstLevel: FirstLevel;
   if (a.first === b.first) {
     firstLevel = 'exact';
   } else if (setsIntersect(canonicalsOf(a.first), canonicalsOf(b.first))) {
     firstLevel = 'nickname';
+  } else if (a.firstParts.some((p) => b.firstParts.includes(p))) {
+    firstLevel = 'partial';
   } else if (
     a.first.length >= 3 &&
     b.first.length >= 3 &&
@@ -335,12 +377,42 @@ export function compareNames(
   }
 
   // Partial compound-surname overlap is never green — a shared component
-  // (Garcia-Lopez vs Garcia) needs a human glance.
+  // (Garcia-Lopez vs Garcia) needs a human glance. Distinguish the
+  // middle-name shape ("John Q Smith" vs "John Smith": one side's
+  // surname section is the TAIL of the other's, the extra tokens sit in
+  // front and are almost certainly middle names/initials) from a true
+  // compound-surname partial, and word each accurately.
   if (surnameLevel === 'partial') {
+    const isTail = (shorter: string[], longer: string[]) =>
+      shorter.length < longer.length &&
+      shorter.every((tok, i) => tok === longer[longer.length - shorter.length + i]);
+
+    if (isTail(a.lastParts, b.lastParts) || isTail(b.lastParts, a.lastParts)) {
+      const extra =
+        a.lastParts.length > b.lastParts.length
+          ? a.lastParts.slice(0, a.lastParts.length - b.lastParts.length)
+          : b.lastParts.slice(0, b.lastParts.length - a.lastParts.length);
+      return {
+        status: 'yellow',
+        reasonCode: 'middle_name_present',
+        explanation: `One side includes a middle name/initial ("${extra.join(' ')}") that the other omits; surname and first name otherwise match — likely the same person, verify.`
+      };
+    }
+
     return {
       status: 'yellow',
       reasonCode: 'surname_partial',
       explanation: `Surname "${a.last}" and "${b.last}" share a component but are not identical (compound/hyphenated surname partially matches); needs human review.`
+    };
+  }
+
+  // Partial given-name component match (Mary-Jane vs Mary) is never
+  // green either — same safety rule as partial surnames.
+  if (firstLevel === 'partial') {
+    return {
+      status: 'yellow',
+      reasonCode: 'given_name_partial',
+      explanation: `Given name "${a.first}" and "${b.first}" share a component but are not identical (hyphenated/compound given name partially matches); needs human review.`
     };
   }
 

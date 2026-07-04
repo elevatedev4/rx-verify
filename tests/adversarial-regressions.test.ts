@@ -214,3 +214,67 @@ describe('MINOR 11: prefix-tolerance explanation flags lower confidence', () => 
     expect(r.explanation.toLowerCase()).toContain('lower-confidence');
   });
 });
+
+// --- Residuals from the re-verify pass (2026-07-04) ---
+
+describe('RESIDUAL 1: hyphenated given names must not truncate to a false green', () => {
+  it("reviewer repro: compareNames('Mary-Jane Smith','Mary Smith') is YELLOW given_name_partial", () => {
+    const r = compareNames('Mary-Jane Smith', 'Mary Smith');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('given_name_partial');
+  });
+
+  it('full hyphenated given-name match is still green (hyphen vs space)', () => {
+    const r = compareNames('Mary-Jane Smith', 'Mary Jane Smith');
+    expect(r.status).toBe('green');
+  });
+
+  it('no shared given-name component with matching surname is still red', () => {
+    const r = compareNames('Mary-Jane Smith', 'Peter Smith');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('first_name_mismatch');
+  });
+});
+
+describe('RESIDUAL 2: stated-strength contradiction in free-text drug names', () => {
+  it("reviewer repro: 'Lisinopril 20mg tablet' vs 'Lisinopril 10mg tablet' is RED, not generic_substitution", () => {
+    const r = compareDrugs(
+      { name: 'Lisinopril 20mg tablet' },
+      { name: 'Lisinopril 10mg tablet' },
+      provider
+    );
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('drug_mismatch');
+    expect(r.explanation).toContain('20mg');
+    expect(r.explanation).toContain('10mg');
+  });
+
+  it('strength stated on only one name-resolved side = YELLOW strength_unverified, not a same-strength claim', () => {
+    const r = compareDrugs({ name: 'Lisinopril tablet' }, { name: 'Lisinopril 10mg tablet' }, provider);
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('strength_unverified');
+    expect(r.explanation.toLowerCase()).not.toContain('same ingredient, strength');
+  });
+
+  it('NDC-resolved side counts as strength-verified (no spurious unverified downgrade)', () => {
+    // Source pinned by NDC (Zestril 10mg), entered stated as generic name with strength.
+    const r = compareDrugs({ ndc: '00071015523' }, { name: 'Lisinopril 10mg tablet' }, provider);
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('generic_substitution');
+  });
+});
+
+describe('RESIDUAL 3: middle initials get accurate wording, not compound-surname wording', () => {
+  it("reviewer repro: 'John Q Smith' vs 'John Smith' is YELLOW middle_name_present", () => {
+    const r = compareNames('John Q Smith', 'John Smith');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('middle_name_present');
+    expect(r.explanation.toLowerCase()).toContain('middle name');
+  });
+
+  it('true compound-surname partials keep surname_partial', () => {
+    const r = compareNames('Juan Garcia-Lopez', 'Juan Garcia');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('surname_partial');
+  });
+});

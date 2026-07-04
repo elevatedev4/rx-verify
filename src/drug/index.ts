@@ -203,6 +203,17 @@ export function parseNdc(raw: string): ParsedNdc | null {
   return null;
 }
 
+/**
+ * Extract a strength token ("20mg", "50mcg", "2.5 mg" -> "2.5mg") stated
+ * in a free-text drug name. Returns null when no strength is stated.
+ */
+export function extractStatedStrength(name: string): string | null {
+  const m = /(\d+(?:\.\d+)?)\s*(mcg|mg|ml|g|units?)\b/i.exec(name);
+  if (!m) return null;
+  const unit = (m[2] ?? '').toLowerCase().replace(/^units$/, 'unit');
+  return `${m[1]}${unit}`;
+}
+
 export function compareDrugs(
   sourceRaw: { name?: string; ndc?: string } | null | undefined,
   enteredRaw: { name?: string; ndc?: string } | null | undefined,
@@ -240,8 +251,25 @@ export function compareDrugs(
     };
   }
 
-  const srcConcept = (srcNdc && provider.getConcept(srcNdc.normalized11)) || (src.name && provider.getConcept(src.name)) || null;
-  const entConcept = (entNdc && provider.getConcept(entNdc.normalized11)) || (ent.name && provider.getConcept(ent.name)) || null;
+  // Cross-check strengths STATED in the raw name strings. A free-text
+  // fallback concept lookup keys on the brand/ingredient word, so
+  // "Lisinopril 20mg" and "Lisinopril 10mg" can resolve to the same
+  // fixture concept — the stated strengths must not be allowed to
+  // contradict silently.
+  const srcStatedStrength = src.name ? extractStatedStrength(src.name) : null;
+  const entStatedStrength = ent.name ? extractStatedStrength(ent.name) : null;
+  if (srcStatedStrength && entStatedStrength && srcStatedStrength !== entStatedStrength) {
+    return {
+      status: 'red',
+      reasonCode: 'drug_mismatch',
+      explanation: `Drug does not match: strength stated in the drug names differs (${srcStatedStrength} vs ${entStatedStrength}).`
+    };
+  }
+
+  const srcConceptViaNdc = srcNdc ? provider.getConcept(srcNdc.normalized11) : null;
+  const entConceptViaNdc = entNdc ? provider.getConcept(entNdc.normalized11) : null;
+  const srcConcept = srcConceptViaNdc ?? (src.name ? provider.getConcept(src.name) : null);
+  const entConcept = entConceptViaNdc ?? (ent.name ? provider.getConcept(ent.name) : null);
 
   if (!srcConcept || !entConcept) {
     return {
@@ -251,6 +279,14 @@ export function compareDrugs(
     };
   }
 
+  // A side's strength is VERIFIED if the concept came from an NDC (the
+  // NDC pins the exact product) or its raw name states a strength. A
+  // name-resolved side with no stated strength gives us no basis to
+  // claim "same strength" — that claim must not appear in a verdict.
+  const srcStrengthVerified = srcConceptViaNdc !== null || srcStatedStrength !== null;
+  const entStrengthVerified = entConceptViaNdc !== null || entStatedStrength !== null;
+  const strengthUnverified = !srcStrengthVerified || !entStrengthVerified;
+
   if (srcConcept.rxcui === entConcept.rxcui) {
     // Same concept, but NDCs differ -> package size difference only.
     if (srcNdc && entNdc && srcNdc.labeler === entNdc.labeler && srcNdc.product === entNdc.product) {
@@ -258,6 +294,13 @@ export function compareDrugs(
         status: 'yellow',
         reasonCode: 'pack_size',
         explanation: `Same product (${srcConcept.name}), different package size only.`
+      };
+    }
+    if (strengthUnverified) {
+      return {
+        status: 'yellow',
+        reasonCode: 'strength_unverified',
+        explanation: `Both sides resolve to ${srcConcept.ingredient} ${srcConcept.doseForm}, but one side states no strength, so the strengths cannot be confirmed equal; needs human review.`
       };
     }
     return {
@@ -272,6 +315,13 @@ export function compareDrugs(
     srcConcept.strength === entConcept.strength &&
     srcConcept.doseForm === entConcept.doseForm
   ) {
+    if (strengthUnverified) {
+      return {
+        status: 'yellow',
+        reasonCode: 'strength_unverified',
+        explanation: `Both sides resolve to ${srcConcept.ingredient} ${srcConcept.doseForm}, but one side states no strength, so the strengths cannot be confirmed equal; needs human review.`
+      };
+    }
     return {
       status: 'yellow',
       reasonCode: 'generic_substitution',
