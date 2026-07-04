@@ -42,15 +42,31 @@ function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
 }
 
-function windowYear(twoDigit: number): number {
-  return twoDigit <= 49 ? 2000 + twoDigit : 1900 + twoDigit;
+export interface DateParseOptions {
+  /**
+   * The date being parsed cannot be in the future (e.g. a DOB). When a
+   * 2-digit year windows into a future year, re-window it to the 1900s
+   * instead — "3/5/45" as a DOB means 1945, not 2045.
+   */
+  pastOnly?: boolean;
+  /** Reference year for pastOnly windowing; defaults to the current year. */
+  referenceYear?: number;
+}
+
+function windowYear(twoDigit: number, opts?: DateParseOptions): number {
+  let year = twoDigit <= 49 ? 2000 + twoDigit : 1900 + twoDigit;
+  if (opts?.pastOnly) {
+    const refYear = opts.referenceYear ?? new Date().getFullYear();
+    if (year > refYear) year -= 100;
+  }
+  return year;
 }
 
 /**
  * Parse a free-text date into an ISO "YYYY-MM-DD" string.
  * Returns null if the string cannot be confidently parsed.
  */
-export function parseDate(raw: string): string | null {
+export function parseDate(raw: string, opts?: DateParseOptions): string | null {
   const s = raw.trim();
   if (!s) return null;
 
@@ -70,7 +86,7 @@ export function parseDate(raw: string): string | null {
     const month = Number(m[1]);
     const day = Number(m[2]);
     const rawYear = m[3] as string;
-    const year = rawYear.length === 2 ? windowYear(Number(rawYear)) : Number(rawYear);
+    const year = rawYear.length === 2 ? windowYear(Number(rawYear), opts) : Number(rawYear);
     if (isValidYMD(year, month, day)) return `${year}-${pad2(month)}-${pad2(day)}`;
     return null;
   }
@@ -98,7 +114,8 @@ function isValidYMD(year: number, month: number, day: number): boolean {
 
 export function compareDates(
   sourceRaw: string | null | undefined,
-  enteredRaw: string | null | undefined
+  enteredRaw: string | null | undefined,
+  opts?: DateParseOptions
 ): DateCompareResult {
   const sourceEmpty = !sourceRaw || !sourceRaw.trim();
   const enteredEmpty = !enteredRaw || !enteredRaw.trim();
@@ -118,8 +135,8 @@ export function compareDates(
     };
   }
 
-  const a = parseDate(sourceRaw);
-  const b = parseDate(enteredRaw);
+  const a = parseDate(sourceRaw, opts);
+  const b = parseDate(enteredRaw, opts);
 
   if (!a || !b) {
     return {

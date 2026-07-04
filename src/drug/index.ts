@@ -112,11 +112,25 @@ export class FixtureProvider implements RxNormProvider {
       const rxcui = NDC_TO_RXCUI[normalizedNdc.normalized11];
       if (rxcui) return FIXTURE_CONCEPTS.find((c) => c.rxcui === rxcui) ?? null;
     }
+    // Name lookup requires a whole-string match or a token-boundary
+    // match on the concept's brand/ingredient word. A fragment like
+    // "20mg tablet" must resolve to NOTHING — resolving it to the first
+    // 20mg product in the table would be a false identification.
     const nameFold = ndcOrName.toLowerCase().trim();
-    return (
-      FIXTURE_CONCEPTS.find((c) => c.name.toLowerCase().includes(nameFold) || nameFold.includes(c.name.toLowerCase())) ??
-      null
-    );
+    if (!nameFold) return null;
+
+    const exact = FIXTURE_CONCEPTS.find((c) => c.name.toLowerCase() === nameFold);
+    if (exact) return exact;
+
+    const queryTokens = new Set(nameFold.split(/\s+/));
+    // Prefer a match on the concept's leading brand/ingredient word...
+    const leadMatch = FIXTURE_CONCEPTS.find((c) => {
+      const lead = c.name.toLowerCase().split(' ')[0] ?? '';
+      return lead.length > 0 && queryTokens.has(lead);
+    });
+    if (leadMatch) return leadMatch;
+    // ...then fall back to the generic ingredient as a whole token.
+    return FIXTURE_CONCEPTS.find((c) => queryTokens.has(c.ingredient)) ?? null;
   }
 
   /** Look up which NDCs are known to map to the same concept as `ndc`. */
@@ -141,8 +155,13 @@ export interface ParsedNdc {
  * standard 5-4-2 (11-digit) representation used by pharmacy systems.
  *
  * 10-digit NDCs come in three FDA configurations (4-4-2, 5-3-2, 5-4-1);
- * we detect via dash positions when present, else assume 5-4-2 padding
- * is already 11 digits.
+ * we detect via dash positions when present. A BARE (undelimited)
+ * 10-digit NDC is genuinely ambiguous between those three layouts, so
+ * we refuse to guess and return null — the drug comparison then falls
+ * back to the RxNorm/name path, or a YELLOW "cannot resolve" verdict.
+ * Resolving undelimited 10-digit NDCs correctly requires a labeler-code
+ * length table (FDA labeler registry) — future work, documented here on
+ * purpose.
  */
 export function parseNdc(raw: string): ParsedNdc | null {
   const cleaned = raw.trim();
@@ -177,14 +196,10 @@ export function parseNdc(raw: string): ParsedNdc | null {
       packageCode: digits.slice(9, 11)
     };
   }
-  if (digits.length === 10) {
-    // Assume 5-4-1 as the default 10-digit configuration when no dashes
-    // are present to disambiguate; pad package segment.
-    const labeler = digits.slice(0, 5);
-    const product = digits.slice(5, 9);
-    const pkg = digits.slice(9, 10).padStart(2, '0');
-    return { normalized11: `${labeler}${product}${pkg}`, labeler, product, packageCode: pkg };
-  }
+  // A bare 10-digit NDC is ambiguous (5-4-1 vs 4-4-2 vs 5-3-2). Guessing
+  // a layout risks identifying the WRONG product, which is worse than
+  // not identifying one at all — return null and let the comparison
+  // fall back to the RxNorm/name path (or a YELLOW verdict).
   return null;
 }
 

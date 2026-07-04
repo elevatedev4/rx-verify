@@ -57,14 +57,26 @@ function toNumber(v: string | number | null | undefined): number | null {
  * dose-per-administration and frequency. E.g. sig = 1 tab BID (2/day),
  * source qty 90 (45-day supply) vs entered qty 30 (15-day supply, i.e.
  * a common insurance 90->30 split) both reconcile against the same sig.
+ *
+ * Plausibility bounds (so absurd pairs like 1 vs 1,000,000 never get a
+ * legitimate-difference pass):
+ *  - each implied days supply must be a whole number in [1, 120]
+ *  - the two implied supplies must form a sane split: an integer ratio
+ *    no greater than 6 (covers 90->30, 60->30, 100->50, 90->15, ...)
+ * Anything outside these bounds is NOT a recognized split and falls
+ * through to RED quantity_mismatch.
  */
+const MAX_PLAUSIBLE_DAYS_SUPPLY = 120;
+const MAX_SPLIT_RATIO = 6;
+
 function reconcilesViaSigSplit(
   sourceQty: number,
   enteredQty: number,
   sig: ParsedSig | null
 ): { reconciles: boolean; sourceDays: number | null; enteredDays: number | null } {
+  const no = { reconciles: false, sourceDays: null, enteredDays: null };
   if (!sig || sig.doseCount === null || sig.timesPerDay === null || sig.doseCount <= 0 || sig.timesPerDay <= 0) {
-    return { reconciles: false, sourceDays: null, enteredDays: null };
+    return no;
   }
   const perDay = sig.doseCount * sig.timesPerDay;
   const sourceDaysRaw = sourceQty / perDay;
@@ -72,10 +84,18 @@ function reconcilesViaSigSplit(
 
   const isWholeish = (n: number) => Math.abs(n - Math.round(n)) < 0.05;
 
-  if (isWholeish(sourceDaysRaw) && isWholeish(enteredDaysRaw)) {
-    return { reconciles: true, sourceDays: Math.round(sourceDaysRaw), enteredDays: Math.round(enteredDaysRaw) };
-  }
-  return { reconciles: false, sourceDays: null, enteredDays: null };
+  if (!isWholeish(sourceDaysRaw) || !isWholeish(enteredDaysRaw)) return no;
+
+  const sourceDays = Math.round(sourceDaysRaw);
+  const enteredDays = Math.round(enteredDaysRaw);
+
+  if (sourceDays < 1 || sourceDays > MAX_PLAUSIBLE_DAYS_SUPPLY) return no;
+  if (enteredDays < 1 || enteredDays > MAX_PLAUSIBLE_DAYS_SUPPLY) return no;
+
+  const ratio = Math.max(sourceDays, enteredDays) / Math.min(sourceDays, enteredDays);
+  if (!isWholeish(ratio) || ratio > MAX_SPLIT_RATIO) return no;
+
+  return { reconciles: true, sourceDays, enteredDays };
 }
 
 export function compareQuantity(

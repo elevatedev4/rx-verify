@@ -31,6 +31,13 @@ export interface ParsedSig {
   durationDays: number | null;
   /** true if we could not confidently extract enough structure. */
   ambiguous: boolean;
+  /**
+   * true if the sig contains a token that LOOKS like a frequency
+   * abbreviation (q-something) but is not in our table. Safety rule:
+   * an unrecognized frequency token means the comparison is
+   * indeterminate — never silently skipped.
+   */
+  hasUnrecognizedFreqToken: boolean;
 }
 
 const ROUTE_MAP: Record<string, string> = {
@@ -46,6 +53,7 @@ const ROUTE_MAP: Record<string, string> = {
 /** Frequency abbreviations -> times per day. */
 const FREQ_MAP: Record<string, number> = {
   qd: 1, 'q.d.': 1, daily: 1, qam: 1, qpm: 1, qhs: 1, hs: 1,
+  qod: 0.5, 'q.o.d.': 0.5, // every other day
   bid: 2, 'b.i.d.': 2, 'twice daily': 2, 'twice a day': 2,
   tid: 3, 't.i.d.': 3, 'three times daily': 3, 'three times a day': 3,
   qid: 4, 'q.i.d.': 4, 'four times daily': 4, 'four times a day': 4,
@@ -70,6 +78,8 @@ const ROMAN_MAP: Record<string, number> = {
 const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   [/\bby mouth\b/g, 'po'],
   [/\bas needed\b/g, 'prn'],
+  [/\bevery other day\b/g, 'qod'],
+  [/\b(every day|once a day|once daily|each day)\b/g, 'daily'],
   [/\btwice (a day|daily)\b/g, 'bid'],
   [/\bthree times (a day|daily)\b/g, 'tid'],
   [/\bfour times (a day|daily)\b/g, 'qid']
@@ -82,7 +92,7 @@ function preprocess(raw: string): string {
   }
   // Normalize common punctuation variants of abbreviations away, but
   // keep decimal points in numbers.
-  s = s.replace(/q\.d\./g, 'qd').replace(/b\.i\.d\./g, 'bid').replace(/t\.i\.d\./g, 'tid').replace(/q\.i\.d\./g, 'qid');
+  s = s.replace(/q\.o\.d\./g, 'qod').replace(/q\.d\./g, 'qd').replace(/b\.i\.d\./g, 'bid').replace(/t\.i\.d\./g, 'tid').replace(/q\.i\.d\./g, 'qid');
   s = s.replace(/p\.o\./g, 'po').replace(/p\.r\.n\./g, 'prn');
   s = s.replace(/["“”]/g, '');
   return s;
@@ -157,12 +167,21 @@ export function parseSig(raw: string): ParsedSig {
   const timesPerDay = extractFrequency(tokens);
   const prn = extractPrn(tokens);
 
+  // Detect frequency-LOOKING tokens we don't recognize (e.g. "q5h",
+  // a misspelled "qhd"). These make the frequency indeterminate.
+  const hasUnrecognizedFreqToken = tokens.some(
+    (t) =>
+      /^q[a-z0-9]+$/.test(t) &&
+      FREQ_MAP[t] === undefined &&
+      ROUTE_MAP[t] === undefined
+  );
+
   // Ambiguous if we're missing dose count AND route AND frequency —
   // i.e. we extracted essentially nothing structural.
   const foundCount = [doseCount, route, timesPerDay].filter((v) => v !== null).length;
   const ambiguous = foundCount === 0;
 
-  return { doseCount, doseUnit, route, timesPerDay, prn, durationDays, ambiguous };
+  return { doseCount, doseUnit, route, timesPerDay, prn, durationDays, ambiguous, hasUnrecognizedFreqToken };
 }
 
 export function compareSigs(
@@ -198,16 +217,41 @@ export function compareSigs(
     };
   }
 
+  if (a.hasUnrecognizedFreqToken || b.hasUnrecognizedFreqToken) {
+    return {
+      status: 'yellow',
+      reasonCode: 'sig_ambiguous',
+      explanation: `One or both sigs contain a frequency-like token this engine does not recognize ("${sourceRaw}" / "${enteredRaw}"); the frequency comparison is indeterminate — needs human review.`
+    };
+  }
+
+  // Compare each extracted component. Safety rule: if one side parsed a
+  // component and the other side did not, that component's comparison is
+  // INDETERMINATE — the answer is YELLOW, never a silent skip to green.
+  // (Exception per spec: dose unit missing on one side carries no
+  // penalty — sigs routinely omit "tab"/"cap" without ambiguity.)
   const mismatches: string[] = [];
-  if (a.doseCount !== null && b.doseCount !== null && a.doseCount !== b.doseCount) {
-    mismatches.push(`dose count ${a.doseCount} vs ${b.doseCount}`);
+  const indeterminate: string[] = [];
+
+  const checkComponent = (label: string, va: number | string | null, vb: number | string | null) => {
+    if (va !== null && vb !== null) {
+      if (va !== vb) mismatches.push(`${label} ${va} vs ${vb}`);
+    } else if (va !== null || vb !== null) {
+      indeterminate.push(label);
+    }
+  };
+
+  checkComponent('dose count', a.doseCount, b.doseCount);
+  checkComponent('route', a.route, b.route);
+  checkComponent('frequency (per day)', a.timesPerDay, b.timesPerDay);
+  checkComponent('duration (days)', a.durationDays, b.durationDays);
+
+  // Dose unit: both present and different (tab vs cap = different dose
+  // forms) = contradiction; one side missing = no penalty.
+  if (a.doseUnit !== null && b.doseUnit !== null && a.doseUnit !== b.doseUnit) {
+    mismatches.push(`dose unit ${a.doseUnit} vs ${b.doseUnit}`);
   }
-  if (a.route !== null && b.route !== null && a.route !== b.route) {
-    mismatches.push(`route ${a.route} vs ${b.route}`);
-  }
-  if (a.timesPerDay !== null && b.timesPerDay !== null && a.timesPerDay !== b.timesPerDay) {
-    mismatches.push(`frequency ${a.timesPerDay}x/day vs ${b.timesPerDay}x/day`);
-  }
+
   if (a.prn !== b.prn) {
     mismatches.push(`PRN flag ${a.prn} vs ${b.prn}`);
   }
@@ -217,6 +261,14 @@ export function compareSigs(
       status: 'red',
       reasonCode: 'sig_mismatch',
       explanation: `Sig instructions contradict after expansion: ${mismatches.join('; ')}.`
+    };
+  }
+
+  if (indeterminate.length > 0) {
+    return {
+      status: 'yellow',
+      reasonCode: 'sig_ambiguous',
+      explanation: `Only one side specifies ${indeterminate.join(', ')} — the comparison for ${indeterminate.length === 1 ? 'that component' : 'those components'} is indeterminate; needs human review.`
     };
   }
 

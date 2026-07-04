@@ -28,7 +28,9 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
   const enteredSigParsed = entered.sig ? parseSig(entered.sig) : null;
 
   const nameResult = compareNames(source.patientName, entered.patientName);
-  const dobResult = compareDates(source.patientDOB, entered.patientDOB);
+  // DOB is pastOnly: a 2-digit year that would window into the future
+  // (e.g. "3/5/45" -> 2045) re-windows to the 1900s instead.
+  const dobResult = compareDates(source.patientDOB, entered.patientDOB, { pastOnly: true });
   const addressResult = compareAddresses(source.patientAddress, entered.patientAddress);
   const prescriberResult = comparePrescriber(source.prescriber, entered.prescriber);
   const dateWrittenResult = compareDates(source.dateWritten, entered.dateWritten);
