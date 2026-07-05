@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- .NET 8 WPF, Windows-only (UI Automation + WPF are Windows APIs). -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RxVerifyOverlay</RootNamespace>
+    <AssemblyName>RxVerifyOverlay</AssemblyName>
+    <!-- Add <ApplicationIcon>Assets\rxverify.ico</ApplicationIcon> once you
+         have a real icon file; omitted for v0 so the project builds as-is. -->
+    <!--
+      This app reads the local screen (via UI Automation) and calls a
+      local Node subprocess. It never opens a socket, never calls a
+      remote API, and never writes PHI to disk except the optional
+      debug tree-dump file the pharmacist explicitly triggers. See
+      README.md "Local-only, by construction" for the full audit.
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- FlaUI wraps UIA2/UIA3 COM interop with a much friendlier, more
+         testable API than raw System.Windows.Automation, and its
+         RawViewWalker is exactly what we need to read PioneerRx's
+         Not-Focusable text nodes (see Uia/UiaTreeWalker.cs). -->
+    <PackageReference Include="FlaUI.Core" Version="4.0.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+  </ItemGroup>
+
+</Project>

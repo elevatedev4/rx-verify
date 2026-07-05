@@ -79,6 +79,7 @@ refactor can't silently break it.
 | Quantity / days supply / refills / prescriber | `src/quantity/index.ts` | Unit normalization, sig-math reconciliation for quantity splits, NPI-based prescriber compare |
 | Engine | `src/engine/index.ts` | `verify(source, entered, provider)` → ordered `FieldVerdict[]` + summary counts |
 | Types | `src/types.ts` | Shared, JSON-serializable data shapes; `FIELD_ORDER` |
+| CLI wrapper | `src/cli.ts` | stdin/stdout JSON wrapper for non-Node hosts (see `overlay/`) — the one sanctioned Node-specific file in this repo |
 
 Golden end-to-end scenarios live in `tests/golden/*.json` and are
 exercised by `tests/golden.test.ts`. `scripts/gen-golden.ts` is a dev-only
@@ -116,6 +117,11 @@ ported directly or run behind a sidecar process):
   any comparison/normalization logic.
 - All inputs and outputs (`ScriptData`, `EnteredData`, `FieldVerdict[]`)
   are plain, JSON-serializable objects.
+- The one deliberate exception is `src/cli.ts`, which *does* use
+  Node's stdin/stdout (`process.stdin`/`process.stdout`) — that's the
+  sanctioned integration seam for non-Node hosts (see `overlay/`) and
+  is intentionally kept separate from the pure comparison/normalization
+  modules above.
 
 ## Development
 
@@ -144,20 +150,42 @@ npm run build      # emit dist/
   does not do fuzzy string distance on the street line beyond suffix/
   directional/unit normalization.
 
-## Suggested next steps (P0b)
+## CLI entrypoint for non-Node hosts
 
-1. Wire the real RxNorm provider (owner: create UTS account).
-2. Build the Windows overlay host: watch PioneerRx's on-screen fields
-   (or its DB/API if available), assemble a `ScriptData`/`EnteredData`
-   pair per field as the tech types, and call `verify()` live.
-2a. Decide the source-of-truth transport for `ScriptData` (direct
-    e-prescription feed vs. a queue) — this is a product decision, not an
-    engine one.
-3. Render the fixed-order verdict list in the overlay UI with the
-   reason code + explanation surfaced per field (not just a color).
-4. Add telemetry/logging (synthetic-safe — no PHI) to see which reason
+`src/cli.ts` (built to `dist/cli.js`) is a thin stdin/stdout JSON
+wrapper around `verify()`: send `{ "source": ScriptData, "entered":
+EnteredData }` as JSON on stdin, get a `VerifyResult` JSON back on
+stdout. It exists so a host written in another language (see
+`overlay/`) can call this engine as a local subprocess without
+reimplementing any of its logic. See `overlay/README.md` "Why the
+engine is a subprocess, not a port" for the reasoning, and
+`tests/cli.test.ts` for the contract it's tested against.
+
+## P0b: the Windows overlay — now underway
+
+`overlay/` contains a first-draft .NET/WPF + FlaUI Windows app that
+reads PioneerRx's fields via UI Automation and renders this engine's
+verdicts always-on-top, in the fixed field order, per the phase-0 spec.
+**It has not been run against a live PioneerRx window** (built without
+Windows/UIA access) — see `overlay/README.md` for what's implemented,
+what's known-uncertain (the UIA label/geometry guesses), and the
+"Dump UIA Tree" debug workflow for validating/adjusting it on a real
+workstation.
+
+Remaining suggested next steps:
+
+1. Validate/adjust `overlay/RxVerifyOverlay/Uia/FieldMap.cs` and
+   `PioneerRxWindow.cs` against a live PioneerRx window (see
+   `overlay/README.md` "If fields read wrong").
+2. Wire the real RxNorm provider (owner: create UTS account) — swap it
+   into `src/cli.ts`'s `FixtureProvider` construction; no other engine
+   or overlay code changes.
+3. Add telemetry/logging (synthetic-safe — no PHI) to see which reason
    codes fire most often in real use, to prioritize round 2 of the
    nickname table, sig abbreviations, and address suffix table.
-5. Decide on an audit trail: does a pharmacist's override of a red/yellow
+4. Decide on an audit trail: does a pharmacist's override of a red/yellow
    verdict need to be recorded? (Likely yes, for compliance — worth a
-   product conversation before P0b starts.)
+   product conversation before a real pilot starts.)
+5. OCR for the faxed/scanned-script slice (small % of volume, deferred
+   per the phase-0 spec) — see `overlay/README.md` "Deferred".
+6. Installer/signing/packaging once the overlay is validated live.
