@@ -15,11 +15,14 @@
  * on success, or on failure:
  *   { "error": string }  (also printed to stderr) with exit code 1.
  *
- * NOTE ON DRUG DATA: this CLI currently wires in FixtureProvider (see
- * src/drug/index.ts) — ~20 synthetic brand/generic concepts. Swapping in
- * real RxNorm data is an owner task (free NLM UTS account) documented in
- * the main README; once a real RxNormProvider exists, swap it in below —
- * nothing else in this file needs to change.
+ * NOTE ON DRUG DATA: this CLI wires in LocalNdcProvider (see
+ * src/drug/index.ts) — a real, local, offline dataset derived from the
+ * public openFDA NDC directory (data/ndc-data.json.gz). It makes zero
+ * network calls at lookup time. Precise RxNorm-rxcui equivalence (vs.
+ * LocalNdcProvider's ingredient+strength+form approximation) is a
+ * documented follow-on owner task (free NLM UTS account) — see the
+ * header comment in src/drug/index.ts; once a real RxNormProvider
+ * exists, swap it in below — nothing else in this file needs to change.
  *
  * This file intentionally does the minimum possible: read all of stdin,
  * JSON.parse, call verify(), JSON.stringify the result to stdout. No
@@ -29,7 +32,7 @@
  */
 
 import { verify } from './engine/index.js';
-import { FixtureProvider } from './drug/index.js';
+import { LocalNdcProvider } from './drug/index.js';
 import type { ScriptData, EnteredData } from './types.js';
 
 interface CliInput {
@@ -70,7 +73,7 @@ async function main(): Promise<void> {
   }
 
   const { source, entered } = parsed as CliInput;
-  const provider = new FixtureProvider();
+  const provider = new LocalNdcProvider();
   const result = verify(source, entered, provider);
 
   process.stdout.write(JSON.stringify(result));

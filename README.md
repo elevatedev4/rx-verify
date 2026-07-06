@@ -9,13 +9,22 @@ library today. P0b will embed it in a Windows overlay app that watches
 PioneerRx and shows these verdicts live during data entry (see "Next
 steps" below).
 
-## ⚠️ SYNTHETIC DATA ONLY
+## ⚠️ SYNTHETIC DATA ONLY (patient/prescriber) — with one explicit exception
 
-Every name, DOB, address, NPI, and NDC anywhere in this repository —
-source, fixtures, tests, golden vectors — is fabricated. **No real
-patient, prescriber, or prescription data may ever be committed here**,
-in a test, in a comment, or in a fixture. If you're adding a test case,
+Every name, DOB, address, NPI anywhere in this repository — source,
+fixtures, tests, golden vectors — is fabricated. **No real patient,
+prescriber, or prescription data may ever be committed here**, in a
+test, in a comment, or in a fixture. If you're adding a test case,
 invent the data; don't copy it from anywhere real.
+
+**Exception, deliberate and scoped:** `data/ndc-data.json.gz` and the
+real NDCs referenced in `tests/local-ndc-provider.test.ts` are **public
+FDA drug-reference data** (product/ingredient/strength/dosage-form —
+openFDA NDC directory, public domain, no patient involved anywhere).
+This is drug catalog data, not PHI, and is what lets the engine
+identify real drugs offline (see "Drug data: LocalNdcProvider" below).
+It does not relax the rule above for patient/prescriber/prescription
+data — that rule still applies to everything else in this repo.
 
 ## Verdict philosophy
 
@@ -75,7 +84,7 @@ refactor can't silently break it.
 | Date normalization | `src/normalize/date.ts` | MM/DD/YYYY, M/D/YY, ISO, "Jul 2, 2026" → ISO; DOB/date-written comparison |
 | Address normalization | `src/normalize/address.ts` | USPS street-suffix/directional/unit abbreviation tables, component compare |
 | Sig parsing/comparison | `src/sig/index.ts` | Abbreviation expansion (route, frequency, PRN, duration, roman-numeral doses), structural comparison |
-| Drug identity | `src/drug/index.ts` | `RxNormProvider` interface, `FixtureProvider` (20 synthetic concepts), NDC parser (10/11-digit) |
+| Drug identity | `src/drug/index.ts` | `RxNormProvider` interface, `LocalNdcProvider` (real, local, offline — see below), `FixtureProvider` (20 synthetic concepts, tests only), NDC parser (10/11-digit) |
 | Quantity / days supply / refills / prescriber | `src/quantity/index.ts` | Unit normalization, sig-math reconciliation for quantity splits, NPI-based prescriber compare |
 | Engine | `src/engine/index.ts` | `verify(source, entered, provider)` → ordered `FieldVerdict[]` + summary counts |
 | Types | `src/types.ts` | Shared, JSON-serializable data shapes; `FIELD_ORDER` |
@@ -86,26 +95,62 @@ exercised by `tests/golden.test.ts`. `scripts/gen-golden.ts` is a dev-only
 generator used to produce those fixtures from scenario definitions run
 through the real engine (not part of the published package).
 
-## Swapping in real RxNorm data
+## Drug data: LocalNdcProvider (real, local, offline)
 
-`FixtureProvider` in `src/drug/index.ts` is a stand-in with ~20
-synthetic-but-realistic drug concepts (brand/generic pairs like
-Zestril/lisinopril, Lipitor/atorvastatin, Synthroid/levothyroxine,
-Glucophage/metformin, plus amoxicillin, azithromycin, and others). It
-exists purely so the drug-matching logic has something deterministic to
-test against.
+`src/cli.ts` wires in `LocalNdcProvider` (`src/drug/index.ts`) — a real
+drug dataset derived from the public **openFDA NDC directory**
+(~134k products / ~251k package NDCs), bundled as
+`data/ndc-data.json.gz` (~4MB, committed to the repo) and loaded into an
+in-memory `Map` once per process. **Zero network calls happen at lookup
+time** — this preserves the HIPAA local-only guarantee for verification.
 
-To go live:
+`FixtureProvider` (also in `src/drug/index.ts`) still exists as a small
+~20-concept synthetic stand-in, used only by `tests/drug.test.ts` and
+`scripts/gen-golden.ts` for deterministic golden-vector generation.
+
+### Refreshing the dataset
+
+`scripts/build-drug-data.ts` is a **build-time-only, maintainer-run**
+script — the one place in this repo that's allowed to touch the
+network. It downloads the openFDA NDC bulk file, extracts it (needs
+`unzip` on PATH), transforms it into the compact `LocalConcept` shape
+(see `src/drug/local-data-format.ts`), and writes
+`data/ndc-data.json.gz`. Run it with:
+
+```bash
+npx tsx scripts/build-drug-data.ts
+```
+
+Re-run it periodically to pick up new/changed NDCs from openFDA; commit
+the regenerated `data/ndc-data.json.gz`.
+
+### Generic-equivalence approximation (documented limitation)
+
+openFDA's NDC directory doesn't carry one reliable RxNorm CUI per
+product, so `LocalNdcProvider` derives an approximate equivalence key
+(`deriveRxcui` in `src/drug/local-data-format.ts`) from the normalized
+ingredient-set + per-ingredient strength + dosage form, and puts it in
+`RxConcept.rxcui`. This drives the same `generic_substitution`/
+`pack_size` logic in `compareDrugs` that the fixture's real-ish `rxcui`
+values did. It's coarser than real RxNorm (e.g. it treats
+"atorvastatin" and "atorvastatin calcium trihydrate" as different
+ingredients, since they're different strings, even though they're the
+same drug via different salt forms) — but it can only ever fail toward
+*more* yellow/red, never a false green, so it's safe under this
+engine's verdict philosophy.
+
+### Precise RxNorm equivalence — owner follow-on, not done here
 
 1. Create a free NLM UTS (UMLS Terminology Services) account —
    https://uts.nlm.nih.gov/uts/signup-login. **This is an owner task**
    (requires an individual sign-up), not something a subagent can do.
 2. Pull the RxNorm data files (RXNCONSO.RRF, RXNSAT.RRF, etc.) or use the
-   RxNorm REST API.
+   RxNorm REST API (build-time-only fetch, same offline-at-runtime rule
+   as above).
 3. Implement `RxNormProvider` (`getConcept(ndcOrName): RxConcept | null`)
-   against that real data.
+   against that real data, with a real per-product rxcui.
 4. Pass the new provider into `verify(source, entered, provider)` in
-   place of `FixtureProvider`. No other engine code changes.
+   place of `LocalNdcProvider`. No other engine code changes.
 
 ## Portability
 
@@ -114,7 +159,11 @@ ported directly or run behind a sidecar process):
 
 - Zero runtime dependencies.
 - Pure functions only — no Node-specific APIs (`fs`, `process`, etc.) in
-  any comparison/normalization logic.
+  any comparison/normalization logic. `LocalNdcProvider` is the one
+  deliberate exception (like `src/cli.ts`) — it uses `node:fs`/
+  `node:zlib` to load the bundled dataset; a future non-Node host would
+  reimplement that one class against the same `data/ndc-data.json.gz`
+  file, not the comparison logic.
 - All inputs and outputs (`ScriptData`, `EnteredData`, `FieldVerdict[]`)
   are plain, JSON-serializable objects.
 - The one deliberate exception is `src/cli.ts`, which *does* use
@@ -134,10 +183,12 @@ npm run build      # emit dist/
 
 ## Status / what's stubbed
 
-- `FixtureProvider` (drug identity) is intentionally a fixture, not real
-  RxNorm data — see "Swapping in real RxNorm data" above. This is the
-  single biggest thing standing between this engine and real-world drug
-  matching.
+- `LocalNdcProvider` (drug identity) is real, local, offline openFDA
+  data, but its generic-equivalence key is an approximation, not real
+  RxNorm — see "Generic-equivalence approximation" above. It also only
+  resolves via NDC, not free-text drug name (a name-only side falls
+  through to `unknown_drug` yellow rather than guessing — see the class
+  comment in `src/drug/index.ts`).
 - Nickname table covers ~100 common US first-name pairs; it is not
   exhaustive. Unrecognized nicknames fall through to a light
   prefix-based fuzzy check, and failing that, a `red` surname-based
@@ -177,8 +228,8 @@ Remaining suggested next steps:
 1. Validate/adjust `overlay/RxVerifyOverlay/Uia/FieldMap.cs` and
    `PioneerRxWindow.cs` against a live PioneerRx window (see
    `overlay/README.md` "If fields read wrong").
-2. Wire the real RxNorm provider (owner: create UTS account) — swap it
-   into `src/cli.ts`'s `FixtureProvider` construction; no other engine
+2. Wire a precise RxNorm provider (owner: create UTS account) — swap it
+   into `src/cli.ts`'s `LocalNdcProvider` construction; no other engine
    or overlay code changes.
 3. Add telemetry/logging (synthetic-safe — no PHI) to see which reason
    codes fire most often in real use, to prioritize round 2 of the

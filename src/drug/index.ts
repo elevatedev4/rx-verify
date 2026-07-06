@@ -1,15 +1,41 @@
 /**
  * Drug identity comparison.
  *
- * RxNormProvider is an INTERFACE. FixtureProvider below embeds ~20
- * synthetic-but-realistic concepts for development and tests.
+ * RxNormProvider is an INTERFACE.
+ *  - FixtureProvider: ~20 synthetic-but-realistic concepts, for tests
+ *    and dev (fixture-only rxcui/NDC values, never real).
+ *  - LocalNdcProvider: the REAL provider, backed by a local, offline,
+ *    pre-built dataset derived from the public openFDA NDC directory
+ *    (see data/ndc-data.json.gz + scripts/build-drug-data.ts). This is
+ *    what src/cli.ts wires up. It makes ZERO network calls at lookup
+ *    time — the dataset is downloaded/transformed by
+ *    scripts/build-drug-data.ts (a maintainer-run, build-time-only
+ *    script), committed to the repo, and loaded into an in-memory Map
+ *    once per process. This preserves the HIPAA local-only guarantee:
+ *    verifying a prescription never touches the network.
  *
- * TO SWAP IN REAL DATA LATER (owner task): implement RxNormProvider
- * against the actual NLM RxNorm RRF files (RXNCONSO.RRF / RXNSAT.RRF etc,
- * or the RxNorm REST API). That requires a free UTS (UMLS Terminology
- * Services) account — https://uts.nlm.nih.gov/uts/signup-login. Once
- * that provider exists, pass it into `verify()` in place of
- * FixtureProvider; no other engine code changes.
+ * GENERIC-EQUIVALENCE APPROXIMATION (LocalNdcProvider only): openFDA's
+ * NDC directory doesn't carry a reliable single RxNorm CUI per product,
+ * so LocalNdcProvider derives an approximate equivalence key from the
+ * normalized ingredient-set + per-ingredient strength + dosage form
+ * (see deriveRxcui in src/drug/local-data-format.ts) and uses that in
+ * RxConcept.rxcui. This is intentionally NOT real RxNorm-rxcui
+ * equivalence — it will, for example, treat "atorvastatin" and
+ * "atorvastatin calcium trihydrate" as different ingredients (they are
+ * different strings) even though they're the same drug via different
+ * salt forms. That's a real limitation, not a bug: it can only ever
+ * fail toward MORE yellow (drug_mismatch/unknown), never a false green,
+ * so it's safe for this engine's philosophy even though it's coarser
+ * than real RxNorm.
+ *
+ * TO GET PRECISE RXNORM EQUIVALENCE LATER (owner task, follow-on):
+ * implement a provider against the actual NLM RxNorm RRF files
+ * (RXNCONSO.RRF / RXNSAT.RRF etc, or the RxNorm REST API — note the
+ * REST API would need a build-time-only fetch too, same offline rule
+ * as above). That requires a free UTS (UMLS Terminology Services)
+ * account — https://uts.nlm.nih.gov/uts/signup-login. Once that
+ * provider exists, pass it into `verify()` in place of
+ * LocalNdcProvider; no other engine code changes.
  *
  * Verdict philosophy:
  *  - identical NDC = GREEN
@@ -18,6 +44,12 @@
  *  - same product, different package size only = YELLOW pack_size
  *  - different ingredient OR strength OR form = RED
  */
+
+import { readFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { deriveRxcui, deriveName, type LocalConcept, type LocalDrugData } from './local-data-format.js';
 
 export type DrugCompareStatus = 'green' | 'yellow' | 'red';
 
@@ -138,6 +170,80 @@ export class FixtureProvider implements RxNormProvider {
     return Object.entries(NDC_TO_RXCUI)
       .filter(([, v]) => v === rxcui)
       .map(([k]) => k);
+  }
+}
+
+/**
+ * Loaded once per process and cached at module scope — the dataset is
+ * ~130k concepts / ~250k NDCs, and every LocalNdcProvider instance
+ * (e.g. one per test) should share it rather than re-parsing gzipped
+ * JSON repeatedly.
+ */
+let cachedDataset: { concepts: LocalConcept[]; ndcIndex: Map<string, number> } | null = null;
+
+function defaultDataPath(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  // here = <repo>/src/drug (dev, via tsx) or <repo>/dist/drug (built) —
+  // both are two directories below the repo root, so the relative path
+  // back up to data/ is the same in both cases.
+  return path.join(here, '..', '..', 'data', 'ndc-data.json.gz');
+}
+
+function loadDataset(dataPath: string): { concepts: LocalConcept[]; ndcIndex: Map<string, number> } {
+  const gz = readFileSync(dataPath);
+  const json = gunzipSync(gz).toString('utf8');
+  const parsed = JSON.parse(json) as LocalDrugData;
+  const ndcIndex = new Map<string, number>(Object.entries(parsed.ndcIndex));
+  return { concepts: parsed.concepts, ndcIndex };
+}
+
+/**
+ * REAL, LOCAL, OFFLINE drug provider backed by the bundled openFDA NDC
+ * dataset (data/ndc-data.json.gz). Reads the file ONCE into an
+ * in-memory Map at construction (or on first use, cached at module
+ * scope) — every `getConcept` call afterward is a plain Map lookup.
+ * ZERO network calls happen anywhere in this class or its callers.
+ *
+ * Name-based (non-NDC) lookup is intentionally NOT implemented here: a
+ * real e-prescription/PioneerRx comparison almost always carries an
+ * NDC, and building free-text matching against ~130k noisy openFDA
+ * generic/brand strings risks a wrong match (a false green) if done
+ * carelessly. Returning null for a name-only query is the conservative
+ * choice — it falls through to the engine's existing `unknown_drug`
+ * yellow verdict rather than guessing. Follow-on: a real name-search
+ * index (tokenized, ingredient-aware) could remove this gap; flagged,
+ * not implemented now.
+ */
+export class LocalNdcProvider implements RxNormProvider {
+  private readonly concepts: LocalConcept[];
+  private readonly ndcIndex: Map<string, number>;
+
+  constructor(dataPath?: string) {
+    const isDefaultPath = dataPath === undefined;
+    const resolvedPath = dataPath ?? defaultDataPath();
+    // Only share the module-level cache for the default path, so a
+    // test that points at a custom fixture file never sees stale data
+    // from a previous default-path load (and vice versa).
+    const dataset = isDefaultPath && cachedDataset ? cachedDataset : loadDataset(resolvedPath);
+    if (isDefaultPath) cachedDataset = dataset;
+    this.concepts = dataset.concepts;
+    this.ndcIndex = dataset.ndcIndex;
+  }
+
+  getConcept(ndcOrName: string): RxConcept | null {
+    const parsed = parseNdc(ndcOrName);
+    if (!parsed) return null;
+    const index = this.ndcIndex.get(parsed.normalized11);
+    if (index === undefined) return null;
+    const concept = this.concepts[index];
+    if (!concept) return null;
+    return {
+      rxcui: deriveRxcui(concept),
+      name: deriveName(concept),
+      ingredient: concept.ingredient,
+      strength: concept.strength,
+      doseForm: concept.doseForm
+    };
   }
 }
 
