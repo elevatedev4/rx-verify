@@ -31,7 +31,7 @@
         <SolidColorBrush x:Key="GrayBrush" Color="#FF555555" />
 
         <!-- Muted/dark variants of the same hues for the WHOLE category
-             box background (not just the header strip) -- full-strength
+             box background (not just the header strip); full-strength
              GreenBrush/YellowBrush/RedBrush across an entire card would
              wash out the white row text, so the box uses a darker tint of
              the same color while the header keeps the bold version. -->
@@ -138,7 +138,7 @@
                                 only the header strip was colored, so a
                                 Red/Yellow field buried in the row list below
                                 could be missed at a glance). NO DATA (HasData
-                                =false) renders GRAY, never green -- green
+                                =false) renders GRAY, never green; green
                                 means "data present AND matches", not "nothing
                                 to complain about yet".
                             -->
