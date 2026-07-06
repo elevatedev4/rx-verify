@@ -1,3 +1,4 @@
+using System;
 using System.Drawing;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;

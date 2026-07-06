@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Text;
 using FlaUI.Core.AutomationElements;
@@ -216,7 +218,7 @@ public sealed class UiaTreeWalker
 
         try { name = element.Name ?? "<null>"; } catch { }
         try { controlType = element.ControlType.ToString(); } catch { }
-        try { focusable = element.IsKeyboardFocusable; } catch { }
+        try { focusable = element.Properties.IsKeyboardFocusable.ValueOrDefault; } catch { }
         try { rect = element.BoundingRectangle.ToString(); } catch { }
         try { automationId = element.AutomationId ?? "<null>"; } catch { }
 
