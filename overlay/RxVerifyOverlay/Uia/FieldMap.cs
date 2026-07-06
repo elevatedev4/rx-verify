@@ -96,6 +96,27 @@ public static class FieldMap
     /// <summary>The Tree control itself. Search for it by AutomationId anywhere under the window — do NOT hardcode the ancestor chain (cntEscript/uxEscriptViewer/uxTabControl/EscriptEPCS/...), the Escript tab renders lazily and may not exist at all if that tab has never been opened.</summary>
     public const string EscriptTreeAutomationId = "ux10Dot6Escript";
 
+    /// <summary>
+    /// The center content tab strip — the Dispense [1] / Image [2] /
+    /// Escript [3] / DUR-More [4] / ... TabItems live as direct children
+    /// of this Tab control, alongside whichever single Pane (cntEscript,
+    /// cntImageTab, ...) is currently selected/rendered. Confirmed in both
+    /// real dumps (same AutomationId, same nesting, under
+    /// RxDetailsPanel's sibling cntCommonTab/uxRxCommonControl). Used by
+    /// UiaTreeWalker.SelectCenterTabByPrefix/RestoreCenterTabByName to
+    /// programmatically flip to Escript, read its tree, and flip back —
+    /// see FieldReader.ReadSource. NOTE: the bracketed index on each
+    /// TabItem's Name shifts depending on which tabs exist for a given Rx
+    /// (the Image-tab-active dump has NO Escript tab at all, and its
+    /// later tabs are numbered one lower than in the Escript-tab-active
+    /// dump) — always match by Name prefix ("Escript"), never the full
+    /// bracketed name.
+    /// </summary>
+    public const string CenterTabControlAutomationId = "cntTabControl";
+
+    /// <summary>Prefix (not exact match — see CenterTabControlAutomationId doc) for the Escript TabItem's Name.</summary>
+    public const string EscriptTabNamePrefix = "Escript";
+
     public const string NodeBody = "Body";
     public const string NodeNewRx = "NewRx";
     public const string NodePatient = "Patient";

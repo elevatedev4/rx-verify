@@ -151,3 +151,48 @@ public static class FieldOrder
         ["refills"] = "Refills"
     };
 }
+
+/// <summary>
+/// Groups the 10 FieldOrder.Fields into the 3 categories the overlay's
+/// compact table displays (Patient / Prescriber / Rx), per Will's spec:
+/// "Patient (name, DOB), Prescriber (name, NPI), Rx (drug, sig, quantity,
+/// days supply, refills, written date — whatever applies)". Two notes on
+/// fields Will's spec didn't name individually:
+///   - "prescriber" is already a single verdict field bundling
+///     name+NPI together (see FieldReader/EngineClient — the engine
+///     never splits it into two), so it maps to ONE category, not two.
+///   - "patientAddress" isn't in Will's 2-field Patient example, but it's
+///     one of the 10 fields the engine always returns and is clearly
+///     patient-identity data, not Rx or Prescriber data — it's grouped
+///     under Patient here as the only sensible home for it rather than
+///     silently dropped from the compact view. Flag to Will if he'd
+///     rather it live elsewhere or be hidden.
+/// FieldOrder.Fields happens to already list all fields for one category
+/// contiguously (patientName, patientDOB, patientAddress, prescriber,
+/// dateWritten, drug, sig, quantity, daysSupply, refills), so building
+/// each category's rows by filtering FieldOrder.Fields through this map
+/// preserves the pharmacist's required field order within each category.
+/// </summary>
+public static class FieldCategories
+{
+    public const string Patient = "Patient";
+    public const string Prescriber = "Prescriber";
+    public const string Rx = "Rx";
+
+    /// <summary>Fixed category display order — Patient, then Prescriber, then Rx.</summary>
+    public static readonly IReadOnlyList<string> Order = new[] { Patient, Prescriber, Rx };
+
+    public static readonly IReadOnlyDictionary<string, string> CategoryByField = new Dictionary<string, string>
+    {
+        ["patientName"] = Patient,
+        ["patientDOB"] = Patient,
+        ["patientAddress"] = Patient,
+        ["prescriber"] = Prescriber,
+        ["dateWritten"] = Rx,
+        ["drug"] = Rx,
+        ["sig"] = Rx,
+        ["quantity"] = Rx,
+        ["daysSupply"] = Rx,
+        ["refills"] = Rx
+    };
+}

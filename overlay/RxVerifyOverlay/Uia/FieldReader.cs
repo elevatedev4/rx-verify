@@ -98,26 +98,69 @@ public sealed class FieldReader
     /// AutomationId ux10Dot6Escript). Only meaningful when that tree is
     /// actually present (the Escript tab has been opened/rendered this
     /// session) — see IsStructuredSourceAvailable.
+    ///
+    /// INTENTIONAL TAB SWITCH: the ux10Dot6Escript tree only exists in
+    /// the UIA tree while the Escript tab is the selected/visible center
+    /// tab (confirmed against both real dumps — the Image-tab dump has
+    /// no Escript content at all). In real use the pharmacist is
+    /// normally viewing the Image tab, not Escript, so on every call this
+    /// method: (1) records whichever center tab is currently selected,
+    /// (2) selects Escript via UiaTreeWalker.SelectCenterTabByPrefix, (3)
+    /// reads the tree, then (4) ALWAYS restores the original tab in a
+    /// finally block — even if the read throws — so the pharmacist's
+    /// view snaps back to where it was. This causes a brief, visible tab
+    /// flicker on every verify/Refresh; Will is evaluating on the real
+    /// machine whether that's acceptable. If it isn't, the next step
+    /// would be caching the parsed source once per Rx (keyed off the Rx
+    /// number in the window title) instead of re-selecting on every
+    /// Refresh/auto-refresh tick — NOT implemented here, since the brief
+    /// calls for defaulting to on-demand read+restore and flagging the
+    /// tradeoff rather than pre-building a cache layer before we know
+    /// whether flicker is even a real problem on Will's machine.
     /// </summary>
     public PrescriptionRecord ReadSource()
     {
-        var messageNode = _walker.BuildEscriptTree();
-        _escriptTreeFound = messageNode is not null;
-
-        if (messageNode is null)
+        string? previouslySelectedTab = null;
+        bool switchedTab = false;
+        try
         {
-            SourceUnavailableReason = "Open the Escript tab to verify this e-script.";
-            return new PrescriptionRecord();
+            previouslySelectedTab = _walker.SelectCenterTabByPrefix(FieldMap.EscriptTabNamePrefix, out switchedTab);
+
+            var messageNode = _walker.BuildEscriptTree();
+            _escriptTreeFound = messageNode is not null;
+
+            if (messageNode is null)
+            {
+                // Covers two real cases: this Rx has no Escript tab at all
+                // (not an e-script — the tab strip itself has no "Escript"
+                // item, as in the Image-tab-active dump), or the tab
+                // exists but we couldn't select it (see
+                // SelectCenterTabByPrefix's SelectionItemPattern caveat).
+                SourceUnavailableReason = switchedTab
+                    ? "Escript tab opened, but no e-script tree was found under it."
+                    : "No e-script source found for this Rx — it may not be an e-script, or the Escript tab couldn't be selected.";
+                return new PrescriptionRecord();
+            }
+
+            var record = EscriptTreeParser.Parse(messageNode);
+
+            SourceUnavailableReason =
+                string.IsNullOrWhiteSpace(record.PatientName) && string.IsNullOrWhiteSpace(record.Drug?.Name)
+                    ? "Escript tab is open, but its e-script tree didn't parse a patient or drug — confirm the tree shows a NewRx message before trusting this check."
+                    : null;
+
+            return record;
         }
-
-        var record = EscriptTreeParser.Parse(messageNode);
-
-        SourceUnavailableReason =
-            string.IsNullOrWhiteSpace(record.PatientName) && string.IsNullOrWhiteSpace(record.Drug?.Name)
-                ? "Escript tab is open, but its e-script tree didn't parse a patient or drug — confirm the tree shows a NewRx message before trusting this check."
-                : null;
-
-        return record;
+        finally
+        {
+            // ALWAYS restore, success or exception — the pharmacist must
+            // never be left looking at the Escript tab because a read
+            // failed partway through.
+            if (switchedTab)
+            {
+                _walker.RestoreCenterTabByName(previouslySelectedTab);
+            }
+        }
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System;
 using System.Text;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
@@ -150,6 +151,124 @@ public sealed class UiaTreeWalker
         catch
         {
             return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // CENTER TAB SELECT/RESTORE (so the Escript tab's tree exists in the
+    // UIA tree even when the pharmacist is viewing a different tab, e.g.
+    // Image — see FieldReader.ReadSource for the select->read->restore
+    // orchestration and FieldMap.CenterTabControlAutomationId for why
+    // matching is by Name PREFIX, not exact Name).
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Finds the center content Tab control (FieldMap.CenterTabControlAutomationId)
+    /// anywhere under the window and returns it as FlaUI's typed Tab
+    /// wrapper (.TabItems / .SelectedTabItem). Returns null if not found
+    /// rather than throwing — the window may not be fully rendered, or
+    /// PioneerRx's screen shape may differ from the two confirmed dumps.
+    /// </summary>
+    private Tab? FindCenterTabControl()
+    {
+        var element = FindDescendantByAutomationId(FieldMap.CenterTabControlAutomationId);
+        if (element is null) return null;
+
+        try { return element.AsTab(); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Selects the center TabItem whose Name STARTS WITH namePrefix (e.g.
+    /// "Escript" matches "Escript [3]" — see FieldMap.CenterTabControlAutomationId
+    /// doc for why this must be a prefix match, not exact). Returns the
+    /// Name of whichever TabItem was selected BEFORE this call, so the
+    /// caller can pass it to RestoreCenterTabByName — or null if the tab
+    /// control or a matching item couldn't be found. `selected` is true
+    /// only if Select() was actually invoked without throwing.
+    ///
+    /// UNKNOWN, flag for Will on a real workstation: whether
+    /// SelectionItemPattern (which TabItem.Select() uses under the hood)
+    /// is actually supported on PioneerRx's TabItem control — neither
+    /// real dump captures pattern support, only Name/ControlType/bounds.
+    /// If it isn't supported, this degrades to "couldn't switch tabs"
+    /// (selected=false) rather than throwing, and ReadSource falls back
+    /// to whatever's already in the UIA tree (i.e. behaves exactly like
+    /// before this change).
+    /// </summary>
+    public string? SelectCenterTabByPrefix(string namePrefix, out bool selected)
+    {
+        selected = false;
+        var tab = FindCenterTabControl();
+        if (tab is null) return null;
+
+        string? previouslySelectedName = null;
+        try { previouslySelectedName = tab.SelectedTabItem?.Name; }
+        catch { /* leave null — RestoreCenterTabByName treats that as a no-op, never a crash */ }
+
+        TabItem? target = null;
+        try
+        {
+            foreach (var item in tab.TabItems)
+            {
+                string? name;
+                try { name = item.Name; } catch { continue; }
+                if (name is not null && name.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    target = item;
+                    break;
+                }
+            }
+        }
+        catch { /* TabItems threw — no target found, fall through to "not found" */ }
+
+        if (target is null) return previouslySelectedName;
+
+        try
+        {
+            target.Select();
+            selected = true;
+        }
+        catch
+        {
+            selected = false;
+        }
+
+        return previouslySelectedName;
+    }
+
+    /// <summary>
+    /// Restores whichever TabItem was selected before SelectCenterTabByPrefix.
+    /// Called from FieldReader.ReadSource's finally block so the
+    /// pharmacist's view is ALWAYS returned to exactly where it was, even
+    /// if the Escript-tree read in between throws. A no-op if
+    /// previousName is null/blank or the tab can no longer be found
+    /// (e.g. the PioneerRx window closed mid-read) — this method must
+    /// never throw, since it runs inside a finally block.
+    /// </summary>
+    public void RestoreCenterTabByName(string? previousName)
+    {
+        if (string.IsNullOrEmpty(previousName)) return;
+
+        var tab = FindCenterTabControl();
+        if (tab is null) return;
+
+        try
+        {
+            foreach (var item in tab.TabItems)
+            {
+                string? name;
+                try { name = item.Name; } catch { continue; }
+                if (name == previousName)
+                {
+                    item.Select();
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort restore only.
         }
     }
 
