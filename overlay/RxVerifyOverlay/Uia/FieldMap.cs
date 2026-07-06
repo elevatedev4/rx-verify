@@ -59,6 +59,23 @@ public static class FieldMap
     /// <summary>Text, read-only. .Name IS the NPI digits directly, e.g. "1234567890" — confirmed identical in both real dumps.</summary>
     public const string EnteredPrescriberNpiId = "uxNpi";
 
+    /// <summary>
+    /// Text, read-only. .Name IS the phone number directly, e.g.
+    /// "(555) 123-4567" — confirmed in both real dumps (next to
+    /// lblPhone, inside uxPrescriberPanel). Added per Will's live-test
+    /// feedback so prescriber phone can be its own compared field
+    /// alongside name/NPI/address.
+    /// </summary>
+    public const string EnteredPrescriberPhoneId = "uxPrescriberPhone";
+
+    /// <summary>
+    /// Text, read-only. .Name IS the address directly, ONE combined
+    /// line (no separate city/state/zip controls), e.g. "1 Clinic Way
+    /// Ste A Sampletown, KS 12345" — confirmed in both real dumps. Added
+    /// per Will's live-test feedback (see EnteredPrescriberPhoneId).
+    /// </summary>
+    public const string EnteredPrescriberAddressId = "uxWrittenByAddress";
+
     /// <summary>Edit. Label placeholder "Item:" in both dumps; real drug name must come via ValuePattern.</summary>
     public const string EnteredItemQuickSearchId = "uxPrescribedItemQuickSearch";
 
@@ -132,6 +149,16 @@ public static class FieldMap
     public const string NodeWrittenDate = "WrittenDate";
     public const string NodeSig = "Sig";
 
+    /// <summary>
+    /// Container under Prescriber (and Patient/Pharmacy) holding
+    /// PrimaryTelephone/Fax sub-containers — confirmed against
+    /// escript-249.txt: Prescriber &gt; CommunicationNumbers &gt;
+    /// PrimaryTelephone &gt; "Number: &lt;digits&gt;". Used for the
+    /// prescriber phone field added per Will's live-test feedback.
+    /// </summary>
+    public const string NodeCommunicationNumbers = "CommunicationNumbers";
+    public const string NodePrimaryTelephone = "PrimaryTelephone";
+
     public const string KeyLastName = "LastName";
     public const string KeyFirstName = "FirstName";
     public const string KeyMiddleName = "MiddleName";
@@ -145,8 +172,12 @@ public static class FieldMap
     public const string KeyCode = "Code";
     public const string KeyValue = "Value";
     public const string KeyQuantityUnitOfMeasure = "QuantityUnitOfMeasure";
-    public const string KeyDaysSupply = "DaysSupply";
+    public const string KeyNumber = "Number";
     public const string KeySigText = "SigText";
+    // KeyDaysSupply removed: days supply is no longer read, compared, or
+    // displayed anywhere in the engine or overlay (per Will's live-test
+    // feedback — it wasn't a meaningful discrepancy signal for this
+    // workflow).
 
     /// <summary>
     /// The Refills leaf's raw text embeds its own colon inside a

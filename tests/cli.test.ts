@@ -32,7 +32,6 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
         sig: 'take 1 tab po bid',
         quantity: 60,
         quantityUnit: 'tab',
-        daysSupply: 30,
         refills: 2
       },
       entered: {
@@ -43,7 +42,6 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
         sig: 'take 1 tab po bid',
         quantity: 60,
         quantityUnit: 'tab',
-        daysSupply: 30,
         refills: 2
       }
     });
@@ -53,7 +51,7 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
 
     expect(code).toBe(0);
     expect(result.summary.red).toBe(0);
-    expect(result.verdicts).toHaveLength(10);
+    expect(result.verdicts).toHaveLength(12);
     expect(result.verdicts[0].field).toBe('patientName');
     expect(result.verdicts[0].status).toBe('green');
   }, 15000);

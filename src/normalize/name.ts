@@ -178,6 +178,19 @@ export interface ParsedName {
   last: string;
   /** Hyphenation-tolerant surname parts, e.g. ["garcia", "lopez"]. */
   lastParts: string[];
+  /**
+   * Middle name/initial token(s) found ONLY in "Last, First Middle"
+   * (comma) input — e.g. "Rivera, Jordan Alex" -> middleParts ["alex"].
+   * Space-order input ("First Middle Last") has no unambiguous
+   * first/middle/last split (a bare 3-token name is equally plausibly a
+   * compound surname, per the existing "Maria Garcia Lopez" handling
+   * below), so middleParts is always empty there — those tokens instead
+   * land in `lastParts`. The whole-name token-multiset comparison in
+   * compareNames (see wholeNameTokens) is what actually reconciles the
+   * two shapes: it doesn't care which bucket a token landed in, only
+   * that both sides contain the same bag of tokens.
+   */
+  middleParts: string[];
   /** Generational suffix (jr, sr, ii, iii, iv, v) if present. */
   suffix: string | null;
 }
@@ -202,6 +215,7 @@ export function parseName(raw: string): ParsedName {
   const folded = foldCase(raw);
   let first = '';
   let last = '';
+  let middleParts: string[] = [];
   let suffix: string | null = null;
 
   if (folded.includes(',')) {
@@ -210,6 +224,13 @@ export function parseName(raw: string): ParsedName {
     const firstStripped = stripTitlesAndSuffix((firstPartRaw ?? '').split(/[\s]+/).filter(Boolean));
     last = lastStripped.tokens.join(' ');
     first = firstStripped.tokens[0] ?? '';
+    // Everything after the first token in "Last, First Middle ..." is a
+    // middle name/initial — unlike the no-comma branch below, the comma
+    // unambiguously isolates the surname, so this is never a compound
+    // surname. Previously these tokens were silently dropped, which broke
+    // comparison against a source built from separate First/Middle/Last
+    // fields (see wholeNameTokens in compareNames).
+    middleParts = firstStripped.tokens.slice(1);
     suffix = lastStripped.suffix ?? firstStripped.suffix;
   } else {
     const stripped = stripTitlesAndSuffix(folded.split(' ').filter(Boolean));
@@ -242,7 +263,7 @@ export function parseName(raw: string): ParsedName {
     .map((p) => p.trim())
     .filter(Boolean);
 
-  return { first, firstParts, last, lastParts, suffix };
+  return { first, firstParts, last, lastParts, middleParts, suffix };
 }
 
 function canonicalsOf(first: string): Set<string> {
@@ -300,13 +321,28 @@ export function compareNames(
   const a = parseName(sourceRaw);
   const b = parseName(enteredRaw);
 
-  // Whole-name normalized equality first: after case/punctuation/order/
-  // hyphen/title folding, an identical full token sequence is the same
-  // name regardless of how we would have split it into given/middle/
-  // surname ("Mary-Jane Smith" vs "Mary Jane Smith").
+  // Whole-name equality first, compared as a TOKEN MULTISET rather than
+  // an ordered string: "Last, First Middle" (entered, from PioneerRx)
+  // and "First Middle Last" (source, built by joining the e-script's
+  // separate FirstName/MiddleName/LastName leaves) attribute the same
+  // tokens to different ParsedName buckets — e.g. "Rivera, Jordan Alex"
+  // keeps "alex" in middleParts, while "Jordan Alex Rivera" (no comma)
+  // folds it into lastParts as part of a possibly-compound surname (see
+  // parseName). A multiset comparison sidesteps that bucketing
+  // difference entirely: if both sides reduce to the exact same bag of
+  // tokens, it's the same name, regardless of format.
+  const wholeNameTokens = (n: ParsedName) => [n.first, ...n.middleParts, ...n.lastParts].filter(Boolean).sort();
+  const tokensA = wholeNameTokens(a);
+  const tokensB = wholeNameTokens(b);
+  const tokensMatch =
+    tokensA.length > 0 && tokensA.length === tokensB.length && tokensA.every((t, i) => t === tokensB[i]);
+
+  // Kept alongside the multiset check (rather than replacing it outright)
+  // since it's a strict subset of what multiset-equality catches and
+  // cheaper to reason about for the common exact-order case.
   const fullA = `${a.first} ${a.last}`.trim();
   const fullB = `${b.first} ${b.last}`.trim();
-  if (fullA && fullA === fullB) {
+  if (fullA && (fullA === fullB || tokensMatch)) {
     if (a.suffix && b.suffix && a.suffix !== b.suffix) {
       return {
         status: 'red',

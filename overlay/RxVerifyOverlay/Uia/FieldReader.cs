@@ -1,3 +1,4 @@
+using System;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Parsing;
 
@@ -17,34 +18,66 @@ namespace RxVerifyOverlay.Uia;
 /// as a mismatch (the engine already handles null fields as "not
 /// provided" / yellow, never red).
 ///
-/// DRUG COMPARISON (documented gap, not a silent drop): the SOURCE
-/// (Escript tree) record carries both a drug NAME (DrugDescription) and
-/// an NDC (DrugCoded/ProductCode/Code) straight from the e-script — see
-/// EscriptTreeParser.ParseDrug. The ENTERED record's Drug.Ndc is always
-/// null: uxPrescribedItemQuickSearch (the only entered drug field) only
-/// exposes a typed item NAME, and neither real dump shows any other
-/// entered-side control carrying an NDC. This means NDC-level mismatches
-/// (e.g. right drug name entered, but a different generic/pack size than
-/// what the e-script specifies) can only be caught if the engine's drug
-/// comparator (rx-verify src/drug/index.ts) falls back to comparing
-/// EnteredDrug.Name against SourceDrug.Name/Ndc-resolved-description when
-/// EnteredDrug.Ndc is null. Confirm that fallback exists and is exercised
-/// here — if the comparator instead treats a null EnteredNdc as "skip,
-/// not comparable" and only ever compares Ndc-to-Ndc, this reader would
-/// never surface a real drug-identity mismatch for any e-script rx, which
-/// would defeat a primary purpose of the app. This was NOT changed here
-/// per the brief (don't touch EngineClient's wire protocol without a
-/// genuine need) but Will should verify src/drug/index.ts's actual
-/// behavior before relying on this field for e-scripts.
+/// DRUG COMPARISON: the SOURCE (Escript tree) record carries both a drug
+/// NAME (DrugDescription) and an NDC (DrugCoded/ProductCode/Code)
+/// straight from the e-script — see EscriptTreeParser.ParseDrug. The
+/// ENTERED record's Drug.Ndc is always null: uxPrescribedItemQuickSearch
+/// (the only entered drug field) only exposes a typed item NAME, and
+/// neither real dump shows any other entered-side control carrying an
+/// NDC. This is RESOLVED as of the engine's drug-identity-by-name pass
+/// (rx-verify src/drug/index.ts compareDrugs): a normalized exact match
+/// on drug NAME/description is now the PRIMARY comparison and returns
+/// GREEN regardless of whether either side's NDC is present or whether
+/// the NDCs agree — NDC is lookup-only (behind-the-scenes ingredient/
+/// strength/form resolution), never required for a green verdict. So a
+/// null EnteredDrug.Ndc here is expected and does NOT prevent a real
+/// drug-identity match from showing green.
 /// </summary>
 public sealed class FieldReader
 {
     private readonly UiaTreeWalker _walker;
     private bool _escriptTreeFound;
 
+    /// <summary>
+    /// Rx number parsed from the window title ("Edit Rx - 1234567 - ..."
+    /// -&gt; "1234567", confirmed in both real dumps — see FieldMap.cs
+    /// TargetWindowTitlePrefixes). Null if the title doesn't match the
+    /// expected "&lt;screen&gt; - &lt;rx number&gt; - ..." shape, in which
+    /// case the per-Rx source cache below is simply never used (falls
+    /// back to reading fresh every time, the pre-cache behavior).
+    /// </summary>
+    private readonly string? _rxNumber;
+
+    // PER-RX SOURCE CACHE (see ReadSource doc comment below for why this
+    // exists). Static + a lock rather than an instance field: FieldReader
+    // itself is re-constructed fresh on every OverlayViewModel.RefreshAsync
+    // call (see FieldReader's only call site), so an instance-level cache
+    // would never survive between refreshes. A single cached slot (not a
+    // dictionary of all Rx numbers ever seen) is enough — only the
+    // CURRENTLY open Rx's source is ever needed, and this deliberately
+    // avoids accumulating stale entries for Rx's the pharmacist closed.
+    private static readonly object CacheLock = new();
+    private static string? _cachedRxNumber;
+    private static PrescriptionRecord? _cachedSource;
+
     public FieldReader(PioneerRxWindow window)
     {
         _walker = new UiaTreeWalker(window.WindowElement);
+        _rxNumber = ExtractRxNumber(SafeWindowName(window));
+    }
+
+    private static string? SafeWindowName(PioneerRxWindow window)
+    {
+        try { return window.WindowElement.Name; }
+        catch { return null; }
+    }
+
+    private static string? ExtractRxNumber(string? windowTitle)
+    {
+        if (string.IsNullOrWhiteSpace(windowTitle)) return null;
+        // "Edit Rx - 1234567 - Clindamycin ... " -> "1234567".
+        var parts = windowTitle.Split(" - ", StringSplitOptions.None);
+        return parts.Length >= 2 ? parts[1].Trim() : null;
     }
 
     /// <summary>
@@ -70,7 +103,13 @@ public sealed class FieldReader
             Prescriber = new Prescriber
             {
                 Name = ReadEditOrCombo(FieldMap.EnteredPrescriberQuickSearchId),
-                Npi = ReadText(FieldMap.EnteredPrescriberNpiId)
+                Npi = ReadText(FieldMap.EnteredPrescriberNpiId),
+                // Phone/address added per Will's live-test feedback so
+                // the engine can compare them as their own fields (see
+                // Models/EngineModels.cs FieldOrder) instead of only
+                // ever comparing name+NPI.
+                Phone = ReadText(FieldMap.EnteredPrescriberPhoneId),
+                Address = ParseAddress(ReadText(FieldMap.EnteredPrescriberAddressId))
             },
             DateWritten = ReadEditOrCombo(FieldMap.EnteredWrittenDateId),
             Drug = new DrugDescriptor
@@ -84,11 +123,9 @@ public sealed class FieldReader
             Sig = ReadEditOrCombo(FieldMap.EnteredDirectionsId),
             Quantity = ReadEditOrCombo(FieldMap.EnteredQuantityId),
             QuantityUnit = ReadEditOrCombo(FieldMap.EnteredQuantityUnitId),
-            // Not present as a top-level entered field on the Common/
-            // Edit-Rx screen in either real dump (it lives on the
-            // Dispense tab, not captured). Engine treats missing as "not
-            // provided", never a mismatch.
-            DaysSupply = null,
+            // DaysSupply removed entirely per Will's live-test feedback —
+            // no longer read, compared, or displayed (see
+            // Models/EngineModels.cs PrescriptionRecord/FieldOrder).
             Refills = ReadEditOrCombo(FieldMap.EnteredRefillsId)
         };
     }
@@ -99,27 +136,53 @@ public sealed class FieldReader
     /// actually present (the Escript tab has been opened/rendered this
     /// session) — see IsStructuredSourceAvailable.
     ///
-    /// INTENTIONAL TAB SWITCH: the ux10Dot6Escript tree only exists in
-    /// the UIA tree while the Escript tab is the selected/visible center
-    /// tab (confirmed against both real dumps — the Image-tab dump has
-    /// no Escript content at all). In real use the pharmacist is
-    /// normally viewing the Image tab, not Escript, so on every call this
-    /// method: (1) records whichever center tab is currently selected,
-    /// (2) selects Escript via UiaTreeWalker.SelectCenterTabByPrefix, (3)
-    /// reads the tree, then (4) ALWAYS restores the original tab in a
-    /// finally block — even if the read throws — so the pharmacist's
-    /// view snaps back to where it was. This causes a brief, visible tab
-    /// flicker on every verify/Refresh; Will is evaluating on the real
-    /// machine whether that's acceptable. If it isn't, the next step
-    /// would be caching the parsed source once per Rx (keyed off the Rx
-    /// number in the window title) instead of re-selecting on every
-    /// Refresh/auto-refresh tick — NOT implemented here, since the brief
-    /// calls for defaulting to on-demand read+restore and flagging the
-    /// tradeoff rather than pre-building a cache layer before we know
-    /// whether flicker is even a real problem on Will's machine.
+    /// PER-RX CACHE (Will's live-test feedback: the tab switch below was
+    /// visibly flickering on every Refresh/auto-refresh tick, which read
+    /// as a bug). If this Rx's number (parsed from the window title, see
+    /// _rxNumber) matches the last one we successfully parsed, the cached
+    /// PrescriptionRecord is returned directly — NO tab switch happens at
+    /// all on a cache hit. The cache is invalidated the moment the Rx
+    /// number changes (a different Rx is open), so the tab switch below
+    /// still happens, but at most ONCE per prescription instead of once
+    /// per Refresh.
+    ///
+    /// FULLY ZERO tab switches is very likely NOT achievable without a
+    /// different data-access path: an unselected WPF/WinForms TabItem's
+    /// content is generally not present in the UIA tree at all (confirmed
+    /// by the real dumps — the Image-tab-active dump has ZERO Escript
+    /// content under the Tab control, not just a hidden/collapsed node),
+    /// so THE FIRST read for a given Rx has no way to see the Escript
+    /// tree without selecting that tab at least once. Flagging this for
+    /// Will explicitly: if even one switch per Rx is unacceptable, the
+    /// only way around it that we're aware of would be a different
+    /// UIA/PioneerRx integration point entirely (e.g. reading the e-script
+    /// message from wherever PioneerRx itself parses it, if that's ever
+    /// exposed) — out of scope for this pass.
+    ///
+    /// INTENTIONAL TAB SWITCH (on a cache miss): the ux10Dot6Escript tree
+    /// only exists in the UIA tree while the Escript tab is the selected/
+    /// visible center tab (confirmed against both real dumps). So on a
+    /// cache miss this method: (1) records whichever center tab is
+    /// currently selected, (2) selects Escript via
+    /// UiaTreeWalker.SelectCenterTabByPrefix, (3) reads the tree, then (4)
+    /// ALWAYS restores the original tab in a finally block — even if the
+    /// read throws — so the pharmacist's view snaps back to where it was.
     /// </summary>
     public PrescriptionRecord ReadSource()
     {
+        if (_rxNumber is not null)
+        {
+            lock (CacheLock)
+            {
+                if (_cachedRxNumber == _rxNumber && _cachedSource is not null)
+                {
+                    _escriptTreeFound = true;
+                    SourceUnavailableReason = null;
+                    return _cachedSource;
+                }
+            }
+        }
+
         string? previouslySelectedTab = null;
         bool switchedTab = false;
         try
@@ -136,6 +199,9 @@ public sealed class FieldReader
                 // item, as in the Image-tab-active dump), or the tab
                 // exists but we couldn't select it (see
                 // SelectCenterTabByPrefix's SelectionItemPattern caveat).
+                // Deliberately NOT cached — there's nothing useful to
+                // reuse, and the next Refresh should try again (e.g. once
+                // the pharmacist actually opens the Escript tab).
                 SourceUnavailableReason = switchedTab
                     ? "Escript tab opened, but no e-script tree was found under it."
                     : "No e-script source found for this Rx — it may not be an e-script, or the Escript tab couldn't be selected.";
@@ -148,6 +214,15 @@ public sealed class FieldReader
                 string.IsNullOrWhiteSpace(record.PatientName) && string.IsNullOrWhiteSpace(record.Drug?.Name)
                     ? "Escript tab is open, but its e-script tree didn't parse a patient or drug — confirm the tree shows a NewRx message before trusting this check."
                     : null;
+
+            if (_rxNumber is not null)
+            {
+                lock (CacheLock)
+                {
+                    _cachedRxNumber = _rxNumber;
+                    _cachedSource = record;
+                }
+            }
 
             return record;
         }

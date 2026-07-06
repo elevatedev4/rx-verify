@@ -71,4 +71,19 @@ describe('compareNames', () => {
     const r = compareNames(null, 'Anything Here');
     expect(r.status).not.toBe('red');
   });
+
+  it('is GREEN for "Last, First Middle" (entered/PioneerRx shape) vs "First Middle Last" (source, joined from separate FirstName/MiddleName/LastName leaves)', () => {
+    const r = compareNames('Jordan Alex Rivera', 'Rivera, Jordan Alex');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('still requires the SAME set of name tokens, not just a shared first+last', () => {
+    // Entered omits the middle name entirely here -- this is the
+    // genuinely ambiguous "one side has a middle name, the other
+    // doesn't" case (see RESIDUAL 3 in adversarial-regressions.test.ts),
+    // which must stay a yellow "verify" rather than a false green.
+    const r = compareNames('Jordan Alex Rivera', 'Rivera, Jordan');
+    expect(r.status).toBe('yellow');
+  });
 });

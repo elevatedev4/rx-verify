@@ -1,8 +1,8 @@
 {
-  "description": "Prescriber NPI matches exactly but the name is spelled/abbreviated differently.",
+  "description": "Prescriber NPI matches exactly but the name is spelled/abbreviated differently. Name and NPI are now separate fields (see quantity/index.ts comparePrescriberName/Npi) -- name still shows the nickname difference on its own, NPI is independently green.",
   "source": {
     "prescriber": {
-      "name": "Jonathan A. Reyes, MD",
+      "name": "Jonathan Reyes",
       "npi": "1720345678"
     }
   },
@@ -29,9 +29,24 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "prescriber",
+      "field": "prescriberName",
+      "status": "yellow",
+      "reasonCode": "nickname_match"
+    },
+    {
+      "field": "prescriberNpi",
       "status": "green",
-      "reasonCode": "name_variant"
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "prescriberPhone",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberAddress",
+      "status": "yellow",
+      "reasonCode": "not_provided"
     },
     {
       "field": "dateWritten",
@@ -54,11 +69,6 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "daysSupply",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
       "field": "refills",
       "status": "yellow",
       "reasonCode": "not_provided"
@@ -66,8 +76,8 @@
   ],
   "expectedSummary": {
     "green": 1,
-    "yellow": 9,
+    "yellow": 11,
     "red": 0,
-    "total": 10
+    "total": 12
   }
 }

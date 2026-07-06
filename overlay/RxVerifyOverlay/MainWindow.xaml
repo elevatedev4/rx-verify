@@ -25,6 +25,20 @@
         <SolidColorBrush x:Key="YellowBrush" Color="#FFF9A825" />
         <SolidColorBrush x:Key="RedBrush" Color="#FFC62828" />
         <SolidColorBrush x:Key="NeutralBrush" Color="#FF3A3A3A" />
+        <!-- GrayBrush: category box/header when there's NO DATA at all
+             (HasData=false) -- distinct from GreenBrush so "no data" never
+             reads as "everything matches" (see CategoryViewModel.HasData). -->
+        <SolidColorBrush x:Key="GrayBrush" Color="#FF555555" />
+
+        <!-- Muted/dark variants of the same hues for the WHOLE category
+             box background (not just the header strip) -- full-strength
+             GreenBrush/YellowBrush/RedBrush across an entire card would
+             wash out the white row text, so the box uses a darker tint of
+             the same color while the header keeps the bold version. -->
+        <SolidColorBrush x:Key="BoxGreenBrush" Color="#FF1B3A1E" />
+        <SolidColorBrush x:Key="BoxYellowBrush" Color="#FF4A3B12" />
+        <SolidColorBrush x:Key="BoxRedBrush" Color="#FF4A1F1F" />
+        <SolidColorBrush x:Key="BoxGrayBrush" Color="#FF2A2A2A" />
 
         <Style x:Key="PillTextStyle" TargetType="TextBlock">
             <Setter Property="Foreground" Value="White" />
@@ -118,7 +132,34 @@
                 <ItemsControl ItemsSource="{Binding Categories}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Border BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,6" Background="#FF232323">
+                            <!--
+                                Whole box colored by the category's rolled-up
+                                status (Will's live-test feedback: previously
+                                only the header strip was colored, so a
+                                Red/Yellow field buried in the row list below
+                                could be missed at a glance). NO DATA (HasData
+                                =false) renders GRAY, never green -- green
+                                means "data present AND matches", not "nothing
+                                to complain about yet".
+                            -->
+                            <Border BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,6">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Background" Value="{StaticResource BoxGreenBrush}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
+                                                <Setter Property="Background" Value="{StaticResource BoxYellowBrush}" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
+                                                <Setter Property="Background" Value="{StaticResource BoxRedBrush}" />
+                                            </DataTrigger>
+                                            <!-- HasData=false wins over any Status value (checked last so it overrides). -->
+                                            <DataTrigger Binding="{Binding HasData}" Value="False">
+                                                <Setter Property="Background" Value="{StaticResource BoxGrayBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
                                 <StackPanel>
                                     <!-- Category header: name + rolled-up status glyph -->
                                     <Border CornerRadius="3,3,0,0" Padding="6,3">
@@ -131,6 +172,9 @@
                                                     </DataTrigger>
                                                     <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
                                                         <Setter Property="Background" Value="{StaticResource RedBrush}" />
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding HasData}" Value="False">
+                                                        <Setter Property="Background" Value="{StaticResource GrayBrush}" />
                                                     </DataTrigger>
                                                 </Style.Triggers>
                                             </Style>

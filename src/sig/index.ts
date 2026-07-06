@@ -54,7 +54,7 @@ const ROUTE_MAP: Record<string, string> = {
 const FREQ_MAP: Record<string, number> = {
   qd: 1, 'q.d.': 1, daily: 1, qam: 1, qpm: 1, qhs: 1, hs: 1,
   qod: 0.5, 'q.o.d.': 0.5, // every other day
-  bid: 2, 'b.i.d.': 2, 'twice daily': 2, 'twice a day': 2,
+  bid: 2, 'b.i.d.': 2, 'twice daily': 2, 'twice a day': 2, twice: 2,
   tid: 3, 't.i.d.': 3, 'three times daily': 3, 'three times a day': 3,
   qid: 4, 'q.i.d.': 4, 'four times daily': 4, 'four times a day': 4,
   q4h: 6, q6h: 4, q8h: 3, q12h: 2
@@ -73,8 +73,24 @@ const ROMAN_MAP: Record<string, number> = {
   i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8
 };
 
+/**
+ * Spelled-out number words -> digits, for dose counts stated in prose
+ * ("one tablet") instead of digits/roman numerals ("1 tablet"/"i tab").
+ * Both directions (word or digit) must normalize to the SAME numeric
+ * value so "1 tablet ... at bedtime" and "ONE TABLET ... AT BEDTIME"
+ * compare as semantically identical.
+ */
+const NUMBER_WORD_MAP: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5,
+  six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+};
+
 // Route/frequency/other terms that consist of a space (multi-word phrases)
-// need to be checked before naive tokenization collapses them.
+// need to be checked before naive tokenization collapses them. Order
+// matters: longer/more-specific phrases must be listed before shorter
+// phrases they contain (e.g. "every night at bedtime" before "at
+// bedtime" before "every night") so a global replace of the shorter
+// phrase doesn't fire first and leave a partial match behind.
 const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   [/\bby mouth\b/g, 'po'],
   [/\bas needed\b/g, 'prn'],
@@ -82,7 +98,12 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   [/\b(every day|once a day|once daily|each day)\b/g, 'daily'],
   [/\btwice (a day|daily)\b/g, 'bid'],
   [/\bthree times (a day|daily)\b/g, 'tid'],
-  [/\bfour times (a day|daily)\b/g, 'qid']
+  [/\bfour times (a day|daily)\b/g, 'qid'],
+  // "at bedtime"/"every night" family -> qhs (once nightly), same as the
+  // existing qhs/hs abbreviations.
+  [/\bevery night at bedtime\b/g, 'qhs'],
+  [/\bat bedtime\b/g, 'qhs'],
+  [/\bevery night\b/g, 'qhs']
 ];
 
 function preprocess(raw: string): string {
@@ -112,6 +133,9 @@ function extractDoseCount(tokens: string[]): { count: number | null; consumedIdx
     const tok = tokens[i] ?? '';
     if (/^\d+(\.\d+)?$/.test(tok)) {
       return { count: Number(tok), consumedIdx: i };
+    }
+    if (NUMBER_WORD_MAP[tok] !== undefined) {
+      return { count: NUMBER_WORD_MAP[tok] as number, consumedIdx: i };
     }
     if (ROMAN_MAP[tok] !== undefined) {
       return { count: ROMAN_MAP[tok] as number, consumedIdx: i };

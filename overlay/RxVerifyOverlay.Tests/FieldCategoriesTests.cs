@@ -32,19 +32,32 @@ public class FieldCategoriesTests
     }
 
     [Fact]
-    public void PrescriberCategoryIsASingleBundledField()
+    public void PrescriberCategoryContainsAllFourSplitFields()
     {
-        Assert.Equal(FieldCategories.Prescriber, FieldCategories.CategoryByField["prescriber"]);
+        var prescriberFields = new[] { "prescriberName", "prescriberNpi", "prescriberPhone", "prescriberAddress" };
+        foreach (var field in prescriberFields)
+        {
+            Assert.Equal(FieldCategories.Prescriber, FieldCategories.CategoryByField[field]);
+        }
     }
 
     [Fact]
-    public void RxCategoryContainsDrugSigQuantityDaysSupplyRefillsAndWrittenDate()
+    public void RxCategoryContainsDrugSigQuantityRefillsAndWrittenDate()
     {
-        var rxFields = new[] { "dateWritten", "drug", "sig", "quantity", "daysSupply", "refills" };
+        // daysSupply intentionally absent -- removed entirely per Will's
+        // live-test feedback (not in FieldOrder.Fields at all anymore).
+        var rxFields = new[] { "dateWritten", "drug", "sig", "quantity", "refills" };
         foreach (var field in rxFields)
         {
             Assert.Equal(FieldCategories.Rx, FieldCategories.CategoryByField[field]);
         }
+    }
+
+    [Fact]
+    public void DaysSupplyIsNotAFieldAtAll()
+    {
+        Assert.DoesNotContain("daysSupply", FieldOrder.Fields);
+        Assert.False(FieldCategories.CategoryByField.ContainsKey("daysSupply"));
     }
 
     [Fact]

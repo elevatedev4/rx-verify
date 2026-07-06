@@ -25,17 +25,25 @@ export interface FieldVerdict {
  * FIXED FIELD ORDER — hard requirement from the owner (a pharmacist).
  * The engine's output array is always in this order, never sorted by
  * severity or anything else.
+ *
+ * Prescriber is FOUR separate fields (name/NPI/phone/address), each with
+ * its own verdict, per the pharmacist's live-test feedback — a bundled
+ * "prescriber" field hid which specific piece (name vs NPI vs phone vs
+ * address) actually differed. daysSupply has been REMOVED entirely (not
+ * compared, not displayed) per the same feedback round.
  */
 export const FIELD_ORDER = [
   'patientName',
   'patientDOB',
   'patientAddress',
-  'prescriber',
+  'prescriberName',
+  'prescriberNpi',
+  'prescriberPhone',
+  'prescriberAddress',
   'dateWritten',
   'drug',
   'sig',
   'quantity',
-  'daysSupply',
   'refills'
 ] as const;
 
@@ -52,6 +60,10 @@ export interface Address {
 export interface Prescriber {
   name?: string;
   npi?: string;
+  /** Prescriber's office phone, any common format (digits, dashes, parens). */
+  phone?: string;
+  /** Prescriber's office address. Entered side is typically one combined string (Street only); source is split into components — see normalize/address.ts. */
+  address?: Address;
 }
 
 export interface DrugDescriptor {
@@ -72,7 +84,6 @@ export interface PrescriptionRecord {
   sig?: string;
   quantity?: string | number;
   quantityUnit?: string;
-  daysSupply?: string | number;
   refills?: string | number;
 }
 

@@ -58,14 +58,38 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Glyph for the rolled-up category status — same mapping as VerdictRowViewModel.Glyph.</summary>
-    public string Glyph => Status switch
+    /// <summary>
+    /// True once this category has at least one row with real data
+    /// (i.e. RefreshAsync populated it from a verify() result) — false
+    /// while waiting for PioneerRx / before the first successful read.
+    /// Per Will's live-test feedback: a category with NO data must render
+    /// GRAY, not green — green means "data present AND matches", not
+    /// "nothing to complain about yet". See MainWindow.xaml's category
+    /// header/box background triggers, which check this BEFORE Status.
+    /// </summary>
+    private bool _hasData;
+    public bool HasData
     {
-        VerdictStatus.Green => "✓",
-        VerdictStatus.Yellow => "?",
-        VerdictStatus.Red => "✗",
-        _ => "?"
-    };
+        get => _hasData;
+        set
+        {
+            if (_hasData == value) return;
+            _hasData = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(Glyph));
+        }
+    }
+
+    /// <summary>Glyph for the rolled-up category status — same mapping as VerdictRowViewModel.Glyph. Shows a neutral dash when there's no data at all (see HasData).</summary>
+    public string Glyph => !HasData
+        ? "–"
+        : Status switch
+        {
+            VerdictStatus.Green => "✓",
+            VerdictStatus.Yellow => "?",
+            VerdictStatus.Red => "✗",
+            _ => "?"
+        };
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
@@ -221,6 +245,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         foreach (var category in Categories)
         {
             category.Status = CategoryRollup.RollUp(category.Rows.Select(r => r.Status));
+            category.HasData = category.Rows.Count > 0;
         }
 
         UpdateSummary(result.Summary);
@@ -233,7 +258,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         foreach (var category in Categories)
         {
             category.Rows.Clear();
-            category.Status = VerdictStatus.Green; // neutral/no-data — nothing to roll up
+            category.Status = VerdictStatus.Green; // Status is meaningless with no data; HasData=false is what actually drives the gray "no data" display (see MainWindow.xaml).
+            category.HasData = false;
         }
     }
 

@@ -69,4 +69,34 @@ describe('compareDrugs', () => {
     expect(r.status).toBe('yellow');
     expect(r.reasonCode).toBe('unknown_drug');
   });
+
+  describe('drug IDENTITY by name (real-world overlay shape: entered side never carries an NDC)', () => {
+    it('is GREEN name_identity_match on an exact normalized name match, even with no NDC on either side', () => {
+      const r = compareDrugs({ name: 'Clindamycin Phosp 1% Lotion' }, { name: 'Clindamycin Phosp 1% Lotion' }, provider);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+
+    it('is GREEN name_identity_match on a case/punctuation-only difference', () => {
+      const r = compareDrugs({ name: 'Clindamycin Phosp 1% Lotion' }, { name: 'clindamycin phosp 1% lotion.' }, provider);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+
+    it('is GREEN on matching names even when the source NDC is present and unresolvable -- NDC is lookup-only, never required for green', () => {
+      const r = compareDrugs(
+        { name: 'Gabapentin 300mg capsule', ndc: '99999999999' },
+        { name: 'Gabapentin 300mg capsule' },
+        provider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+
+    it('does not let a name-identity match paper over a stated strength contradiction (names must be genuinely equal, not just similar)', () => {
+      const r = compareDrugs({ name: 'Lisinopril 20mg tablet' }, { name: 'Lisinopril 10mg tablet' }, provider);
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('drug_mismatch');
+    });
+  });
 });

@@ -23,7 +23,22 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "prescriber",
+      "field": "prescriberName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberNpi",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberPhone",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberAddress",
       "status": "yellow",
       "reasonCode": "not_provided"
     },
@@ -48,11 +63,6 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "daysSupply",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
       "field": "refills",
       "status": "yellow",
       "reasonCode": "not_provided"
@@ -60,8 +70,8 @@
   ],
   "expectedSummary": {
     "green": 1,
-    "yellow": 9,
+    "yellow": 11,
     "red": 0,
-    "total": 10
+    "total": 12
   }
 }

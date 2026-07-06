@@ -51,4 +51,31 @@ describe('compareAddresses', () => {
       expect(compareAddresses(a, b).status).not.toBe('red');
     }
   });
+
+  describe('freeform (entered, single combined line) vs structured (source, split components)', () => {
+    it('is GREEN when the entered single-line string matches the source components', () => {
+      const r = compareAddresses(
+        { street: '42 Fictional Wells Ct', city: 'Sampleville', state: 'KS', zip: '54321' },
+        { street: '42 Fictional Wells Ct Sampleville, KS 54321' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('is still GREEN when the entered line omits the ZIP entirely (real PioneerRx display never shows one)', () => {
+      const r = compareAddresses(
+        { street: '42 Fictional Wells Ct', city: 'Sampleville', state: 'KS', zip: '54321' },
+        { street: '42 Fictional Wells Ct Sampleville, KS' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('is YELLOW (never RED) when the entered single line is a genuinely different address', () => {
+      const r = compareAddresses(
+        { street: '42 Fictional Wells Ct', city: 'Sampleville', state: 'KS', zip: '54321' },
+        { street: '999 Other St Topeka, KS 66601' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.status).not.toBe('red');
+    });
+  });
 });

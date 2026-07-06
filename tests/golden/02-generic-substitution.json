@@ -8,7 +8,6 @@
     },
     "sig": "take 1 tab po qd",
     "quantity": 30,
-    "daysSupply": 30,
     "refills": 3
   },
   "entered": {
@@ -19,7 +18,6 @@
     },
     "sig": "take 1 tab po qd",
     "quantity": 30,
-    "daysSupply": 30,
     "refills": 3
   },
   "expected": [
@@ -39,7 +37,22 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "prescriber",
+      "field": "prescriberName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberNpi",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberPhone",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberAddress",
       "status": "yellow",
       "reasonCode": "not_provided"
     },
@@ -64,20 +77,15 @@
       "reasonCode": "exact_match"
     },
     {
-      "field": "daysSupply",
-      "status": "green",
-      "reasonCode": "exact_match"
-    },
-    {
       "field": "refills",
       "status": "green",
       "reasonCode": "exact_match"
     }
   ],
   "expectedSummary": {
-    "green": 6,
-    "yellow": 4,
+    "green": 5,
+    "yellow": 7,
     "red": 0,
-    "total": 10
+    "total": 12
   }
 }

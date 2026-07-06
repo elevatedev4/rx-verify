@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Uia;
@@ -46,7 +47,8 @@ public static class EscriptTreeParser
             Sig = ParseSig(newRx),
             Quantity = ParseQuantityValue(newRx),
             QuantityUnit = ParseQuantityUnit(newRx),
-            DaysSupply = ParseDaysSupply(newRx),
+            // DaysSupply removed entirely per Will's live-test feedback —
+            // no longer read, compared, or displayed.
             Refills = ParseRefills(newRx)
         };
     }
@@ -61,7 +63,7 @@ public static class EscriptTreeParser
         var name = patient is null ? null : Child(patient, FieldMap.NodeName);
         if (name is null) return null;
 
-        return JoinName(
+        return JoinNameLastFirstMiddle(
             Leaf(name, FieldMap.KeyFirstName),
             Leaf(name, FieldMap.KeyMiddleName),
             Leaf(name, FieldMap.KeyLastName));
@@ -73,22 +75,22 @@ public static class EscriptTreeParser
         var dob = patient is null ? null : Child(patient, FieldMap.NodeDateOfBirth);
         // DateOfBirth is a CONTAINER with a single nested "Date: <value>"
         // leaf one level down — NOT a direct leaf on Patient itself.
-        return dob is null ? null : Leaf(dob, FieldMap.KeyDate);
+        var raw = dob is null ? null : Leaf(dob, FieldMap.KeyDate);
+        // Reformat from the e-script's ISO "yyyy-MM-dd" to the same
+        // M/d/yyyy style PioneerRx's uxPatientDOB control displays (see
+        // Uia/FieldMap.cs EnteredPatientDobId), so the source/entered
+        // columns line up visually instead of looking like a mismatch at
+        // a glance. The engine compares dates format-agnostically either
+        // way (see rx-verify src/normalize/date.ts) — this is display
+        // formatting only.
+        return FormatIsoDateForDisplay(raw);
     }
 
     private static Address? ParsePatientAddress(EscriptNode newRx)
     {
         var patient = Child(newRx, FieldMap.NodePatient);
         var address = patient is null ? null : Child(patient, FieldMap.NodeAddress);
-        if (address is null) return null;
-
-        return new Address
-        {
-            Street = Leaf(address, FieldMap.KeyAddressLine1),
-            City = Leaf(address, FieldMap.KeyCity),
-            State = Leaf(address, FieldMap.KeyStateProvince),
-            Zip = Leaf(address, FieldMap.KeyPostalCode)
-        };
+        return ParseAddressContainer(address);
     }
 
     // ------------------------------------------------------------------
@@ -108,10 +110,40 @@ public static class EscriptTreeParser
         var name = Child(prescriber, FieldMap.NodeName);
         var prescriberName = name is null
             ? null
-            : JoinName(Leaf(name, FieldMap.KeyFirstName), null, Leaf(name, FieldMap.KeyLastName));
+            : JoinNameLastFirstMiddle(Leaf(name, FieldMap.KeyFirstName), null, Leaf(name, FieldMap.KeyLastName));
 
-        if (npi is null && prescriberName is null) return null;
-        return new Prescriber { Name = prescriberName, Npi = npi };
+        // Phone (CommunicationNumbers > PrimaryTelephone > Number) and
+        // Address (same AddressLine1/City/StateProvince/PostalCode shape
+        // as Patient > Address) added per Will's live-test feedback so
+        // the engine can compare all four prescriber fields separately —
+        // see FieldMap.cs NodeCommunicationNumbers/NodePrimaryTelephone
+        // and Models/EngineModels.cs Prescriber.
+        var phone = ParsePrimaryTelephone(prescriber);
+        var address = ParseAddressContainer(Child(prescriber, FieldMap.NodeAddress));
+
+        if (npi is null && prescriberName is null && phone is null && address is null) return null;
+        return new Prescriber { Name = prescriberName, Npi = npi, Phone = phone, Address = address };
+    }
+
+    /// <summary>Shared by ParsePrescriber (and any future caller) for a Prescriber/Patient/Pharmacy-shaped &lt;container&gt; &gt; Address leaf group.</summary>
+    private static Address? ParseAddressContainer(EscriptNode? address)
+    {
+        if (address is null) return null;
+        return new Address
+        {
+            Street = Leaf(address, FieldMap.KeyAddressLine1),
+            City = Leaf(address, FieldMap.KeyCity),
+            State = Leaf(address, FieldMap.KeyStateProvince),
+            Zip = Leaf(address, FieldMap.KeyPostalCode)
+        };
+    }
+
+    /// <summary>CommunicationNumbers &gt; PrimaryTelephone &gt; "Number: &lt;digits&gt;", confirmed against escript-249.txt's Prescriber section.</summary>
+    private static string? ParsePrimaryTelephone(EscriptNode container)
+    {
+        var comm = Child(container, FieldMap.NodeCommunicationNumbers);
+        var primary = comm is null ? null : Child(comm, FieldMap.NodePrimaryTelephone);
+        return primary is null ? null : Leaf(primary, FieldMap.KeyNumber);
     }
 
     // ------------------------------------------------------------------
@@ -164,19 +196,14 @@ public static class EscriptTreeParser
         return ExtractParenthetical(raw);
     }
 
-    private static string? ParseDaysSupply(EscriptNode newRx)
-    {
-        var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
-        // DaysSupply is a direct leaf on MedicationPrescribed (like
-        // DrugDescription), not nested in a container.
-        return med is null ? null : Leaf(med, FieldMap.KeyDaysSupply);
-    }
-
     private static string? ParseWrittenDate(EscriptNode newRx)
     {
         var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
         var writtenDate = med is null ? null : Child(med, FieldMap.NodeWrittenDate);
-        return writtenDate is null ? null : Leaf(writtenDate, FieldMap.KeyDate);
+        var raw = writtenDate is null ? null : Leaf(writtenDate, FieldMap.KeyDate);
+        // Same display-alignment reformat as ParsePatientDob — the
+        // entered uxWrittenDate control shows M/d/yyyy.
+        return FormatIsoDateForDisplay(raw);
     }
 
     private static string? ParseRefills(EscriptNode newRx)
@@ -246,11 +273,40 @@ public static class EscriptTreeParser
         return (text[..splitIndex], text[(splitIndex + 2)..]);
     }
 
-    private static string? JoinName(string? first, string? middle, string? last)
+    /// <summary>
+    /// Builds "Last, First Middle" (comma format) instead of "First
+    /// Middle Last" — matches the style PioneerRx's own quick-search
+    /// fields display (uxPatientQuickSearch/uxPrescriberQuickSearch,
+    /// e.g. "Rivera, Jordan Alex"), so the source/entered columns look
+    /// visually aligned side by side instead of looking like a mismatch
+    /// at a glance. Purely a display-format choice — the engine's name
+    /// comparator normalizes both orderings to the same canonical token
+    /// set either way (see rx-verify src/normalize/name.ts
+    /// wholeNameTokens), so this has no effect on the actual verdict.
+    /// </summary>
+    private static string? JoinNameLastFirstMiddle(string? first, string? middle, string? last)
     {
-        var parts = new[] { first, middle, last }.Where(p => !string.IsNullOrWhiteSpace(p));
-        var joined = string.Join(" ", parts);
-        return NullIfEmpty(joined);
+        var firstMiddle = string.Join(" ", new[] { first, middle }.Where(p => !string.IsNullOrWhiteSpace(p)));
+        var lastTrimmed = string.IsNullOrWhiteSpace(last) ? null : last!.Trim();
+
+        if (lastTrimmed is null) return NullIfEmpty(firstMiddle);
+        if (string.IsNullOrWhiteSpace(firstMiddle)) return lastTrimmed;
+        return $"{lastTrimmed}, {firstMiddle}";
+    }
+
+    /// <summary>
+    /// "yyyy-MM-dd" (the e-script's ISO date format) -&gt; "M/d/yyyy" (the
+    /// format PioneerRx's own DOB/Written-date controls display). Falls
+    /// back to the raw string unreformatted if it isn't a recognized ISO
+    /// date, rather than guessing — display-only, never affects the
+    /// engine's format-agnostic date comparison.
+    /// </summary>
+    private static string? FormatIsoDateForDisplay(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return raw;
+        return DateTime.TryParseExact(raw.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)
+            ? $"{parsed.Month}/{parsed.Day}/{parsed.Year}"
+            : raw;
     }
 
     private static string? ExtractParenthetical(string? raw)

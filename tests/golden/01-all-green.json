@@ -11,7 +11,14 @@
     },
     "prescriber": {
       "name": "Dr. Jane Doe",
-      "npi": "1234567890"
+      "npi": "1234567890",
+      "phone": "(217) 555-0100",
+      "address": {
+        "street": "500 Doctor Way",
+        "city": "Springfield",
+        "state": "IL",
+        "zip": "62704"
+      }
     },
     "dateWritten": "07/01/2026",
     "drug": {
@@ -20,7 +27,6 @@
     "sig": "take 1 tab po bid",
     "quantity": 60,
     "quantityUnit": "tab",
-    "daysSupply": 30,
     "refills": 2
   },
   "entered": {
@@ -34,7 +40,14 @@
     },
     "prescriber": {
       "name": "Dr. Jane Doe",
-      "npi": "1234567890"
+      "npi": "1234567890",
+      "phone": "(217) 555-0100",
+      "address": {
+        "street": "500 Doctor Way",
+        "city": "Springfield",
+        "state": "IL",
+        "zip": "62704"
+      }
     },
     "dateWritten": "07/01/2026",
     "drug": {
@@ -43,7 +56,6 @@
     "sig": "take 1 tab po bid",
     "quantity": 60,
     "quantityUnit": "tab",
-    "daysSupply": 30,
     "refills": 2
   },
   "expected": [
@@ -63,7 +75,22 @@
       "reasonCode": "exact_match"
     },
     {
-      "field": "prescriber",
+      "field": "prescriberName",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "prescriberNpi",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "prescriberPhone",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "prescriberAddress",
       "status": "green",
       "reasonCode": "exact_match"
     },
@@ -88,20 +115,15 @@
       "reasonCode": "exact_match"
     },
     {
-      "field": "daysSupply",
-      "status": "green",
-      "reasonCode": "exact_match"
-    },
-    {
       "field": "refills",
       "status": "green",
       "reasonCode": "exact_match"
     }
   ],
   "expectedSummary": {
-    "green": 10,
+    "green": 12,
     "yellow": 0,
     "red": 0,
-    "total": 10
+    "total": 12
   }
 }

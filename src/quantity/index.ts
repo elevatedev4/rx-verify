@@ -1,5 +1,5 @@
 /**
- * Quantity, days supply, refills, and prescriber comparison.
+ * Quantity, refills, and prescriber comparison.
  *
  * Quantity verdict philosophy:
  *  - Unit-normalized exact match = GREEN.
@@ -8,20 +8,28 @@
  *    split) = YELLOW quantity_adjusted.
  *  - If quantities differ and do NOT reconcile with sig math = RED.
  *
- * Days supply: absent on the source is normal (NCPDP optional field) =
- * YELLOW not_provided, never a mismatch.
+ * Days supply is intentionally NOT compared anywhere in this module (or
+ * anywhere in the engine) — removed per pharmacist feedback: it isn't a
+ * meaningful discrepancy signal for this workflow, so it's neither
+ * checked nor surfaced in any category.
  *
  * Refills: exact = GREEN, else RED (no legitimate-difference category).
  *
- * Prescriber: compare by NPI when both sides provide one — exact NPI
- * match is GREEN even if the name spelling differs (note name_variant).
- * NPI mismatch is RED (an NPI is an unambiguous identifier). When NPI is
- * absent on either side, fall back to name comparison (module 1 rules).
+ * Prescriber is FOUR separate comparisons (name, NPI, phone, address),
+ * each producing its own FieldVerdict — see comparePrescriberName/
+ * Npi/Phone/Address below. A bundled single "prescriber" verdict used to
+ * hide which specific piece actually differed; splitting it out lets the
+ * pharmacist see e.g. "NPI matches, phone differs" instead of one vague
+ * mismatch. NPI is the authoritative identifier (RED on mismatch); name
+ * uses the same rules as patient name (module 1); phone and address are
+ * never RED on their own — a differing callback number or office address
+ * doesn't mean a different prescriber, just needs a glance.
  */
 
 import { compareNames } from '../normalize/name.js';
+import { compareAddresses } from '../normalize/address.js';
 import type { ParsedSig } from '../sig/index.js';
-import type { Prescriber } from '../types.js';
+import type { Address } from '../types.js';
 
 export type SimpleStatus = 'green' | 'yellow' | 'red';
 
@@ -154,35 +162,6 @@ export function compareQuantity(
   };
 }
 
-export function compareDaysSupply(
-  sourceRaw: string | number | null | undefined,
-  enteredRaw: string | number | null | undefined
-): CompareResult {
-  const srcEmpty = sourceRaw === null || sourceRaw === undefined || sourceRaw === '';
-  const entEmpty = enteredRaw === null || enteredRaw === undefined || enteredRaw === '';
-
-  if (srcEmpty) {
-    return {
-      status: 'yellow',
-      reasonCode: 'not_provided',
-      explanation: 'Source e-prescription did not provide days supply — this is an optional NCPDP field, not a discrepancy.'
-    };
-  }
-  if (entEmpty) {
-    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'No days supply was entered in PioneerRx to compare against the source.' };
-  }
-
-  const a = toNumber(sourceRaw);
-  const b = toNumber(enteredRaw);
-  if (a === null || b === null) {
-    return { status: 'yellow', reasonCode: 'unparseable_quantity', explanation: `Could not parse days supply ("${sourceRaw}" / "${enteredRaw}") as a number.` };
-  }
-  if (a === b) {
-    return { status: 'green', reasonCode: 'exact_match', explanation: 'Days supply matches exactly.' };
-  }
-  return { status: 'red', reasonCode: 'days_supply_mismatch', explanation: `Days supply differs: ${a} vs ${b}.` };
-}
-
 export function compareRefills(
   sourceRaw: string | number | null | undefined,
   enteredRaw: string | number | null | undefined
@@ -208,46 +187,92 @@ export function compareRefills(
   return { status: 'red', reasonCode: 'refills_mismatch', explanation: `Refill count differs: ${a} vs ${b}.` };
 }
 
-export function comparePrescriber(
-  sourceRaw: Prescriber | null | undefined,
-  enteredRaw: Prescriber | null | undefined
+/**
+ * Prescriber NAME field — same rules as patient name (module 1),
+ * independent of NPI. Previously, a matching NPI would force this to
+ * GREEN even when the name text differed ("name_variant"); now that name
+ * and NPI are separate fields, each is judged on its own terms — a
+ * spelling variant is still a legitimate (yellow) name-level difference
+ * worth a glance, even though the NPI field alongside it will be green.
+ */
+export function comparePrescriberName(
+  sourceName: string | null | undefined,
+  enteredName: string | null | undefined
 ): CompareResult {
-  const sourceEmpty = !sourceRaw || (!sourceRaw.name && !sourceRaw.npi);
-  const enteredEmpty = !enteredRaw || (!enteredRaw.name && !enteredRaw.npi);
+  return compareNames(sourceName, enteredName);
+}
 
-  if (sourceEmpty) {
-    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'Source e-prescription did not provide a prescriber to compare.' };
+/** Prescriber NPI field — an NPI is an unambiguous identifier: exact match is GREEN, any digit difference is RED (never a legitimate difference). */
+export function comparePrescriberNpi(
+  sourceNpi: string | null | undefined,
+  enteredNpi: string | null | undefined
+): CompareResult {
+  const srcEmpty = !sourceNpi || !sourceNpi.trim();
+  const entEmpty = !enteredNpi || !enteredNpi.trim();
+
+  if (srcEmpty) {
+    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'Source e-prescription did not provide a prescriber NPI to compare.' };
   }
-  if (enteredEmpty) {
-    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'No prescriber was entered in PioneerRx to compare against the source.' };
-  }
-
-  const src = sourceRaw as Prescriber;
-  const ent = enteredRaw as Prescriber;
-
-  if (src.npi && ent.npi) {
-    const npiA = src.npi.replace(/\D/g, '');
-    const npiB = ent.npi.replace(/\D/g, '');
-    if (npiA === npiB) {
-      const namesDiffer =
-        src.name && ent.name && src.name.trim().toLowerCase() !== ent.name.trim().toLowerCase();
-      if (namesDiffer) {
-        return {
-          status: 'green',
-          reasonCode: 'name_variant',
-          explanation: `NPI matches exactly (${npiA}); prescriber name is spelled differently ("${src.name}" vs "${ent.name}") but the identifier confirms it's the same prescriber.`
-        };
-      }
-      return { status: 'green', reasonCode: 'exact_match', explanation: `NPI matches exactly (${npiA}).` };
-    }
-    return {
-      status: 'red',
-      reasonCode: 'npi_mismatch',
-      explanation: `Prescriber NPI differs: ${npiA} vs ${npiB}.`
-    };
+  if (entEmpty) {
+    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'No prescriber NPI was entered in PioneerRx to compare against the source.' };
   }
 
-  // Fall back to name comparison per module 1 rules.
-  const nameResult = compareNames(src.name, ent.name);
-  return nameResult;
+  const npiA = sourceNpi.replace(/\D/g, '');
+  const npiB = enteredNpi.replace(/\D/g, '');
+
+  if (npiA === npiB) {
+    return { status: 'green', reasonCode: 'exact_match', explanation: `Prescriber NPI matches exactly (${npiA}).` };
+  }
+  return { status: 'red', reasonCode: 'npi_mismatch', explanation: `Prescriber NPI differs: ${npiA} vs ${npiB}.` };
+}
+
+/**
+ * Prescriber PHONE field. Never RED on its own — a clinic often has more
+ * than one legitimate number (direct line vs front desk vs after-hours),
+ * so a differing phone doesn't imply a different prescriber the way a
+ * differing NPI does. Compared on digits only (formatting-agnostic).
+ */
+export function comparePrescriberPhone(
+  sourcePhone: string | null | undefined,
+  enteredPhone: string | null | undefined
+): CompareResult {
+  const srcEmpty = !sourcePhone || !sourcePhone.trim();
+  const entEmpty = !enteredPhone || !enteredPhone.trim();
+
+  if (srcEmpty) {
+    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'Source e-prescription did not provide a prescriber phone number to compare.' };
+  }
+  if (entEmpty) {
+    return { status: 'yellow', reasonCode: 'not_provided', explanation: 'No prescriber phone number was entered in PioneerRx to compare against the source.' };
+  }
+
+  const digitsA = sourcePhone.replace(/\D/g, '');
+  const digitsB = enteredPhone.replace(/\D/g, '');
+  // Compare on the last 10 digits so a leading US country code ("1") on
+  // only one side doesn't cause a false difference.
+  const tailA = digitsA.slice(-10);
+  const tailB = digitsB.slice(-10);
+
+  if (tailA && tailA === tailB) {
+    return { status: 'green', reasonCode: 'exact_match', explanation: 'Prescriber phone number matches exactly.' };
+  }
+  return {
+    status: 'yellow',
+    reasonCode: 'phone_differs',
+    explanation: `Prescriber phone number differs ("${sourcePhone}" vs "${enteredPhone}") — a clinic can have more than one legitimate number; verify if needed.`
+  };
+}
+
+/**
+ * Prescriber ADDRESS field — same "never RED" philosophy as patient
+ * address (practices move/have multiple locations); reuses
+ * compareAddresses so both fields normalize identically (street-suffix/
+ * directional abbreviations, freeform-vs-component tolerance for the
+ * entered side's single combined string vs the source's split fields).
+ */
+export function comparePrescriberAddress(
+  sourceAddress: Address | null | undefined,
+  enteredAddress: Address | null | undefined
+): CompareResult {
+  return compareAddresses(sourceAddress, enteredAddress);
 }

@@ -24,6 +24,10 @@ public sealed class Prescriber
 {
     public string? Name { get; set; }
     public string? Npi { get; set; }
+    /// <summary>Prescriber's office phone. Added per Will's live-test feedback so it's its own compared/displayed field.</summary>
+    public string? Phone { get; set; }
+    /// <summary>Prescriber's office address. Entered side is one combined string (Street only); source is split into components — same shape as PatientAddress.</summary>
+    public Address? Address { get; set; }
 }
 
 public sealed class DrugDescriptor
@@ -58,8 +62,10 @@ public sealed class PrescriptionRecord
     /// </summary>
     public string? Quantity { get; set; }
     public string? QuantityUnit { get; set; }
-    public string? DaysSupply { get; set; }
     public string? Refills { get; set; }
+    // DaysSupply removed: per Will's live-test feedback, days supply is
+    // no longer read, compared, or displayed anywhere — see FieldOrder
+    // below and types.ts's matching removal.
 }
 
 /// <summary>Request body sent to verify-cli on stdin: { source, entered }.</summary>
@@ -119,6 +125,12 @@ public sealed class VerifyResult
 /// itself asserts this order in its own output, so this is a
 /// belt-and-suspenders duplicate check on the C# side (see
 /// ViewModels/OverlayViewModel.cs).
+///
+/// Per Will's live-test feedback round: "prescriber" is now FOUR
+/// separate fields (name/NPI/phone/address), each with its own verdict
+/// and display row, instead of one bundled field — a bundled field hid
+/// which specific piece actually differed. "daysSupply" is REMOVED
+/// entirely (not compared, not displayed, not in this list at all).
 /// </summary>
 public static class FieldOrder
 {
@@ -127,51 +139,62 @@ public static class FieldOrder
         "patientName",
         "patientDOB",
         "patientAddress",
-        "prescriber",
+        "prescriberName",
+        "prescriberNpi",
+        "prescriberPhone",
+        "prescriberAddress",
         "dateWritten",
         "drug",
         "sig",
         "quantity",
-        "daysSupply",
         "refills"
     };
 
-    /// <summary>Human-readable label for each field, in fixed order, for the overlay UI.</summary>
+    /// <summary>
+    /// Human-readable label for each field, in fixed order, for the
+    /// overlay UI. These are deliberately SHORT (no "Patient"/
+    /// "Prescriber" prefix) — the category header the row lives under
+    /// (see FieldCategories below, and MainWindow.xaml) already says
+    /// "Patient"/"Prescriber"/"Rx", so repeating it on every row read as
+    /// redundant clutter in the compact table.
+    /// </summary>
     public static readonly IReadOnlyDictionary<string, string> DisplayNames = new Dictionary<string, string>
     {
-        ["patientName"] = "Patient",
-        ["patientDOB"] = "Patient DOB",
-        ["patientAddress"] = "Patient Address",
-        ["prescriber"] = "Prescriber",
+        ["patientName"] = "Name",
+        ["patientDOB"] = "DOB",
+        ["patientAddress"] = "Address",
+        ["prescriberName"] = "Name",
+        ["prescriberNpi"] = "NPI",
+        ["prescriberPhone"] = "Phone",
+        ["prescriberAddress"] = "Address",
         ["dateWritten"] = "Date Written",
         ["drug"] = "Drug",
         ["sig"] = "Sig / Directions",
         ["quantity"] = "Quantity",
-        ["daysSupply"] = "Days Supply",
         ["refills"] = "Refills"
     };
 }
 
 /// <summary>
-/// Groups the 10 FieldOrder.Fields into the 3 categories the overlay's
+/// Groups the 12 FieldOrder.Fields into the 3 categories the overlay's
 /// compact table displays (Patient / Prescriber / Rx), per Will's spec:
 /// "Patient (name, DOB), Prescriber (name, NPI), Rx (drug, sig, quantity,
-/// days supply, refills, written date — whatever applies)". Two notes on
-/// fields Will's spec didn't name individually:
-///   - "prescriber" is already a single verdict field bundling
-///     name+NPI together (see FieldReader/EngineClient — the engine
-///     never splits it into two), so it maps to ONE category, not two.
+/// days supply, refills, written date — whatever applies)" — days supply
+/// has since been removed per the live-test feedback round, and
+/// prescriber split into 4 fields (name/NPI/phone/address), all mapped to
+/// the same Prescriber category here.
 ///   - "patientAddress" isn't in Will's 2-field Patient example, but it's
-///     one of the 10 fields the engine always returns and is clearly
+///     one of the fields the engine always returns and is clearly
 ///     patient-identity data, not Rx or Prescriber data — it's grouped
 ///     under Patient here as the only sensible home for it rather than
 ///     silently dropped from the compact view. Flag to Will if he'd
 ///     rather it live elsewhere or be hidden.
 /// FieldOrder.Fields happens to already list all fields for one category
-/// contiguously (patientName, patientDOB, patientAddress, prescriber,
-/// dateWritten, drug, sig, quantity, daysSupply, refills), so building
-/// each category's rows by filtering FieldOrder.Fields through this map
-/// preserves the pharmacist's required field order within each category.
+/// contiguously (patientName, patientDOB, patientAddress, prescriberName,
+/// prescriberNpi, prescriberPhone, prescriberAddress, dateWritten, drug,
+/// sig, quantity, refills), so building each category's rows by filtering
+/// FieldOrder.Fields through this map preserves the pharmacist's required
+/// field order within each category.
 /// </summary>
 public static class FieldCategories
 {
@@ -187,12 +210,14 @@ public static class FieldCategories
         ["patientName"] = Patient,
         ["patientDOB"] = Patient,
         ["patientAddress"] = Patient,
-        ["prescriber"] = Prescriber,
+        ["prescriberName"] = Prescriber,
+        ["prescriberNpi"] = Prescriber,
+        ["prescriberPhone"] = Prescriber,
+        ["prescriberAddress"] = Prescriber,
         ["dateWritten"] = Rx,
         ["drug"] = Rx,
         ["sig"] = Rx,
         ["quantity"] = Rx,
-        ["daysSupply"] = Rx,
         ["refills"] = Rx
     };
 }

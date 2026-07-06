@@ -1,13 +1,10 @@
 {
-  "description": "Source e-prescription omits days supply (normal NCPDP-optional field).",
+  "description": "Live-test feedback (Will, 2026-07-06): number-word dose count and 'every night at bedtime' phrasing must be semantically equal to digit/qhs abbreviation form -- was YELLOW, must be GREEN.",
   "source": {
-    "quantity": 30,
-    "refills": 1
+    "sig": "Take 1 tablet by mouth every night at bedtime"
   },
   "entered": {
-    "quantity": 30,
-    "daysSupply": 30,
-    "refills": 1
+    "sig": "TAKE ONE TABLET BY MOUTH EVERY NIGHT AT BEDTIME."
   },
   "expected": [
     {
@@ -26,7 +23,22 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "prescriber",
+      "field": "prescriberName",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberNpi",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberPhone",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "prescriberAddress",
       "status": "yellow",
       "reasonCode": "not_provided"
     },
@@ -42,29 +54,24 @@
     },
     {
       "field": "sig",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
-      "field": "quantity",
       "status": "green",
       "reasonCode": "exact_match"
     },
     {
-      "field": "daysSupply",
+      "field": "quantity",
       "status": "yellow",
       "reasonCode": "not_provided"
     },
     {
       "field": "refills",
-      "status": "green",
-      "reasonCode": "exact_match"
+      "status": "yellow",
+      "reasonCode": "not_provided"
     }
   ],
   "expectedSummary": {
-    "green": 2,
-    "yellow": 8,
+    "green": 1,
+    "yellow": 11,
     "red": 0,
-    "total": 10
+    "total": 12
   }
 }

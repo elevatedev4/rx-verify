@@ -38,6 +38,19 @@ describe('parseSig', () => {
     const p = parseSig('use as directed');
     expect(p.ambiguous).toBe(true);
   });
+
+  it('extracts spelled-out number words as dose counts, matching digit equivalents', () => {
+    const p1 = parseSig('take one tablet po qhs');
+    const p2 = parseSig('take 1 tab po qhs');
+    expect(p1.doseCount).toBe(1);
+    expect(p1.doseCount).toBe(p2.doseCount);
+  });
+
+  it('recognizes "every night at bedtime" as the qhs (once nightly) frequency', () => {
+    const p = parseSig('take 1 tablet every night at bedtime');
+    expect(p.timesPerDay).toBe(1);
+    expect(p.ambiguous).toBe(false);
+  });
 });
 
 describe('compareSigs', () => {
@@ -49,6 +62,15 @@ describe('compareSigs', () => {
   it('is GREEN for q.d./daily variants', () => {
     const r = compareSigs('take 1 tab po q.d.', 'take 1 tab po daily');
     expect(r.status).toBe('green');
+  });
+
+  it('is GREEN for the live-test regression: "Take 1 tablet by mouth every night at bedtime" vs the same in words/caps', () => {
+    const r = compareSigs(
+      'Take 1 tablet by mouth every night at bedtime',
+      'TAKE ONE TABLET BY MOUTH EVERY NIGHT AT BEDTIME.'
+    );
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
   });
 
   it('is RED on dose count mismatch', () => {

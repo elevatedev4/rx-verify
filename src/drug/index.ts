@@ -320,6 +320,24 @@ export function extractStatedStrength(name: string): string | null {
   return `${m[1]}${unit}`;
 }
 
+/**
+ * Normalize a free-text drug name/description for IDENTITY comparison:
+ * case/punctuation/whitespace only, no pharmaceutical-equivalence
+ * reasoning (that would need real RxNorm data — see this file's header).
+ * Deliberately conservative: this can only ever fail to recognize a real
+ * match (e.g. "Phosp" vs "Phosphate" spelled out differently) and fall
+ * through to the concept-resolution path below, never produce a false
+ * green from two actually-different drugs looking superficially similar.
+ */
+export function normalizeDrugNameString(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[®™©]/g, '')
+    .replace(/[.,]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function compareDrugs(
   sourceRaw: { name?: string; ndc?: string } | null | undefined,
   enteredRaw: { name?: string; ndc?: string } | null | undefined,
@@ -345,6 +363,31 @@ export function compareDrugs(
 
   const src = sourceRaw as { name?: string; ndc?: string };
   const ent = enteredRaw as { name?: string; ndc?: string };
+
+  // DRUG IDENTITY BY NAME, FIRST: a real e-script's NDC almost never
+  // equals the NDC actually dispensed (many NDCs exist per drug —
+  // different labeler/package/lot), and in the live overlay the entered
+  // side never carries an NDC at all (PioneerRx's item field only
+  // exposes a typed name — see overlay/.../Uia/FieldReader.cs). Requiring
+  // NDC agreement as the primary signal means a real, correctly-matching
+  // drug would routinely fail to show green. So: if BOTH sides state a
+  // drug name, normalize (case/punctuation/whitespace only — no
+  // pharmaceutical-equivalence reasoning) and treat an exact normalized
+  // match as the drug identity match, regardless of whether either side's
+  // NDC is present or whether the NDCs agree. NDC stays available below
+  // for behind-the-scenes lookup only (the local openFDA dataset, used to
+  // resolve ingredient/strength/form for the RED/YELLOW paths) — a
+  // precise RxNorm-rxcui identity compare is documented future work (see
+  // this file's header) once Will's UTS license lands.
+  const srcNameNorm = src.name ? normalizeDrugNameString(src.name) : null;
+  const entNameNorm = ent.name ? normalizeDrugNameString(ent.name) : null;
+  if (srcNameNorm && entNameNorm && srcNameNorm === entNameNorm) {
+    return {
+      status: 'green',
+      reasonCode: 'name_identity_match',
+      explanation: `Drug name/description matches exactly after normalization ("${src.name}" / "${ent.name}") — NDC not compared directly, since the dispensed NDC routinely differs from the e-script's stated NDC.`
+    };
+  }
 
   const srcNdc = src.ndc ? parseNdc(src.ndc) : null;
   const entNdc = ent.ndc ? parseNdc(ent.ndc) : null;

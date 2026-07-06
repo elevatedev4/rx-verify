@@ -17,11 +17,15 @@ public class EscriptTreeParserTests
     /// every field populated, matching the real nesting shape: Name
     /// (First/Middle/Last), DateOfBirth > Date (nested one level),
     /// Address, Prescriber > Identification > NPI (nested, NOT a direct
-    /// leaf), MedicationPrescribed with DrugDescription as a direct
-    /// leaf, DrugCoded > ProductCode > Code, Quantity > Value +
-    /// QuantityUnitOfMeasure, DaysSupply as a direct leaf, WrittenDate >
-    /// Date, the Refills multi-colon key, and Sig > SigText containing an
-    /// embedded time (colon) in its value.
+    /// leaf) + Address + CommunicationNumbers > PrimaryTelephone > Number,
+    /// MedicationPrescribed with DrugDescription as a direct leaf,
+    /// DrugCoded > ProductCode > Code, Quantity > Value +
+    /// QuantityUnitOfMeasure, WrittenDate > Date, the Refills multi-colon
+    /// key, and Sig > SigText containing an embedded time (colon) in its
+    /// value. A DaysSupply leaf is included but deliberately UNMAPPED
+    /// (like Substitutions below) -- days supply was removed entirely
+    /// per Will's live-test feedback, so the parser must ignore it
+    /// safely rather than surface it anywhere on PrescriptionRecord.
     /// </summary>
     private static EscriptNode BuildFullSyntheticMessage() =>
         EscriptNode.Container("Message",
@@ -46,7 +50,15 @@ public class EscriptTreeParserTests
                             EscriptNode.Leaf("NPI", "1111111111")),
                         EscriptNode.Container("Name",
                             EscriptNode.Leaf("LastName", "Doctorson"),
-                            EscriptNode.Leaf("FirstName", "Pat"))),
+                            EscriptNode.Leaf("FirstName", "Pat")),
+                        EscriptNode.Container("Address",
+                            EscriptNode.Leaf("AddressLine1", "1 Clinic Way"),
+                            EscriptNode.Leaf("City", "Testville"),
+                            EscriptNode.Leaf("StateProvince", "KS"),
+                            EscriptNode.Leaf("PostalCode", "660001111")),
+                        EscriptNode.Container("CommunicationNumbers",
+                            EscriptNode.Container("PrimaryTelephone",
+                                EscriptNode.Leaf("Number", "5555550100")))),
                     EscriptNode.Container("MedicationPrescribed",
                         EscriptNode.Leaf("DrugDescription", "Fakamycin 1 % Lotion"),
                         EscriptNode.Container("DrugCoded",
@@ -73,8 +85,12 @@ public class EscriptTreeParserTests
     {
         var record = EscriptTreeParser.Parse(BuildFullSyntheticMessage());
 
-        Assert.Equal("Jamie Q Testperson", record.PatientName);
-        Assert.Equal("1990-01-15", record.PatientDOB);
+        // "Last, First Middle" (comma format) -- matches PioneerRx's own
+        // quick-search display style, not the raw First/Middle/Last leaf
+        // order (see EscriptTreeParser.JoinNameLastFirstMiddle).
+        Assert.Equal("Testperson, Jamie Q", record.PatientName);
+        // ISO "1990-01-15" reformatted to PioneerRx's M/d/yyyy display style.
+        Assert.Equal("1/15/1990", record.PatientDOB);
         Assert.NotNull(record.PatientAddress);
         Assert.Equal("100 Fake St", record.PatientAddress!.Street);
         Assert.Equal("Testville", record.PatientAddress.City);
@@ -82,8 +98,12 @@ public class EscriptTreeParserTests
         Assert.Equal("660000000", record.PatientAddress.Zip);
 
         Assert.NotNull(record.Prescriber);
-        Assert.Equal("Pat Doctorson", record.Prescriber!.Name);
+        Assert.Equal("Doctorson, Pat", record.Prescriber!.Name);
         Assert.Equal("1111111111", record.Prescriber.Npi);
+        Assert.Equal("5555550100", record.Prescriber.Phone);
+        Assert.NotNull(record.Prescriber.Address);
+        Assert.Equal("1 Clinic Way", record.Prescriber.Address!.Street);
+        Assert.Equal("Testville", record.Prescriber.Address.City);
 
         Assert.NotNull(record.Drug);
         Assert.Equal("Fakamycin 1 % Lotion", record.Drug!.Name);
@@ -91,8 +111,8 @@ public class EscriptTreeParserTests
 
         Assert.Equal("50", record.Quantity);
         Assert.Equal("Unspecified", record.QuantityUnit);
-        Assert.Equal("30", record.DaysSupply);
-        Assert.Equal("2026-01-01", record.DateWritten);
+        // ISO "2026-01-01" reformatted to PioneerRx's M/d/yyyy display style.
+        Assert.Equal("1/1/2026", record.DateWritten);
         Assert.Equal("2", record.Refills);
         Assert.Equal("Take 1 tablet at 10:00 AM daily", record.Sig);
     }
@@ -162,7 +182,7 @@ public class EscriptTreeParserTests
 
         var record = EscriptTreeParser.Parse(message);
 
-        Assert.Equal("Jamie Solo", record.PatientName);
+        Assert.Equal("Solo, Jamie", record.PatientName);
         Assert.Null(record.PatientDOB);
         Assert.Null(record.PatientAddress);
         Assert.Null(record.Prescriber);
@@ -170,7 +190,6 @@ public class EscriptTreeParserTests
         Assert.Null(record.Sig);
         Assert.Null(record.Quantity);
         Assert.Null(record.QuantityUnit);
-        Assert.Null(record.DaysSupply);
         Assert.Null(record.DateWritten);
         Assert.Null(record.Refills);
     }
@@ -210,8 +229,8 @@ public class EscriptTreeParserTests
 
         var record = EscriptTreeParser.Parse(message);
 
-        Assert.Equal("2000-06-15", record.PatientDOB);
-        Assert.Equal("2026-02-02", record.DateWritten);
+        Assert.Equal("6/15/2000", record.PatientDOB);
+        Assert.Equal("2/2/2026", record.DateWritten);
     }
 
     [Fact]
@@ -231,6 +250,6 @@ public class EscriptTreeParserTests
 
         Assert.NotNull(record.Prescriber);
         Assert.Equal("2222222222", record.Prescriber!.Npi);
-        Assert.Equal("Sam Prescriber", record.Prescriber.Name);
+        Assert.Equal("Prescriber, Sam", record.Prescriber.Name);
     }
 }

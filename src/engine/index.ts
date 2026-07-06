@@ -12,13 +12,45 @@ import { compareDates } from '../normalize/date.js';
 import { compareAddresses } from '../normalize/address.js';
 import { compareSigs, parseSig } from '../sig/index.js';
 import { compareDrugs, type RxNormProvider } from '../drug/index.js';
-import { compareQuantity, compareDaysSupply, compareRefills, comparePrescriber } from '../quantity/index.js';
+import {
+  compareQuantity,
+  compareRefills,
+  comparePrescriberName,
+  comparePrescriberNpi,
+  comparePrescriberPhone,
+  comparePrescriberAddress
+} from '../quantity/index.js';
+
+/** True for anything shaped like the Address interface (street/unit/city/state/zip keys only). */
+function isAddressLike(v: Record<string, unknown>): boolean {
+  const keys = Object.keys(v);
+  return keys.length > 0 && keys.every((k) => ['street', 'unit', 'city', 'state', 'zip'].includes(k));
+}
 
 function stringifyValue(v: unknown): string | null {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'object') {
-    const parts = Object.values(v as Record<string, unknown>).filter((p) => p !== undefined && p !== null && p !== '');
+    const record = v as Record<string, unknown>;
+    const parts = Object.values(record).filter((p) => p !== undefined && p !== null && p !== '');
     if (parts.length === 0) return null;
+    // Addresses (patientAddress, prescriberAddress) display as one
+    // human-readable line — "street, city, state zip" — instead of raw
+    // JSON, so the source/entered columns are directly comparable at a
+    // glance regardless of which side supplied split components vs a
+    // single combined string (see normalize/address.ts).
+    if (isAddressLike(record)) {
+      const street = [record.street, record.unit].filter((p) => typeof p === 'string' && p).join(' Unit ');
+      const cityStateZip = [record.city, [record.state, record.zip].filter(Boolean).join(' ')]
+        .filter((p) => typeof p === 'string' && p)
+        .join(', ');
+      return [street, cityStateZip].filter(Boolean).join(', ') || null;
+    }
+    // Drug is displayed by NAME only — never the NDC (see src/drug/index.ts:
+    // real dispensed NDCs routinely differ from the e-script's stated NDC,
+    // so showing it side-by-side reads as a false mismatch to a glance).
+    if (Object.keys(record).every((k) => ['name', 'ndc'].includes(k))) {
+      return typeof record.name === 'string' && record.name ? record.name : null;
+    }
     return JSON.stringify(v);
   }
   return String(v);
@@ -32,7 +64,10 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
   // (e.g. "3/5/45" -> 2045) re-windows to the 1900s instead.
   const dobResult = compareDates(source.patientDOB, entered.patientDOB, { pastOnly: true });
   const addressResult = compareAddresses(source.patientAddress, entered.patientAddress);
-  const prescriberResult = comparePrescriber(source.prescriber, entered.prescriber);
+  const prescriberNameResult = comparePrescriberName(source.prescriber?.name, entered.prescriber?.name);
+  const prescriberNpiResult = comparePrescriberNpi(source.prescriber?.npi, entered.prescriber?.npi);
+  const prescriberPhoneResult = comparePrescriberPhone(source.prescriber?.phone, entered.prescriber?.phone);
+  const prescriberAddressResult = comparePrescriberAddress(source.prescriber?.address, entered.prescriber?.address);
   const dateWrittenResult = compareDates(source.dateWritten, entered.dateWritten);
   const drugResult = compareDrugs(source.drug, entered.drug, provider);
   const sigResult = compareSigs(source.sig, entered.sig);
@@ -43,7 +78,6 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
     entered.quantityUnit,
     enteredSigParsed
   );
-  const daysSupplyResult = compareDaysSupply(source.daysSupply, entered.daysSupply);
   const refillsResult = compareRefills(source.refills, entered.refills);
 
   const verdicts: FieldVerdict[] = [
@@ -66,10 +100,28 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
       enteredValue: stringifyValue(entered.patientAddress)
     },
     {
-      field: 'prescriber',
-      ...prescriberResult,
-      sourceValue: stringifyValue(source.prescriber),
-      enteredValue: stringifyValue(entered.prescriber)
+      field: 'prescriberName',
+      ...prescriberNameResult,
+      sourceValue: stringifyValue(source.prescriber?.name),
+      enteredValue: stringifyValue(entered.prescriber?.name)
+    },
+    {
+      field: 'prescriberNpi',
+      ...prescriberNpiResult,
+      sourceValue: stringifyValue(source.prescriber?.npi),
+      enteredValue: stringifyValue(entered.prescriber?.npi)
+    },
+    {
+      field: 'prescriberPhone',
+      ...prescriberPhoneResult,
+      sourceValue: stringifyValue(source.prescriber?.phone),
+      enteredValue: stringifyValue(entered.prescriber?.phone)
+    },
+    {
+      field: 'prescriberAddress',
+      ...prescriberAddressResult,
+      sourceValue: stringifyValue(source.prescriber?.address),
+      enteredValue: stringifyValue(entered.prescriber?.address)
     },
     {
       field: 'dateWritten',
@@ -94,12 +146,6 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
       ...quantityResult,
       sourceValue: stringifyValue(source.quantity),
       enteredValue: stringifyValue(entered.quantity)
-    },
-    {
-      field: 'daysSupply',
-      ...daysSupplyResult,
-      sourceValue: stringifyValue(source.daysSupply),
-      enteredValue: stringifyValue(entered.daysSupply)
     },
     {
       field: 'refills',
