@@ -1,37 +1,27 @@
-using System;
-using System.Collections.Generic;
-using System.Drawing;
 using System.Text;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using RxVerifyOverlay.Parsing;
 
 namespace RxVerifyOverlay.Uia;
 
 /// <summary>
-/// Walks the FULL UIA control-view tree of a window (not just the
-/// focusable/tab-order elements) and pairs on-screen labels ("Patient:",
-/// "DOB:", etc.) with their values. This is the piece that makes the
-/// read-only text nodes readable — the phase-0 spec found those are
-/// Not Focusable, so anything that only walks focusable controls (tab
-/// order) misses them entirely; the value is exposed as the element's
-/// Name, but only reachable by a full control-view walk.
+/// Two independent jobs, both against the FULL UIA tree of a PioneerRx
+/// window:
+///   1. Find a single element ANYWHERE under the window by AutomationId
+///      (used for the ENTERED/RxDetailsPanel fields — see FieldMap.cs) —
+///      no fixed ancestor chain, no label/position guessing.
+///   2. Walk the Escript tab's Tree control (ux10Dot6Escript) into the
+///      UIA-free EscriptNode structure that EscriptTreeParser consumes —
+///      this is the one adapter between live FlaUI/UIA and the pure,
+///      unit-testable parser.
 ///
-/// PAIRING STRATEGY (best-effort, needs live validation — see
-/// FieldMap.cs header):
-///   1. Collect all elements in the window in DEPTH-FIRST,
-///      LEFT-TO-RIGHT / TOP-TO-BOTTOM traversal order (which is how
-///      UIA's raw tree naturally walks a form laid out in reading
-///      order), find the text/label element whose Name equals the
-///      requested label (e.g. "DOB:"), and take the NEXT element in
-///      that traversal order as the value — whether that's an edit's
-///      Value pattern text or a read-only text node's Name.
-///   2. Because several labels repeat (e.g. "Address:" and "Phone:"
-///      appear twice — once for patient, once for prescriber — callers
-///      pass an `occurrence` index (0-based) to disambiguate, and/or a
-///      `withinBounds` rectangle to scope the search to one visual
-///      panel (left data-entry vs. center e-script vs. a specific
-///      color-coded box) when position is known. See FieldReader.cs
-///      for how each panel's bounds are established.
+/// Superseded design note: earlier versions of this file paired on-screen
+/// text labels with positionally-adjacent values (FindValueForLabel).
+/// That was inferred from screenshots and never validated against a live
+/// PioneerRx window; it has been removed in favor of the AutomationId-
+/// and tree-shape-based approach below, confirmed against two real UIA
+/// dumps (see FieldMap.cs header).
 /// </summary>
 public sealed class UiaTreeWalker
 {
@@ -42,165 +32,198 @@ public sealed class UiaTreeWalker
         _root = root;
     }
 
-    /// <summary>
-    /// Every element in the window, in document (reading) order, via the
-    /// raw view — i.e. NOT filtered down to control-view/content-view,
-    /// so Not-Focusable text nodes are included. FlaUI's default
-    /// FindAllDescendants uses the control view, which already includes
-    /// text elements in practice for most native controls; if a value
-    /// turns out to be missing on Will's real window, switch the walker
-    /// to `RawViewWalker` (FlaUI.Core.Tools) for that specific call —
-    /// left as a documented fallback rather than the default, since the
-    /// raw view is much noisier (includes non-semantic scrollbars,
-    /// internal panes, etc.) and slower to walk on every refresh.
-    /// </summary>
-    public List<AutomationElement> GetAllElementsInOrder()
-    {
-        var result = new List<AutomationElement>();
-        CollectDepthFirst(_root, result);
-        return result;
-    }
+    // ------------------------------------------------------------------
+    // ENTERED (AutomationId lookups, anywhere under the window)
+    // ------------------------------------------------------------------
 
-    private static void CollectDepthFirst(AutomationElement element, List<AutomationElement> into)
+    /// <summary>
+    /// Reads a read-only Text element's value by AutomationId — .Name IS
+    /// the value directly for these controls (confirmed for uxPatientDOB,
+    /// uxPatientAddress, uxNpi in both real dumps). Returns null if the
+    /// element isn't found or its Name is blank.
+    /// </summary>
+    public string? ReadTextByAutomationId(string automationId)
     {
-        into.Add(element);
-        AutomationElement[] children;
+        var element = FindDescendantByAutomationId(automationId);
+        if (element is null) return null;
+
         try
         {
-            children = element.FindAllChildren();
+            var name = element.Name;
+            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
         }
         catch
         {
-            // Some UIA providers throw on disconnected/stale elements
-            // mid-walk (e.g. PioneerRx redraws while we're reading).
-            // Skip this branch rather than crash the whole read.
-            return;
-        }
-
-        foreach (var child in children)
-        {
-            CollectDepthFirst(child, into);
+            return null;
         }
     }
 
     /// <summary>
-    /// Finds the value for a given on-screen label, e.g. "DOB:".
-    /// Returns null if the label isn't found, or if it's found but no
-    /// plausible value follows it (caller must treat that as "field not
-    /// provided", never as a mismatch — see FieldReader).
+    /// Reads an Edit/ComboBox's current value by AutomationId. See
+    /// ReadEditOrComboValue for the ValuePattern-then-Name fallback
+    /// strategy and its documented caveats.
     /// </summary>
-    /// <param name="label">Exact label text as it appears on screen, e.g. "Phone:".</param>
-    /// <param name="occurrence">0-based index when the label repeats (e.g. second "Phone:" = prescriber's).</param>
-    /// <param name="searchBounds">
-    /// Optional bounding rectangle (screen coordinates) to scope the
-    /// search to one panel/box, so repeated labels ("Address:", "Phone:")
-    /// resolve to the right occurrence by POSITION instead of by
-    /// fragile ordinal counting across the whole window.
-    /// </param>
-    public string? FindValueForLabel(string label, int occurrence = 0, Rectangle? searchBounds = null)
+    public string? ReadEditOrComboByAutomationId(string automationId)
     {
-        var all = GetAllElementsInOrder();
-        var candidates = new List<(AutomationElement Element, int Index)>();
-
-        for (var i = 0; i < all.Count; i++)
-        {
-            var el = all[i];
-            string? name;
-            try { name = el.Name; }
-            catch { continue; }
-
-            if (name is null) continue;
-            if (!string.Equals(name.Trim(), label.Trim(), StringComparison.Ordinal)) continue;
-
-            if (searchBounds.HasValue)
-            {
-                Rectangle bounds;
-                try { bounds = el.BoundingRectangle; }
-                catch { continue; }
-
-                if (!searchBounds.Value.Contains(bounds)) continue;
-            }
-
-            candidates.Add((el, i));
-        }
-
-        if (candidates.Count == 0) return null;
-        var chosenIndex = occurrence < candidates.Count ? occurrence : candidates.Count - 1;
-        var (_, labelPosition) = candidates[chosenIndex];
-
-        // The next element in traversal order after the label is almost
-        // always its value in these forms (label static text immediately
-        // followed by its edit/pane/text sibling in the same row/column).
-        //
-        // NOTE: UIA does expose a formal LabeledBy relationship
-        // (UIA_LabeledByPropertyId) that would be a more robust primary
-        // signal than position — worth trying first if you have FlaUI's
-        // exact property-wrapper name in front of you on the live
-        // workstation (varies by FlaUI version; check
-        // AutomationElement.Properties in IntelliSense). Left as
-        // positional-only for v0 so this file doesn't depend on an API
-        // shape we couldn't verify without a Windows machine.
-        for (var j = labelPosition + 1; j < all.Count; j++)
-        {
-            var value = ReadValue(all[j]);
-            if (value is not null) return value;
-
-            // Don't walk past a plausible next label — if we hit
-            // another colon-terminated static text before finding a
-            // value, this label had no value (blank field).
-            string? nextName;
-            try { nextName = all[j].Name; }
-            catch { nextName = null; }
-            if (nextName is not null && nextName.TrimEnd().EndsWith(':')) break;
-        }
-
-        return null;
+        var element = FindDescendantByAutomationId(automationId);
+        return element is null ? null : ReadEditOrComboValue(element);
     }
 
     /// <summary>
-    /// Reads a plausible "value" out of an element: an edit/combo's
-    /// ValuePattern text if it has one and it's non-blank, else its Name
-    /// if the element is a read-only text control with non-blank Name
-    /// and isn't itself another label (heuristic: doesn't end in ':').
+    /// Finds the first descendant (anywhere under the window, no fixed
+    /// ancestor path) with the given AutomationId. Returns null rather
+    /// than throwing if it isn't present — the corresponding tab/panel
+    /// may not be rendered yet, or PioneerRx may be mid-redraw.
     /// </summary>
-    private static string? ReadValue(AutomationElement element)
+    public AutomationElement? FindDescendantByAutomationId(string automationId)
+    {
+        try
+        {
+            return _root.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads a plausible current value out of an Edit/ComboBox element:
+    ///   1. ValuePattern.Value, if the pattern is supported and non-blank
+    ///      — this is the correct source of truth for a real typed/
+    ///      selected value and is tried first.
+    ///   2. Otherwise, the Name of the first focusable Edit DESCENDANT
+    ///      (not just direct child) — some WinForms-hosted edit controls
+    ///      expose their real text only on a nested child rather than via
+    ///      ValuePattern on the outer element.
+    ///   3. Otherwise, the element's own Name — for most Edit fields in
+    ///      the real dumps (uxPatientQuickSearch, uxPrescriberQuickSearch,
+    ///      uxQuantityPrescribed, uxRefills, uxWrittenDate) this is just
+    ///      the field's static placeholder label (e.g. "Quantity:"), NOT
+    ///      the typed value — those dumps never captured the control in a
+    ///      populated state via a static Name read. uxDirections is the
+    ///      one confirmed exception where Name already IS the value (see
+    ///      FieldMap.EnteredDirectionsId). Will's next live capture should
+    ///      confirm whether step 1 (ValuePattern) actually resolves the
+    ///      real values for the other fields — if it doesn't, this
+    ///      fallback chain will silently return the placeholder text
+    ///      instead, which the engine would then compare as if it were a
+    ///      real (and wrong) entered value.
+    /// </summary>
+    public static string? ReadEditOrComboValue(AutomationElement element)
     {
         try
         {
             if (element.Patterns.Value.IsSupported)
             {
-                var v = element.Patterns.Value.Pattern.Value.ValueOrDefault;
-                if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+                var value = element.Patterns.Value.Pattern.Value.ValueOrDefault;
+                if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
             }
         }
-        catch { /* pattern not actually available on this provider */ }
+        catch
+        {
+            // Pattern advertised as supported but the provider threw
+            // anyway (seen in practice with some WinForms UIA proxies).
+        }
 
         try
         {
-            if (element.ControlType == ControlType.Text)
+            var innerEdits = element.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
+            foreach (var inner in innerEdits)
             {
-                var name = element.Name;
-                if (!string.IsNullOrWhiteSpace(name) && !name.TrimEnd().EndsWith(':'))
-                {
-                    return name.Trim();
-                }
+                string? name;
+                try { name = inner.Name; } catch { continue; }
+                if (!string.IsNullOrWhiteSpace(name)) return name.Trim();
             }
         }
-        catch { }
+        catch
+        {
+            // Stale/disconnected element mid-redraw — fall through to
+            // the last-resort Name read below.
+        }
+
+        try
+        {
+            var name = element.Name;
+            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SOURCE (Escript tab Tree -> EscriptNode adapter)
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Finds the Escript Tree control (AutomationId ux10Dot6Escript)
+    /// anywhere under the window and walks its single top-level TreeItem
+    /// ("Message" in the real dump) into an EscriptNode tree. Returns
+    /// null if the tree control isn't found at all — this is the "Escript
+    /// tab was never opened this session" case FieldReader/
+    /// IsStructuredSourceAvailable use to show the "open the Escript tab"
+    /// message rather than ten yellow fields.
+    /// </summary>
+    public EscriptNode? BuildEscriptTree()
+    {
+        var treeElement = FindDescendantByAutomationId(FieldMap.EscriptTreeAutomationId);
+        if (treeElement is null) return null;
+
+        AutomationElement[] children;
+        try { children = treeElement.FindAllChildren(); }
+        catch { return null; }
+
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; }
+            catch { continue; }
+
+            // The Tree's real children include a ScrollBar alongside the
+            // actual TreeItem(s) — see the real dump (NonClientVerticalScrollBar
+            // sibling of the top-level "Message" TreeItem). Skip anything
+            // that isn't a TreeItem.
+            if (controlType != ControlType.TreeItem) continue;
+
+            return BuildEscriptNode(child);
+        }
 
         return null;
     }
 
-    /// <summary>
-    /// DEBUG MODE: dumps the full tree (control type, name, automation
-    /// id, focusable, bounding rect, depth) to a plain-text string. Wire
-    /// this to a button in the overlay so Will can capture it against
-    /// the live PioneerRx window and diff it against FieldMap.cs when a
-    /// field doesn't read correctly. Writes NOTHING to disk by itself —
-    /// the caller (MainWindow) decides whether/where to save it, so a
-    /// dump full of real patient data never gets written without an
-    /// explicit, visible action.
-    /// </summary>
+    private static EscriptNode BuildEscriptNode(AutomationElement element)
+    {
+        string name;
+        try { name = element.Name ?? string.Empty; }
+        catch { name = string.Empty; }
+
+        var node = new EscriptNode(name);
+
+        AutomationElement[] children;
+        try { children = element.FindAllChildren(); }
+        catch { return node; }
+
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; }
+            catch { continue; }
+
+            if (controlType != ControlType.TreeItem) continue;
+
+            node.Children.Add(BuildEscriptNode(child));
+        }
+
+        return node;
+    }
+
+    // ------------------------------------------------------------------
+    // DEBUG MODE (unchanged) — dumps the full tree so Will can diff it
+    // against FieldMap.cs when a field doesn't read correctly.
+    // ------------------------------------------------------------------
+
     public string DumpTree()
     {
         var sb = new StringBuilder();

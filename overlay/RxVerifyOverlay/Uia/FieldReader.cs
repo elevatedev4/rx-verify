@@ -1,132 +1,147 @@
-using System;
-using System.Linq;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Parsing;
 
 namespace RxVerifyOverlay.Uia;
 
 /// <summary>
-/// Builds the two engine inputs (EnteredData from the left data-entry
-/// panel, ScriptData from the center e-script panel) by combining
-/// UiaTreeWalker's label lookup with the panel bounds from
-/// PioneerRxWindow and the label strings in FieldMap. Every read is
-/// wrapped so a missing/blank field becomes null rather than an
-/// exception — per the spec, missing data must never be treated as a
-/// mismatch (the engine already handles null fields as "not provided" /
-/// yellow, never red).
+/// Builds the two engine inputs (EnteredData from the left RxDetailsPanel,
+/// ScriptData from the Escript tab's UIA Tree) using AutomationId lookups
+/// (FieldMap's Entered*Id constants, via UiaTreeWalker) and a tree walk
+/// (FieldMap's Node*/Key* constants, via UiaTreeWalker.BuildEscriptTree +
+/// EscriptTreeParser) respectively — confirmed against two real UIA
+/// dumps, replacing the old label+position/fractional-panel-bounds
+/// approach entirely (see FieldMap.cs / UiaTreeWalker.cs headers).
+///
+/// Every read is wrapped so a missing/blank field becomes null rather
+/// than an exception — per the spec, missing data must never be treated
+/// as a mismatch (the engine already handles null fields as "not
+/// provided" / yellow, never red).
+///
+/// DRUG COMPARISON (documented gap, not a silent drop): the SOURCE
+/// (Escript tree) record carries both a drug NAME (DrugDescription) and
+/// an NDC (DrugCoded/ProductCode/Code) straight from the e-script — see
+/// EscriptTreeParser.ParseDrug. The ENTERED record's Drug.Ndc is always
+/// null: uxPrescribedItemQuickSearch (the only entered drug field) only
+/// exposes a typed item NAME, and neither real dump shows any other
+/// entered-side control carrying an NDC. This means NDC-level mismatches
+/// (e.g. right drug name entered, but a different generic/pack size than
+/// what the e-script specifies) can only be caught if the engine's drug
+/// comparator (rx-verify src/drug/index.ts) falls back to comparing
+/// EnteredDrug.Name against SourceDrug.Name/Ndc-resolved-description when
+/// EnteredDrug.Ndc is null. Confirm that fallback exists and is exercised
+/// here — if the comparator instead treats a null EnteredNdc as "skip,
+/// not comparable" and only ever compares Ndc-to-Ndc, this reader would
+/// never surface a real drug-identity mismatch for any e-script rx, which
+/// would defeat a primary purpose of the app. This was NOT changed here
+/// per the brief (don't touch EngineClient's wire protocol without a
+/// genuine need) but Will should verify src/drug/index.ts's actual
+/// behavior before relying on this field for e-scripts.
 /// </summary>
 public sealed class FieldReader
 {
-    private readonly PioneerRxWindow _window;
     private readonly UiaTreeWalker _walker;
+    private bool _escriptTreeFound;
 
     public FieldReader(PioneerRxWindow window)
     {
-        _window = window;
         _walker = new UiaTreeWalker(window.WindowElement);
     }
 
     /// <summary>
-    /// What the technician entered (LEFT panel). Values are read as
-    /// closely as possible to how the engine expects them (raw display
-    /// strings — normalization happens inside the engine, not here).
+    /// Set by the most recent ReadSource() call: null when a structured
+    /// source is available, otherwise a message explaining why (e.g. the
+    /// Escript tab was never opened this session) — see
+    /// IsStructuredSourceAvailable and ViewModels/OverlayViewModel.cs.
+    /// </summary>
+    public string? SourceUnavailableReason { get; private set; }
+
+    /// <summary>
+    /// What the technician entered (LEFT RxDetailsPanel), read by
+    /// AutomationId anywhere under the window — never by label text or
+    /// screen position.
     /// </summary>
     public PrescriptionRecord ReadEntered()
     {
-        var left = _window.LeftPanelBounds();
-
-        var patientRaw = Find(FieldMap.EnteredPatientLabel, 0, left);
-        var prescriberRaw = Find(FieldMap.EnteredPrescriberLabel, 0, left);
-        var dob = Find(FieldMap.EnteredPatientDobLabel, 0, left);
-        var licenseNumber = FindPrescriberLicenseNumber(left);
-
         return new PrescriptionRecord
         {
-            PatientName = StripNicknameParenthetical(patientRaw),
-            PatientDOB = dob,
-            PatientAddress = ParseAddress(Find(FieldMap.EnteredPatientAddressLabel, 0, left)),
+            PatientName = StripNicknameParenthetical(ReadEditOrCombo(FieldMap.EnteredPatientQuickSearchId)),
+            PatientDOB = ReadText(FieldMap.EnteredPatientDobId),
+            PatientAddress = ParseAddress(ReadText(FieldMap.EnteredPatientAddressId)),
             Prescriber = new Prescriber
             {
-                Name = prescriberRaw,
-                Npi = licenseNumber
+                Name = ReadEditOrCombo(FieldMap.EnteredPrescriberQuickSearchId),
+                Npi = ReadText(FieldMap.EnteredPrescriberNpiId)
             },
-            DateWritten = Find(FieldMap.EnteredWrittenDateLabel, 0, left),
+            DateWritten = ReadEditOrCombo(FieldMap.EnteredWrittenDateId),
             Drug = new DrugDescriptor
             {
-                Name = Find(FieldMap.EnteredItemLabel, 0, left),
-                Ndc = null // NDC is not shown in the left entry panel in the screenshots; only in the center e-script panel
+                Name = ReadEditOrCombo(FieldMap.EnteredItemQuickSearchId),
+                // No NDC is exposed anywhere in the left entered panel in
+                // either real dump — see this class's doc comment above
+                // ("DRUG COMPARISON").
+                Ndc = null
             },
-            Sig = ReadDirections(left),
-            Quantity = Find(FieldMap.EnteredQuantityLabel, 0, left),
-            QuantityUnit = null, // adjacent unit combo (e.g. "ML", "EA") — read by position; wire up once validated live, see FieldMap.EnteredQuantityUnitLabel
-            DaysSupply = null,   // not shown in the left panel's top-level fields in the screenshots (lives on the Dispense tab instead) — leave null; engine treats missing days supply as normal, never a mismatch
-            Refills = Find(FieldMap.EnteredRefillsLabel, 0, left)
+            Sig = ReadEditOrCombo(FieldMap.EnteredDirectionsId),
+            Quantity = ReadEditOrCombo(FieldMap.EnteredQuantityId),
+            QuantityUnit = ReadEditOrCombo(FieldMap.EnteredQuantityUnitId),
+            // Not present as a top-level entered field on the Common/
+            // Edit-Rx screen in either real dump (it lives on the
+            // Dispense tab, not captured). Engine treats missing as "not
+            // provided", never a mismatch.
+            DaysSupply = null,
+            Refills = ReadEditOrCombo(FieldMap.EnteredRefillsId)
         };
     }
 
     /// <summary>
-    /// The parsed inbound e-script (CENTER panel, green/yellow/blue
-    /// boxes). Only meaningful when Origin: Electronic — for
-    /// faxed/scanned scripts this panel is a raster image and every
-    /// Find() call below will simply return null, which surfaces as
-    /// "not provided" (yellow) per field; callers should additionally
-    /// check IsStructuredSourceAvailable() and show a manual-review
-    /// banner instead of per-field yellows when it's false (see
-    /// ViewModels/OverlayViewModel.cs).
+    /// The parsed inbound e-script (Escript tab's UIA Tree,
+    /// AutomationId ux10Dot6Escript). Only meaningful when that tree is
+    /// actually present (the Escript tab has been opened/rendered this
+    /// session) — see IsStructuredSourceAvailable.
     /// </summary>
     public PrescriptionRecord ReadSource()
     {
-        var patientBox = _window.CenterPatientBoxBounds();
-        var prescriberBox = _window.CenterPrescriberBoxBounds();
-        var rxBox = _window.CenterRxBoxBounds();
+        var messageNode = _walker.BuildEscriptTree();
+        _escriptTreeFound = messageNode is not null;
 
-        var patientRaw = Find(FieldMap.ScriptPatientLabel, 0, patientBox);
-        var prescriberRaw = Find(FieldMap.ScriptPrescriberLabel, 0, prescriberBox);
-        var (npi, secondaryLicense) = ReadLicenses(prescriberBox);
-
-        return new PrescriptionRecord
+        if (messageNode is null)
         {
-            PatientName = patientRaw,
-            PatientDOB = Find(FieldMap.ScriptPatientDobLabel, 0, patientBox),
-            PatientAddress = ParseAddress(Find(FieldMap.ScriptPatientAddressLabel, 0, patientBox)),
-            Prescriber = new Prescriber
-            {
-                Name = prescriberRaw,
-                Npi = npi
-            },
-            DateWritten = Find(FieldMap.ScriptWrittenLabel, 0, rxBox),
-            Drug = new DrugDescriptor
-            {
-                Name = Find(FieldMap.ScriptMedicationLabel, 0, rxBox),
-                Ndc = Find(FieldMap.ScriptNdcLabel, 0, rxBox)
-            },
-            Sig = Find(FieldMap.ScriptDirectionsLabel, 0, rxBox),
-            Quantity = StripQuantityUnit(Find(FieldMap.ScriptQuantityLabel, 0, rxBox), out var unit),
-            QuantityUnit = unit,
-            DaysSupply = Find(FieldMap.ScriptDaysSupplyLabel, 0, rxBox),
-            Refills = StripParenthetical(Find(FieldMap.ScriptRefillsLabel, 0, rxBox))
-        };
+            SourceUnavailableReason = "Open the Escript tab to verify this e-script.";
+            return new PrescriptionRecord();
+        }
+
+        var record = EscriptTreeParser.Parse(messageNode);
+
+        SourceUnavailableReason =
+            string.IsNullOrWhiteSpace(record.PatientName) && string.IsNullOrWhiteSpace(record.Drug?.Name)
+                ? "Escript tab is open, but its e-script tree didn't parse a patient or drug — confirm the tree shows a NewRx message before trusting this check."
+                : null;
+
+        return record;
     }
 
     /// <summary>
-    /// True when the center panel looks like a real structured e-script
-    /// (we found at least a patient name and a medication name), false
-    /// when it's blank/unreadable — the raster-image case (faxed/scanned
-    /// scripts) mentioned in the phase-0 spec. Callers should treat
-    /// false as "route to manual review", not as ten missing fields.
+    /// True when the Escript tree was found AND it parsed to at least a
+    /// patient name and a drug name. False covers two real cases: the
+    /// Escript tab was never opened (tree control absent entirely), or it
+    /// was opened but shows something other than a parseable NewRx
+    /// message. Either way, callers should show SourceUnavailableReason
+    /// as a manual-review banner instead of per-field yellows — replaces
+    /// the old (wrong) fax/image-heuristic version of this method
+    /// entirely.
     /// </summary>
     public bool IsStructuredSourceAvailable(PrescriptionRecord source)
     {
-        return !string.IsNullOrWhiteSpace(source.PatientName) || !string.IsNullOrWhiteSpace(source.Drug?.Name);
+        return _escriptTreeFound
+            && !string.IsNullOrWhiteSpace(source.PatientName)
+            && !string.IsNullOrWhiteSpace(source.Drug?.Name);
     }
 
     // ------------------------------------------------------------------
 
-    private string? Find(string label, int occurrence, System.Drawing.Rectangle bounds)
+    private string? ReadText(string automationId)
     {
-        try
-        {
-            return _walker.FindValueForLabel(label, occurrence, bounds);
-        }
+        try { return _walker.ReadTextByAutomationId(automationId); }
         catch
         {
             // Any UIA read can throw if PioneerRx redraws mid-read or the
@@ -136,120 +151,40 @@ public sealed class FieldReader
         }
     }
 
-    private string? ReadDirections(System.Drawing.Rectangle left)
+    private string? ReadEditOrCombo(string automationId)
     {
-        // The directions/sig box in the screenshots is a large multi-line
-        // rich text control below the "Directions (Sig Codes or Text or
-        // [ Literal Text ]):" label — not a simple "Label: value" pair,
-        // so it's looked up by control content rather than FindValueForLabel.
-        // v0 heuristic: reuse FindValueForLabel with the literal label
-        // text; if that comes back empty (label wording differs from
-        // what's here), fall back to the LAST non-empty read-only text
-        // block within the left panel bounds, which in the screenshots is
-        // exactly this box.
-        var direct = Find("Directions (Sig Codes or Text or [ Literal Text ] ):", 0, left);
-        if (!string.IsNullOrWhiteSpace(direct)) return direct;
-
-        return null; // deliberately not guessing further in v0 — see README "Deferred"
+        try { return _walker.ReadEditOrComboByAutomationId(automationId); }
+        catch { return null; }
     }
 
     /// <summary>
-    /// The left panel's prescriber license/NPI number had no visible
-    /// label in the screenshots — it sits as a bare number between the
-    /// prescriber Phone value and the Supervisor field. v0 heuristic:
-    /// take the value immediately following the (second, prescriber)
-    /// "Phone:" occurrence, if it looks like a 10-digit NPI-shaped
-    /// number; otherwise null. Revisit once Will confirms the real
-    /// label/position on his workstation via the tree-dump debug mode.
+    /// e.g. "Testperson, Jamie (Jay/They)" -&gt; "Testperson, Jamie" —
+    /// restored from the pre-rewrite FieldReader. PioneerRx's quick-search
+    /// can show a pronoun/preferred-name hint in parentheses after the
+    /// legal name; that hint is not part of the legal patient name the
+    /// e-script will contain, so it must be stripped before comparison or
+    /// it produces a false "name mismatch" against the source script on
+    /// every rx for that patient. Only applied to the entered PatientName
+    /// — the source (Escript tree) name is built from
+    /// LastName/FirstName/MiddleName leaves directly and never carries
+    /// this kind of parenthetical.
     /// </summary>
-    private string? FindPrescriberLicenseNumber(System.Drawing.Rectangle left)
-    {
-        var candidate = Find(FieldMap.EnteredPrescriberPhoneLabel, 1, left);
-        // Find() for "Phone:" returns the phone value itself, not what
-        // follows it — so this is intentionally NOT the final answer.
-        // Left as an explicit "not implemented against a live tree yet"
-        // stub: return null rather than silently return the wrong value.
-        _ = candidate;
-        return null;
-    }
-
-    /// <summary>
-    /// "Licenses: 1770156416   5380389" in the center prescriber box —
-    /// two space-separated numbers on one line. Picks the 10-digit one
-    /// as NPI per FieldMap.NpiIsFirstLicenseNumberWhenAmbiguous when both
-    /// or neither are exactly 10 digits.
-    /// </summary>
-    private (string? Npi, string? Other) ReadLicenses(System.Drawing.Rectangle prescriberBox)
-    {
-        var raw = Find(FieldMap.ScriptPrescriberLicensesLabel, 0, prescriberBox);
-        if (string.IsNullOrWhiteSpace(raw)) return (null, null);
-
-        var parts = raw.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 0) return (null, null);
-        if (parts.Length == 1) return (parts[0], null);
-
-        var tenDigitParts = parts.Where(p => p.Length == 10 && p.All(char.IsDigit)).ToList();
-        if (tenDigitParts.Count == 1)
-        {
-            var other = parts.FirstOrDefault(p => p != tenDigitParts[0]);
-            return (tenDigitParts[0], other);
-        }
-
-        // Ambiguous (0 or 2+ ten-digit candidates): fall back to
-        // configured default rather than guess per-record.
-        return FieldMap.NpiIsFirstLicenseNumberWhenAmbiguous
-            ? (parts[0], parts.Length > 1 ? parts[1] : null)
-            : (parts[^1], parts.Length > 1 ? parts[0] : null);
-    }
-
     private static string? StripNicknameParenthetical(string? name)
     {
-        // "Anderson, William (Will-He/Him)" -> "Anderson, William"
-        // The parenthetical is a pronoun/preferred-name hint PioneerRx
-        // shows the tech, not part of the legal patient name the
-        // e-script will contain — stripping it avoids a false "name
-        // mismatch" against the source script.
         if (string.IsNullOrWhiteSpace(name)) return name;
         var parenIndex = name.IndexOf('(');
         return parenIndex > 0 ? name[..parenIndex].TrimEnd() : name;
     }
 
-    private static string? StripParenthetical(string? value)
-    {
-        // "1 (additional refills)" -> "1"
-        if (string.IsNullOrWhiteSpace(value)) return value;
-        var parenIndex = value.IndexOf('(');
-        return (parenIndex > 0 ? value[..parenIndex] : value).Trim();
-    }
-
-    private static string? StripQuantityUnit(string? raw, out string? unit)
-    {
-        // "50.0000 Unspecified" -> quantity "50.0000", unit "Unspecified"
-        // (engine treats "Unspecified" leniently — see rx-verify
-        // src/quantity/index.ts; if it doesn't, map "Unspecified" to
-        // null here instead).
-        unit = null;
-        if (string.IsNullOrWhiteSpace(raw)) return raw;
-
-        var spaceIndex = raw.IndexOf(' ');
-        if (spaceIndex <= 0) return raw.Trim();
-
-        unit = raw[(spaceIndex + 1)..].Trim();
-        return raw[..spaceIndex].Trim();
-    }
-
     private static Address? ParseAddress(string? raw)
     {
-        // v0: keep the address as a single free-text street line (Street
-        // = whole string) rather than splitting city/state/zip — the
-        // engine's address comparator normalizes components but degrades
-        // gracefully when only Street is populated (see
-        // src/normalize/address.ts). Splitting "1517 INDIAN WELLS CT
-        // LAWRENCE KS660471615" (note: screenshot shows NO separator
-        // before the zip — "KS660471615") into city/state/zip reliably
-        // needs a real regex validated against several live examples;
-        // deferred to avoid guessing wrong on malformed input. See
-        // README "Deferred".
+        // Keep the address as a single free-text street line (Street =
+        // whole string) rather than splitting city/state/zip — both real
+        // dumps show uxPatientAddress as one combined string (e.g. "1517
+        // Indian Wells Ct Lawrence, KS") with no separate city/state/zip
+        // controls in the entered panel. The engine's address comparator
+        // normalizes components but degrades gracefully when only Street
+        // is populated (see rx-verify src/normalize/address.ts).
         if (string.IsNullOrWhiteSpace(raw)) return null;
         return new Address { Street = raw.Trim() };
     }

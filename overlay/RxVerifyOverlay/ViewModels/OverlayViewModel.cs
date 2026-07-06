@@ -99,7 +99,11 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         if (!reader.IsStructuredSourceAvailable(source))
         {
-            StatusMessage = "Source script does not look structured (likely a faxed/scanned image) — manual review required. See README 'Deferred: OCR'.";
+            // Replaces the old (wrong) fax/scanned-image heuristic: the
+            // real gate is whether the Escript tab's UIA tree
+            // (ux10Dot6Escript) is present and parses to a patient+drug —
+            // see Uia/FieldReader.cs ReadSource/IsStructuredSourceAvailable.
+            StatusMessage = reader.SourceUnavailableReason ?? "Open the Escript tab to verify this e-script.";
             Verdicts.Clear();
             UpdateSummary(null);
             return;
