@@ -18,7 +18,7 @@ public static class FieldMap
 {
     /// <summary>
     /// PioneerRx window titles always start with the screen name
-    /// ("Edit Rx - 6407104 - ...", confirmed in both real dumps).
+    /// ("Edit Rx - &lt;rx number&gt; - ...", confirmed in both real dumps).
     /// </summary>
     public static readonly string[] TargetWindowTitlePrefixes =
     {

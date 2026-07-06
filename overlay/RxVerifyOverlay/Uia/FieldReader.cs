@@ -180,8 +180,8 @@ public sealed class FieldReader
     {
         // Keep the address as a single free-text street line (Street =
         // whole string) rather than splitting city/state/zip — both real
-        // dumps show uxPatientAddress as one combined string (e.g. "1517
-        // Indian Wells Ct Lawrence, KS") with no separate city/state/zip
+        // dumps show uxPatientAddress as one combined string (e.g. "100
+        // Fake St Testville, KS") with no separate city/state/zip
         // controls in the entered panel. The engine's address comparator
         // normalizes components but degrades gracefully when only Street
         // is populated (see rx-verify src/normalize/address.ts).
