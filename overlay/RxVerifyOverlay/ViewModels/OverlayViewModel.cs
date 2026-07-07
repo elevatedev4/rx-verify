@@ -102,6 +102,7 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
             _status = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(Glyph));
+            OnPropertyChanged(nameof(StatusText));
         }
     }
 
@@ -124,6 +125,7 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
             _hasData = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(Glyph));
+            OnPropertyChanged(nameof(StatusText));
         }
     }
 
@@ -136,6 +138,25 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
             VerdictStatus.Yellow => "?",
             VerdictStatus.Red => "✗",
             _ => "?"
+        };
+
+    /// <summary>
+    /// Text label for the category header spelling out the same
+    /// worst-status-wins rollup the glyph/color already convey — per
+    /// Will's live-test feedback, the header should show words, not just
+    /// a symbol/color. "Exact match" only when every row is green;
+    /// "Partial match" when at least one row is yellow and none are red;
+    /// "Likely Error" when at least one row is red. "No data" when the
+    /// category has nothing to roll up yet (see HasData).
+    /// </summary>
+    public string StatusText => !HasData
+        ? "No data"
+        : Status switch
+        {
+            VerdictStatus.Green => "Exact match",
+            VerdictStatus.Yellow => "Partial match",
+            VerdictStatus.Red => "Likely Error",
+            _ => "Partial match"
         };
 
     public event PropertyChangedEventHandler? PropertyChanged;

@@ -152,4 +152,41 @@ describe('compareAddresses', () => {
       expect(r.status).not.toBe('red');
     });
   });
+
+  describe('missing street-type suffix on one side (W-T8 live-test bug)', () => {
+    // Exact repro from Will's live-test report: source "330 Sycamore"
+    // (no street type at all) vs entered "330 Sycamore St" was flagged
+    // as no-match. A missing suffix on one side is an incomplete entry,
+    // not a different street, and must read as a match.
+    it('is GREEN for "330 Sycamore" vs "330 Sycamore St"', () => {
+      const r = compareAddresses({ street: '330 Sycamore' }, { street: '330 Sycamore St' });
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN with full city/state/zip present on both sides too', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore', city: 'Testville', state: 'KS', zip: '99999' },
+        { street: '330 Sycamore St', city: 'Testville', state: 'KS', zip: '99999' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('is GREEN regardless of which side is missing the suffix', () => {
+      const r = compareAddresses({ street: '42 Fictional Wells Ct' }, { street: '42 Fictional Wells' });
+      expect(r.status).toBe('green');
+    });
+
+    it('still flags a genuine street-type disagreement when BOTH sides state a (different) suffix', () => {
+      const r = compareAddresses({ street: '330 Sycamore St' }, { street: '330 Sycamore Ave' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('still catches a genuinely different street name even when one side lacks a suffix', () => {
+      const r = compareAddresses({ street: '330 Sycamore' }, { street: '456 Oak St' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
 });

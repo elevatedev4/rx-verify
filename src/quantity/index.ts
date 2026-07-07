@@ -62,10 +62,32 @@ const UNIT_ALIASES: Record<string, string> = {
  */
 const UNSPECIFIED_UNIT = 'unspecified';
 
+/**
+ * "EA"/"Each" is PioneerRx's own generic per-unit dispensing designation
+ * — confirmed as a real ComboBox value in both real dumps (see overlay
+ * Uia/FieldMap.cs EnteredQuantityUnitId: "ComboBox (e.g. unit 'ML'/'EA')").
+ * Techs routinely leave/select "EA" for countable solid dosage forms
+ * (tablets, capsules, etc.) regardless of what specific unit word the
+ * e-script's NCPDP QuantityUnitOfMeasure states ("Tablet", "Capsule", ...).
+ * Root cause of a second live-test false-mismatch after the "Unspecified"
+ * fix: with quantity numerically IDENTICAL on both sides (e.g. "24" vs
+ * "24"), a source unit of "Tablet" ("tab" after alias-folding) compared
+ * against an entered unit of "EA" ("ea", not in UNIT_ALIASES) still read
+ * as an unresolvable unit conflict and forced a RED unit_mismatch even
+ * though the overlay's quantity column only ever displays the bare
+ * number (see engine/index.ts stringifyScalar(source.quantity)/
+ * (entered.quantity), no unit) — so from Will's side this looked exactly
+ * like "24 vs 24 flags red" with no visible reason. Same treatment as
+ * UNSPECIFIED_UNIT: fold to null so no unit-compatibility check happens
+ * at all when either side is this generic "each" designation.
+ */
+const EACH_UNITS = new Set(['ea', 'each']);
+
 function normalizeUnit(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const folded = raw.toLowerCase().trim();
   if (folded === UNSPECIFIED_UNIT) return null;
+  if (EACH_UNITS.has(folded)) return null;
   return UNIT_ALIASES[folded] ?? folded;
 }
 

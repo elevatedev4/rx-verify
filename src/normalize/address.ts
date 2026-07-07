@@ -56,9 +56,14 @@ function foldCase(s: string): string {
   return s.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+/** Set of normalized (abbreviated) street-suffix tokens, e.g. "st", "ave", "rd". Used to split a trailing suffix token off the street CORE so a suffix present on only one side (or missing entirely) doesn't fail the comparison — see NormalizedStreet.suffix. */
+const SUFFIX_ABBREVIATIONS = new Set(Object.values(STREET_SUFFIXES));
+
 interface NormalizedStreet {
-  /** Street line with unit stripped out, tokens normalized. */
+  /** Street line with unit AND trailing suffix stripped out, tokens normalized. */
   base: string;
+  /** Trailing street-type suffix (already normalized to its abbreviation, e.g. "st"), or null if the line didn't end in a recognized one. */
+  suffix: string | null;
   unit: string | null;
 }
 
@@ -92,7 +97,22 @@ function normalizeStreetLine(raw: string): NormalizedStreet {
     return tok;
   });
 
-  return { base: normalized.join(' '), unit: unit ? unit.toLowerCase() : null };
+  // Split a trailing street-type suffix (e.g. "st", "ave") off the core
+  // street text. This is deliberately separate from `base` — see
+  // compareAddresses, which only treats differing suffixes as a real
+  // mismatch when BOTH sides actually state one; a suffix missing
+  // entirely on one side (e.g. entered "330 Sycamore" vs source "330
+  // Sycamore St" — a real live-test false-mismatch, Will's bug report)
+  // is just an incomplete entry, not a different street.
+  let suffix: string | null = null;
+  let core = normalized;
+  const last = normalized[normalized.length - 1];
+  if (normalized.length > 1 && last !== undefined && SUFFIX_ABBREVIATIONS.has(last)) {
+    suffix = last;
+    core = normalized.slice(0, -1);
+  }
+
+  return { base: core.join(' '), suffix, unit: unit ? unit.toLowerCase() : null };
 }
 
 /**
@@ -294,7 +314,17 @@ export function compareAddresses(
   const srcUnit = srcStreet.unit ?? (src.unit ? normalizeUnitValue(src.unit) : null);
   const entUnit = entStreet.unit ?? (ent.unit ? normalizeUnitValue(ent.unit) : null);
 
-  const streetDiffers = componentDiffers(srcStreet.base, entStreet.base);
+  // Street CORE (number + name, suffix/directional-normalized, suffix
+  // split out) must agree. The trailing suffix itself ("st"/"ave"/...)
+  // is only checked when BOTH sides actually state one — a suffix
+  // missing on just one side (e.g. "330 Sycamore" vs "330 Sycamore St")
+  // is an incomplete entry, not evidence of a different street, and
+  // must not fail the match. Per the "address alone is never RED"
+  // stated philosophy, if the suffix genuinely differs on both sides
+  // (e.g. "St" vs "Ave") it's still a real signal worth a yellow.
+  const streetDiffers =
+    componentDiffers(srcStreet.base, entStreet.base) ||
+    (srcStreet.suffix !== null && entStreet.suffix !== null && srcStreet.suffix !== entStreet.suffix);
   const cityDiffers = componentDiffers(srcCity, entCity);
   const stateDiffers = componentDiffers(srcState, entState);
   const zipDiffers = componentDiffers(srcZip, entZip);

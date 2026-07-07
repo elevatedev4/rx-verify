@@ -133,33 +133,17 @@
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
                             <!--
-                                Whole box colored by the category's rolled-up
-                                status (Will's live-test feedback: previously
-                                only the header strip was colored, so a
-                                Red/Yellow field buried in the row list below
-                                could be missed at a glance). NO DATA (HasData
-                                =false) renders GRAY, never green; green
-                                means "data present AND matches", not "nothing
-                                to complain about yet".
+                                Box background is a FIXED neutral (no longer
+                                tinted by the category's rolled-up status —
+                                per Will's rework request, that signal now
+                                lives on each individual field row below AND
+                                as the header's status text (see
+                                CategoryViewModel.StatusText), not on the box
+                                itself; a box-wide color plus a per-row color
+                                plus a header-strip color was one coloring
+                                layer too many).
                             -->
-                            <Border BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,4">
-                                <Border.Style>
-                                    <Style TargetType="Border">
-                                        <Setter Property="Background" Value="{StaticResource BoxGreenBrush}" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
-                                                <Setter Property="Background" Value="{StaticResource BoxYellowBrush}" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
-                                                <Setter Property="Background" Value="{StaticResource BoxRedBrush}" />
-                                            </DataTrigger>
-                                            <!-- HasData=false wins over any Status value (checked last so it overrides). -->
-                                            <DataTrigger Binding="{Binding HasData}" Value="False">
-                                                <Setter Property="Background" Value="{StaticResource BoxGrayBrush}" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
+                            <Border Background="{StaticResource BoxGrayBrush}" BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,4">
                                 <StackPanel>
                                     <!--
                                         Category header: rolled-up status glyph LEADS the row
@@ -168,7 +152,11 @@
                                         as the field rows below, where the glyph is the FIRST
                                         visual element rather than a trailing indicator, so the
                                         worst-status-wins rollup for the whole category reads
-                                        before anything else at a glance).
+                                        before anything else at a glance). A text status label
+                                        ("Exact match" / "Partial match" / "Likely Error" — see
+                                        CategoryViewModel.StatusText) now follows the category
+                                        name, spelling out the same rollup the glyph/color
+                                        already convey, per Will's live-test feedback.
                                     -->
                                     <Border CornerRadius="3,3,0,0" Padding="5,2">
                                         <Border.Style>
@@ -190,112 +178,108 @@
                                         <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="18" />
+                                                <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="{Binding Glyph}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" TextAlignment="Center" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Name}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Name}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                            <TextBlock Grid.Column="2" Text="{Binding StatusText}" Foreground="White" FontSize="10" FontStyle="Italic" VerticalAlignment="Center" HorizontalAlignment="Right" />
                                         </Grid>
                                     </Border>
 
                                     <!--
-                                        Field rows: status icon | Field | Source | Entered.
-                                        Researched Twinlist reconciliation + WCAG colorblind-safe
-                                        convention applied here (replacing the old trailing status
-                                        dot with the following):
-                                          1. The status icon leads the row (glyph, not a bare color
-                                             dot) so the match state reads before anything else,
-                                             and so color is never the only signal (WCAG).
-                                          2. The Source cell stays visually neutral regardless of
-                                             match state (see the Border below for why).
-                                          3. The Entered cell's whole background tints by match
-                                             state, since Entered is the value actually being
-                                             judged against Source.
+                                        Field rows: status icon | Field | Source | Entered, with
+                                        the WHOLE ROW colored uniformly by that row's own match
+                                        status (green/yellow/red) — reworked per Will's live-test
+                                        feedback, replacing the old scheme where the Source cell
+                                        stayed neutral and only the Entered cell was tinted
+                                        (Twinlist-style split). One color across the whole row
+                                        reads faster at a glance than tracking which of two cells
+                                        is colored. The leading glyph remains the WCAG-required
+                                        non-color-only signal.
                                     -->
                                     <ItemsControl ItemsSource="{Binding Rows}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
-                                                <Grid Margin="4,1.5" ToolTipService.ToolTip="{Binding TooltipText}">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="18" />
-                                                        <ColumnDefinition Width="50" />
-                                                        <ColumnDefinition Width="*" MinWidth="70" />
-                                                        <ColumnDefinition Width="*" MinWidth="70" />
-                                                    </Grid.ColumnDefinitions>
+                                                <Border CornerRadius="3" Margin="0,1.5" Padding="4,1.5" ToolTipService.ToolTip="{Binding TooltipText}">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Background" Value="{StaticResource BoxGreenBrush}" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
+                                                                    <Setter Property="Background" Value="{StaticResource BoxYellowBrush}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
+                                                                    <Setter Property="Background" Value="{StaticResource BoxRedBrush}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="18" />
+                                                            <ColumnDefinition Width="50" />
+                                                            <ColumnDefinition Width="*" MinWidth="70" />
+                                                            <ColumnDefinition Width="*" MinWidth="70" />
+                                                        </Grid.ColumnDefinitions>
 
-                                                    <!--
-                                                        Column 0: leading status glyph (WCAG: icon is the
-                                                        PRIMARY signal, color reinforces). "✓" / "!" / "✗" —
-                                                        never a color-only dot. This is the first visual
-                                                        element in the row (moved from a trailing Ellipse
-                                                        dot per the researched convention) and doubles as
-                                                        the "entered value" match indicator called for
-                                                        alongside the Entered cell below, so it isn't
-                                                        repeated a second time inside that cell.
+                                                        <!--
+                                                            Column 0: leading status glyph (WCAG: icon is the
+                                                            PRIMARY signal, color reinforces). "✓" / "!" / "✗" —
+                                                            never a color-only dot.
 
-                                                        PENDING (drug row only, while its background
-                                                        lookup is still running — see
-                                                        VerdictRowViewModel.IsPending and
-                                                        OverlayViewModel.RefreshAsync's two-phase
-                                                        refresh): swap the glyph for a small
-                                                        indeterminate spinner instead of the yellow "!" —
-                                                        a "needs a look" glyph would misleadingly imply a
-                                                        real verdict was already reached.
-                                                    -->
-                                                    <Grid Grid.Column="0">
-                                                        <TextBlock Text="{Binding Glyph}" FontWeight="Bold" FontSize="12" TextAlignment="Center" VerticalAlignment="Center">
-                                                            <TextBlock.Style>
-                                                                <Style TargetType="TextBlock">
-                                                                    <Setter Property="Foreground" Value="{StaticResource GreenBrush}" />
-                                                                    <Setter Property="Visibility" Value="Visible" />
-                                                                    <Style.Triggers>
-                                                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
-                                                                            <Setter Property="Foreground" Value="{StaticResource YellowBrush}" />
-                                                                        </DataTrigger>
-                                                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
-                                                                            <Setter Property="Foreground" Value="{StaticResource RedBrush}" />
-                                                                        </DataTrigger>
-                                                                        <DataTrigger Binding="{Binding IsPending}" Value="True">
-                                                                            <Setter Property="Visibility" Value="Collapsed" />
-                                                                        </DataTrigger>
-                                                                    </Style.Triggers>
-                                                                </Style>
-                                                            </TextBlock.Style>
-                                                        </TextBlock>
-                                                        <ProgressBar IsIndeterminate="True" Width="12" Height="12" VerticalAlignment="Center" HorizontalAlignment="Center">
-                                                            <ProgressBar.Style>
-                                                                <Style TargetType="ProgressBar">
-                                                                    <Setter Property="Visibility" Value="Collapsed" />
-                                                                    <Style.Triggers>
-                                                                        <DataTrigger Binding="{Binding IsPending}" Value="True">
-                                                                            <Setter Property="Visibility" Value="Visible" />
-                                                                        </DataTrigger>
-                                                                    </Style.Triggers>
-                                                                </Style>
-                                                            </ProgressBar.Style>
-                                                        </ProgressBar>
-                                                    </Grid>
+                                                            PENDING (drug row only, while its background
+                                                            lookup is still running — see
+                                                            VerdictRowViewModel.IsPending and
+                                                            OverlayViewModel.RefreshAsync's two-phase
+                                                            refresh): swap the glyph for a small
+                                                            indeterminate spinner instead of the yellow "!" —
+                                                            a "needs a look" glyph would misleadingly imply a
+                                                            real verdict was already reached.
+                                                        -->
+                                                        <Grid Grid.Column="0">
+                                                            <TextBlock Text="{Binding Glyph}" FontWeight="Bold" FontSize="12" TextAlignment="Center" VerticalAlignment="Center">
+                                                                <TextBlock.Style>
+                                                                    <Style TargetType="TextBlock">
+                                                                        <Setter Property="Foreground" Value="{StaticResource GreenBrush}" />
+                                                                        <Setter Property="Visibility" Value="Visible" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
+                                                                                <Setter Property="Foreground" Value="{StaticResource YellowBrush}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
+                                                                                <Setter Property="Foreground" Value="{StaticResource RedBrush}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding IsPending}" Value="True">
+                                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </TextBlock.Style>
+                                                            </TextBlock>
+                                                            <ProgressBar IsIndeterminate="True" Width="12" Height="12" VerticalAlignment="Center" HorizontalAlignment="Center">
+                                                                <ProgressBar.Style>
+                                                                    <Style TargetType="ProgressBar">
+                                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding IsPending}" Value="True">
+                                                                                <Setter Property="Visibility" Value="Visible" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </ProgressBar.Style>
+                                                            </ProgressBar>
+                                                        </Grid>
 
-                                                    <TextBlock Grid.Column="1" Text="{Binding DisplayName}" Foreground="#FFBBBBBB" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" Foreground="#FFBBBBBB" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center" />
 
-                                                    <!--
-                                                        Column 2: Source cell — DELIBERATELY NEUTRAL, never
-                                                        tinted green/yellow/red, regardless of match state.
-                                                        Rationale (researched Twinlist convention): color in
-                                                        this row means "a verification judgment was made",
-                                                        and the source value was never itself verified — it's
-                                                        the ground truth being compared AGAINST, not a
-                                                        judgment. Coloring it would imply the source itself
-                                                        was checked and passed/failed, which isn't true. Will
-                                                        may want to override this to a tinted "source-green"
-                                                        treatment later if his workflow wants a heavier "both
-                                                        sides agree" cue — see this comment if that's asked.
-                                                        The "SRC" tag that used to anchor this reading was
-                                                        removed per Will's live-test feedback (clutter in an
-                                                        already-tight compact table; this column is already
-                                                        labeled "Source" in the header row above).
-                                                    -->
-                                                    <Border Grid.Column="2" Background="{StaticResource NeutralBrush}" CornerRadius="3" Padding="3,1" Margin="1,0">
-                                                        <TextBlock Text="{Binding SourceValue}" Foreground="White" FontSize="10" TextWrapping="Wrap">
+                                                        <!--
+                                                            Column 2: Source value — plain text, no per-cell
+                                                            background; the row's own Border (above) is what
+                                                            now carries the match-state color, uniformly
+                                                            across both Source and Entered.
+                                                        -->
+                                                        <TextBlock Grid.Column="2" Text="{Binding SourceValue}" Foreground="White" FontSize="10" TextWrapping="Wrap" Margin="1,0" VerticalAlignment="Center">
                                                             <TextBlock.Style>
                                                                 <Style TargetType="TextBlock">
                                                                     <Setter Property="FontFamily" Value="Segoe UI" />
@@ -307,35 +291,18 @@
                                                                 </Style>
                                                             </TextBlock.Style>
                                                         </TextBlock>
-                                                    </Border>
 
-                                                    <!--
-                                                        Column 3: Entered cell — the WHOLE cell background
-                                                        tints by match state (green/yellow/red, using the
-                                                        same muted Box*Brush tints already used for the
-                                                        category box background above, so a receding green
-                                                        doesn't wash out the white text). Mismatches (red)
-                                                        additionally render the entered text BOLD so a real
-                                                        discrepancy visually pops more than a match recedes.
-                                                        Tabular/digit fields (NPI, phone, quantity, refills)
-                                                        use a monospace font so a transposed digit is visible
-                                                        as column misalignment, not just a string diff.
-                                                    -->
-                                                    <Border Grid.Column="3" CornerRadius="3" Padding="3,1" Margin="1,0">
-                                                        <Border.Style>
-                                                            <Style TargetType="Border">
-                                                                <Setter Property="Background" Value="{StaticResource BoxGreenBrush}" />
-                                                                <Style.Triggers>
-                                                                    <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
-                                                                        <Setter Property="Background" Value="{StaticResource BoxYellowBrush}" />
-                                                                    </DataTrigger>
-                                                                    <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
-                                                                        <Setter Property="Background" Value="{StaticResource BoxRedBrush}" />
-                                                                    </DataTrigger>
-                                                                </Style.Triggers>
-                                                            </Style>
-                                                        </Border.Style>
-                                                        <TextBlock Text="{Binding EnteredValue}" Foreground="White" FontSize="10" TextWrapping="Wrap">
+                                                        <!--
+                                                            Column 3: Entered value — plain text, same
+                                                            uniform-row-color treatment as Source above.
+                                                            Mismatches (red) still render the entered text
+                                                            BOLD so a real discrepancy visually pops more
+                                                            than a match recedes. Tabular/digit fields (NPI,
+                                                            phone, quantity, refills) use a monospace font so
+                                                            a transposed digit is visible as column
+                                                            misalignment, not just a string diff.
+                                                        -->
+                                                        <TextBlock Grid.Column="3" Text="{Binding EnteredValue}" Foreground="White" FontSize="10" TextWrapping="Wrap" Margin="1,0" VerticalAlignment="Center">
                                                             <TextBlock.Style>
                                                                 <Style TargetType="TextBlock">
                                                                     <Setter Property="FontWeight" Value="Normal" />
@@ -351,8 +318,8 @@
                                                                 </Style>
                                                             </TextBlock.Style>
                                                         </TextBlock>
-                                                    </Border>
-                                                </Grid>
+                                                    </Grid>
+                                                </Border>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>

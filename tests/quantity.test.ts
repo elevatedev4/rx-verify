@@ -61,6 +61,35 @@ describe('compareQuantity', () => {
     const r = compareQuantity(90, null, 90, 'EA', null);
     expect(r.status).toBe('green');
   });
+
+  // Repro for the SECOND live-test bug (W-T8): "24" vs "24" still flagged
+  // RED even after the "Unspecified" fold fix. Root cause: source unit
+  // "Tablet" (a real, specific NCPDP unit, not the "Unspecified"
+  // placeholder) folds to "tab", while PioneerRx's entered unit ComboBox
+  // held "EA" (confirmed real value in overlay Uia/FieldMap.cs) — a
+  // generic per-unit designation techs commonly leave/select for
+  // countable solid dosage forms regardless of the e-script's stated
+  // unit word. "tab" !== "ea" so unit-compatibility failed and the whole
+  // field went RED unit_mismatch even with numerically identical
+  // quantities. The overlay's quantity column shows only the bare
+  // number (no unit), so this looked like an unexplained "24 vs 24"
+  // false mismatch.
+  it('is GREEN on 24 vs 24 when the source unit is a specific unit ("Tablet") and the entered unit is PioneerRx\'s generic "EA"', () => {
+    const r = compareQuantity(24, 'Tablet', 24, 'EA', null);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('is GREEN on 24 vs 24 when the entered unit is "Each" (spelled out) and the source unit is a specific unit', () => {
+    const r = compareQuantity(24, 'Capsule', 24, 'Each', null);
+    expect(r.status).toBe('green');
+  });
+
+  it('is GREEN on 24 vs 24 with no units stated on either side', () => {
+    const r = compareQuantity(24, null, 24, null, null);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
 });
 
 describe('compareRefills', () => {
