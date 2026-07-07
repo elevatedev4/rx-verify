@@ -37,4 +37,55 @@ describe('verify engine', () => {
       expect(v.explanation.length).toBeGreaterThan(0);
     }
   });
+
+  describe('display values are always clean text, never raw JSON (bug 1 regression)', () => {
+    it('renders patientAddress/prescriberAddress as one human-readable line on both sides, never JSON', () => {
+      const result = verify(
+        {
+          patientAddress: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' },
+          prescriber: { address: { street: '1 Clinic Way Ste A', city: 'Sampletown', state: 'KS', zip: '12345' } }
+        },
+        {
+          // Entered/overlay shape: freeform street only, every other
+          // Address key present but explicitly null (as the C# side
+          // serializes it — see overlay/RxVerifyOverlay/Models/EngineModels.cs).
+          patientAddress: { street: '123 Main St Testville, KS 54321', unit: null, city: null, state: null, zip: null } as any,
+          prescriber: {
+            address: { street: '1 Clinic Way Ste A Sampletown, KS 12345', unit: null, city: null, state: null, zip: null } as any
+          }
+        },
+        provider
+      );
+      const patientAddress = result.verdicts.find((v) => v.field === 'patientAddress')!;
+      const prescriberAddress = result.verdicts.find((v) => v.field === 'prescriberAddress')!;
+
+      for (const value of [
+        patientAddress.sourceValue,
+        patientAddress.enteredValue,
+        prescriberAddress.sourceValue,
+        prescriberAddress.enteredValue
+      ]) {
+        expect(value).not.toBeNull();
+        expect(value).not.toMatch(/^\{/); // never raw JSON
+        expect(typeof value).toBe('string');
+      }
+      expect(patientAddress.sourceValue).toBe('123 Main St, Testville, KS 54321');
+      expect(patientAddress.enteredValue).toBe('123 Main St Testville, KS 54321');
+    });
+
+    it('renders drug as name only (never NDC, never JSON) even when ndc is explicitly null', () => {
+      const result = verify(
+        { drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: '12345-6789-01' } },
+        // Entered/overlay shape: Ndc always explicitly null (PioneerRx's
+        // entered panel never exposes NDC — see FieldReader.cs ReadEntered).
+        { drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: null } as any },
+        provider
+      );
+      const drug = result.verdicts.find((v) => v.field === 'drug')!;
+      expect(drug.sourceValue).toBe('Clindamycin Phosp 1% Lotion');
+      expect(drug.enteredValue).toBe('Clindamycin Phosp 1% Lotion');
+      expect(drug.sourceValue).not.toMatch(/ndc/i);
+      expect(drug.enteredValue).not.toMatch(/^\{/);
+    });
+  });
 });

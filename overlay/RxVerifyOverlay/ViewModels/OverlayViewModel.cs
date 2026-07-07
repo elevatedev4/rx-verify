@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
@@ -10,7 +11,15 @@ using RxVerifyOverlay.Uia;
 
 namespace RxVerifyOverlay.ViewModels;
 
-/// <summary>One row in the compact table (Field | Source | Entered | status dot), in the FIXED field order within its category — never re-sorted.</summary>
+/// <summary>
+/// One row in the compact table (leading status icon | Field | Source |
+/// Entered), in the FIXED field order within its category — never
+/// re-sorted. Per the researched Twinlist/WCAG conventions (see
+/// MainWindow.xaml row DataTemplate): the status icon leads the row (not
+/// a trailing dot), the Source cell stays neutral, and the Entered
+/// cell's whole background tints by match state with the icon as the
+/// PRIMARY signal and color as reinforcement only.
+/// </summary>
 public sealed class VerdictRowViewModel
 {
     public string FieldKey { get; init; } = "";
@@ -21,13 +30,38 @@ public sealed class VerdictRowViewModel
     public string SourceValue { get; init; } = "";
     public string EnteredValue { get; init; } = "";
 
-    /// <summary>Glyph for the status, since color alone shouldn't carry all the meaning (accessibility).</summary>
+    /// <summary>
+    /// Fields whose values are digit sequences where transposed/dropped
+    /// digits are the realistic error mode (NPI, phone, quantity,
+    /// refills) — these get a monospace/tabular-figure font in the row
+    /// template so a transposition is visible as a column-misalignment,
+    /// not just a string diff. Everything else (names, addresses, dates,
+    /// drug, sig) keeps the default proportional font.
+    /// </summary>
+    private static readonly HashSet<string> TabularFieldKeys = new()
+    {
+        "prescriberNpi",
+        "prescriberPhone",
+        "quantity",
+        "refills"
+    };
+
+    public bool IsTabularField => TabularFieldKeys.Contains(FieldKey);
+
+    /// <summary>
+    /// Glyph for the status — WCAG requires color never be the ONLY
+    /// signal, so this is the PRIMARY indicator and cell color is
+    /// reinforcement. "!" (not "?") for yellow/uncertain: a question
+    /// mark reads as "unknown meaning to the pharmacist", where "!" reads
+    /// as "needs a look", which matches the yellow verdict's actual
+    /// intent (not_provided/unverified, not necessarily unknown).
+    /// </summary>
     public string Glyph => Status switch
     {
         VerdictStatus.Green => "✓",  // ✓
-        VerdictStatus.Yellow => "?",
+        VerdictStatus.Yellow => "!",
         VerdictStatus.Red => "✗",    // ✗
-        _ => "?"
+        _ => "!"
     };
 
     /// <summary>Row hover/tooltip text — the reason code + explanation move here instead of being always-visible, to keep the compact table small (see MainWindow.xaml).</summary>

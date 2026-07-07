@@ -77,5 +77,79 @@ describe('compareAddresses', () => {
       expect(r.status).toBe('yellow');
       expect(r.status).not.toBe('red');
     });
+
+    // Regression: a suite/unit entered INLINE on the freeform side (a
+    // real, dump-confirmed PioneerRx shape — the prescriber-address
+    // control routinely includes a suite inline in one combined string)
+    // used to misalign every token after the unit against the structured
+    // source, which already strips its unit out before comparing —
+    // reading a genuinely identical address as a full mismatch.
+    // Component-level extraction (parseFreeformAddress) fixes this by
+    // stripping the unit out of the freeform side the same way.
+    it('is GREEN when the same suite/unit is entered inline on the freeform side and as a separate component on the source side', () => {
+      const r = compareAddresses(
+        { street: '789 Fictional Blvd', unit: 'Ste B', city: 'Sampleburg', state: 'KS', zip: '11111' },
+        { street: '789 Fictional Blvd Ste B Sampleburg, KS 11111' }
+      );
+      expect(r.status).toBe('green');
+    });
+  });
+
+  describe('component-level matching (freeform entered line parsed into components, not whole-string fuzzy match)', () => {
+    it('is GREEN for the same address in different formatting (abbreviation vs spelled out street type)', () => {
+      const r = compareAddresses(
+        { street: '123 Main Street', city: 'Testville', state: 'KS', zip: '99999' },
+        { street: '123 Main St Testville, KS 99999' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('flags a mismatch when only the ZIP differs, even though street/city/state all agree', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', city: 'Testville', state: 'KS', zip: '99999' },
+        { street: '123 Main St Testville, KS 12345' }
+      );
+      // This engine's address comparator is TYPE-restricted to
+      // green/yellow (see the "never returns RED" test above) — a
+      // deliberate, pre-existing product decision ("address alone is
+      // never RED — patients move"). A real, stated ZIP disagreement
+      // must still be caught and flagged, just at this field's existing
+      // "differs" severity (yellow), not upgraded to a severity this
+      // field doesn't support.
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('flags a mismatch when only the city differs, even though street/state/zip all agree', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', city: 'Testville', state: 'KS', zip: '99999' },
+        { street: '123 Main St Springfield, KS 99999' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('does not mask a city/ZIP mismatch behind a coincidental token-count alignment', () => {
+      // Same token COUNT on both sides, but city and zip both actually
+      // differ — a naive whole-string positional comparison could only
+      // ever get this right by luck; component-level parsing gets it
+      // right by construction.
+      const r = compareAddresses(
+        { street: '123 Main St', city: 'Testville', state: 'KS', zip: '99999' },
+        { street: '123 Main St Springfield, KS 12345' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('is NOT a hard mismatch when unit/apt is missing on one side only (downgraded to unit_differs, not address_differs)', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: 'Apt 4', city: 'Testville', state: 'KS', zip: '99999' },
+        { street: '123 Main St Testville, KS 99999' } // no unit stated at all
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unit_differs');
+      expect(r.status).not.toBe('red');
+    });
   });
 });

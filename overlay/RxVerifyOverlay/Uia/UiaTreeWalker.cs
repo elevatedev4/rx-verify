@@ -146,7 +146,27 @@ public sealed class UiaTreeWalker
         try
         {
             var name = element.Name;
-            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            var trimmed = name.Trim();
+
+            // LABEL-LEAK GUARD: every confirmed static placeholder label
+            // in FieldMap.cs (e.g. "Patient:", "Written By:", "Item:",
+            // "Quantity:", "Refills:", "Written:", "Expire:") ends with a
+            // trailing colon; uxDirections — the one field where .Name is
+            // already the real typed value — never does (a real sig
+            // never ends with a bare colon). So a last-resort .Name that
+            // ends with ":" is, by construction of every field this
+            // reader touches, a leaked label rather than a real value
+            // (e.g. uxPrescriberQuickSearch returning "Written By:" as if
+            // it were the prescriber's name). Returning it as a real
+            // value would read as "a wrong prescriber" rather than "no
+            // value available" — return null instead so the field shows
+            // as not-provided (yellow), which is the honest state here:
+            // neither ValuePattern nor a nested Edit produced anything,
+            // so we genuinely don't have the value.
+            if (trimmed.EndsWith(':')) return null;
+
+            return trimmed;
         }
         catch
         {

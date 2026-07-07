@@ -6,7 +6,15 @@
  * FieldVerdict for every field, always in FIELD_ORDER, never re-sorted.
  */
 
-import { FIELD_ORDER, type FieldVerdict, type ScriptData, type EnteredData, type VerifyResult } from '../types.js';
+import {
+  FIELD_ORDER,
+  type Address,
+  type DrugDescriptor,
+  type FieldVerdict,
+  type ScriptData,
+  type EnteredData,
+  type VerifyResult
+} from '../types.js';
 import { compareNames } from '../normalize/name.js';
 import { compareDates } from '../normalize/date.js';
 import { compareAddresses } from '../normalize/address.js';
@@ -21,39 +29,57 @@ import {
   comparePrescriberAddress
 } from '../quantity/index.js';
 
-/** True for anything shaped like the Address interface (street/unit/city/state/zip keys only). */
-function isAddressLike(v: Record<string, unknown>): boolean {
-  const keys = Object.keys(v);
-  return keys.length > 0 && keys.every((k) => ['street', 'unit', 'city', 'state', 'zip'].includes(k));
+/**
+ * Display formatters are DISCRIMINATED BY CALL SITE, not by duck-typing
+ * the runtime shape of an unknown value. Every place below that needs to
+ * turn a source/entered value into display text knows statically which
+ * field it's formatting (Address, DrugDescriptor, or a plain scalar) —
+ * so it calls the matching formatter directly instead of asking
+ * "does this object happen to have exactly these keys?".
+ *
+ * This replaces an earlier version that used exact-key-set duck typing
+ * (`Object.keys(v).every(k => [...].includes(k))`) to decide whether an
+ * object was "address-like" or "drug-like" before falling back to
+ * `JSON.stringify(v)` for anything that didn't match. That fallback is
+ * exactly the raw-object-in-the-UI failure mode Will hit: any object
+ * carrying so much as one extra/differently-cased key (a real risk
+ * across a JSON hop from a hand-maintained C# mirror of these types —
+ * see overlay/RxVerifyOverlay/Models/EngineModels.cs) would silently
+ * fail the shape check and render as literal JSON in the overlay
+ * instead of a human-readable line. Calling the right formatter by
+ * construction removes that whole class of bug — there's no shape
+ * check left to fail.
+ */
+
+function stringifyScalar(v: string | number | null | undefined): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  return String(v);
 }
 
-function stringifyValue(v: unknown): string | null {
-  if (v === null || v === undefined || v === '') return null;
-  if (typeof v === 'object') {
-    const record = v as Record<string, unknown>;
-    const parts = Object.values(record).filter((p) => p !== undefined && p !== null && p !== '');
-    if (parts.length === 0) return null;
-    // Addresses (patientAddress, prescriberAddress) display as one
-    // human-readable line — "street, city, state zip" — instead of raw
-    // JSON, so the source/entered columns are directly comparable at a
-    // glance regardless of which side supplied split components vs a
-    // single combined string (see normalize/address.ts).
-    if (isAddressLike(record)) {
-      const street = [record.street, record.unit].filter((p) => typeof p === 'string' && p).join(' Unit ');
-      const cityStateZip = [record.city, [record.state, record.zip].filter(Boolean).join(' ')]
-        .filter((p) => typeof p === 'string' && p)
-        .join(', ');
-      return [street, cityStateZip].filter(Boolean).join(', ') || null;
-    }
-    // Drug is displayed by NAME only — never the NDC (see src/drug/index.ts:
-    // real dispensed NDCs routinely differ from the e-script's stated NDC,
-    // so showing it side-by-side reads as a false mismatch to a glance).
-    if (Object.keys(record).every((k) => ['name', 'ndc'].includes(k))) {
-      return typeof record.name === 'string' && record.name ? record.name : null;
-    }
-    return JSON.stringify(v);
-  }
-  return String(v);
+/**
+ * Addresses (patientAddress, prescriberAddress) display as one
+ * human-readable line — "street, city, state zip" — instead of raw
+ * JSON, so the source/entered columns are directly comparable at a
+ * glance regardless of which side supplied split components vs a
+ * single combined string (see normalize/address.ts).
+ */
+function stringifyAddress(v: Address | null | undefined): string | null {
+  if (!v) return null;
+  const street = [v.street, v.unit].filter((p) => typeof p === 'string' && p).join(' Unit ');
+  const cityStateZip = [v.city, [v.state, v.zip].filter(Boolean).join(' ')]
+    .filter((p) => typeof p === 'string' && p)
+    .join(', ');
+  return [street, cityStateZip].filter(Boolean).join(', ') || null;
+}
+
+/**
+ * Drug is displayed by NAME only — never the NDC (see src/drug/index.ts:
+ * real dispensed NDCs routinely differ from the e-script's stated NDC,
+ * so showing it side-by-side reads as a false mismatch to a glance).
+ */
+function stringifyDrug(v: DrugDescriptor | null | undefined): string | null {
+  if (!v) return null;
+  return typeof v.name === 'string' && v.name ? v.name : null;
 }
 
 export function verify(source: ScriptData, entered: EnteredData, provider: RxNormProvider): VerifyResult {
@@ -84,74 +110,74 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
     {
       field: 'patientName',
       ...nameResult,
-      sourceValue: stringifyValue(source.patientName),
-      enteredValue: stringifyValue(entered.patientName)
+      sourceValue: stringifyScalar(source.patientName),
+      enteredValue: stringifyScalar(entered.patientName)
     },
     {
       field: 'patientDOB',
       ...dobResult,
-      sourceValue: stringifyValue(source.patientDOB),
-      enteredValue: stringifyValue(entered.patientDOB)
+      sourceValue: stringifyScalar(source.patientDOB),
+      enteredValue: stringifyScalar(entered.patientDOB)
     },
     {
       field: 'patientAddress',
       ...addressResult,
-      sourceValue: stringifyValue(source.patientAddress),
-      enteredValue: stringifyValue(entered.patientAddress)
+      sourceValue: stringifyAddress(source.patientAddress),
+      enteredValue: stringifyAddress(entered.patientAddress)
     },
     {
       field: 'prescriberName',
       ...prescriberNameResult,
-      sourceValue: stringifyValue(source.prescriber?.name),
-      enteredValue: stringifyValue(entered.prescriber?.name)
+      sourceValue: stringifyScalar(source.prescriber?.name),
+      enteredValue: stringifyScalar(entered.prescriber?.name)
     },
     {
       field: 'prescriberNpi',
       ...prescriberNpiResult,
-      sourceValue: stringifyValue(source.prescriber?.npi),
-      enteredValue: stringifyValue(entered.prescriber?.npi)
+      sourceValue: stringifyScalar(source.prescriber?.npi),
+      enteredValue: stringifyScalar(entered.prescriber?.npi)
     },
     {
       field: 'prescriberPhone',
       ...prescriberPhoneResult,
-      sourceValue: stringifyValue(source.prescriber?.phone),
-      enteredValue: stringifyValue(entered.prescriber?.phone)
+      sourceValue: stringifyScalar(source.prescriber?.phone),
+      enteredValue: stringifyScalar(entered.prescriber?.phone)
     },
     {
       field: 'prescriberAddress',
       ...prescriberAddressResult,
-      sourceValue: stringifyValue(source.prescriber?.address),
-      enteredValue: stringifyValue(entered.prescriber?.address)
+      sourceValue: stringifyAddress(source.prescriber?.address),
+      enteredValue: stringifyAddress(entered.prescriber?.address)
     },
     {
       field: 'dateWritten',
       ...dateWrittenResult,
-      sourceValue: stringifyValue(source.dateWritten),
-      enteredValue: stringifyValue(entered.dateWritten)
+      sourceValue: stringifyScalar(source.dateWritten),
+      enteredValue: stringifyScalar(entered.dateWritten)
     },
     {
       field: 'drug',
       ...drugResult,
-      sourceValue: stringifyValue(source.drug),
-      enteredValue: stringifyValue(entered.drug)
+      sourceValue: stringifyDrug(source.drug),
+      enteredValue: stringifyDrug(entered.drug)
     },
     {
       field: 'sig',
       ...sigResult,
-      sourceValue: stringifyValue(source.sig),
-      enteredValue: stringifyValue(entered.sig)
+      sourceValue: stringifyScalar(source.sig),
+      enteredValue: stringifyScalar(entered.sig)
     },
     {
       field: 'quantity',
       ...quantityResult,
-      sourceValue: stringifyValue(source.quantity),
-      enteredValue: stringifyValue(entered.quantity)
+      sourceValue: stringifyScalar(source.quantity),
+      enteredValue: stringifyScalar(entered.quantity)
     },
     {
       field: 'refills',
       ...refillsResult,
-      sourceValue: stringifyValue(source.refills),
-      enteredValue: stringifyValue(entered.refills)
+      sourceValue: stringifyScalar(source.refills),
+      enteredValue: stringifyScalar(entered.refills)
     }
   ];
 
