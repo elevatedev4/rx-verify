@@ -146,18 +146,19 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
     /// Text label for the category header spelling out the same
     /// worst-status-wins rollup the glyph/color already convey — per
     /// Will's live-test feedback, the header should show words, not just
-    /// a symbol/color. "Exact match" only when every row is green;
-    /// "Partial match" when at least one row is yellow and none are red;
-    /// "Likely Error" when at least one row is red. "No data" when the
-    /// category has nothing to roll up yet (see HasData).
+    /// a symbol/color. "Match" only when every row is green; "Partial
+    /// match" when at least one row is yellow and none are red; "Verify"
+    /// when at least one row is red (W-T10 item 3: renamed from "Exact
+    /// match"/"Likely Error" respectively). "No data" when the category
+    /// has nothing to roll up yet (see HasData).
     /// </summary>
     public string StatusText => !HasData
         ? "No data"
         : Status switch
         {
-            VerdictStatus.Green => "Exact match",
+            VerdictStatus.Green => "Match",
             VerdictStatus.Yellow => "Partial match",
-            VerdictStatus.Red => "Likely Error",
+            VerdictStatus.Red => "Verify",
             _ => "Partial match"
         };
 
@@ -427,9 +428,26 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         foreach (var category in Categories)
         {
-            category.Status = CategoryRollup.RollUp(category.Rows.Select(r => r.Status));
+            RollUpCategory(category);
             category.HasData = category.Rows.Count > 0;
         }
+    }
+
+    /// <summary>
+    /// Recomputes one category's rolled-up Status from its current Rows,
+    /// excluding any row whose field is in FieldCategories.
+    /// RollupExcludedFields (currently patientAddress/prescriberAddress)
+    /// from the rollup INPUT — those rows stay visible in the table, they
+    /// just can never move the category's header status. Shared by
+    /// PopulateRows (full refresh) and RefreshDrugFieldAsync (drug-only
+    /// refresh) so the exclusion rule can't drift between the two.
+    /// </summary>
+    private static void RollUpCategory(CategoryViewModel category)
+    {
+        var rollupStatuses = category.Rows
+            .Where(r => !FieldCategories.RollupExcludedFields.Contains(r.FieldKey))
+            .Select(r => r.Status);
+        category.Status = CategoryRollup.RollUp(rollupStatuses);
     }
 
     private static VerdictRowViewModel BuildRow(string field, FieldVerdict verdict) => new()
@@ -497,7 +515,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // triggers the DataTemplate to re-render this row's glyph/colors.
         drugCategory.Rows[existingIndex] = BuildRow("drug", drugVerdict);
 
-        drugCategory.Status = CategoryRollup.RollUp(drugCategory.Rows.Select(r => r.Status));
+        RollUpCategory(drugCategory);
         UpdateSummary(result.Summary);
         StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}.";
     }

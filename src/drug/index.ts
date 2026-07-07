@@ -321,21 +321,53 @@ export function extractStatedStrength(name: string): string | null {
 }
 
 /**
+ * Common dosage-FORM word variants -> canonical form word. Applied as a
+ * whole-token replacement (never a substring replace) so e.g. "cap" in
+ * "captopril" is never touched. Deliberately only covers the handful of
+ * abbreviations pharmacy systems actually produce (PioneerRx free-text
+ * entry vs an e-script's spelled-out form) — release qualifiers like
+ * ER/XR/CR are left as-is (they already compare equal via the
+ * case-folding above, and collapsing them together would risk treating
+ * two genuinely different release profiles as the same product, which
+ * this file's stated philosophy — fail toward yellow, never a false
+ * green — rules out).
+ */
+const DOSAGE_FORM_WORDS: Record<string, string> = {
+  tab: 'tablet', tabs: 'tablet', tablets: 'tablet',
+  cap: 'capsule', caps: 'capsule', capsules: 'capsule',
+  sol: 'solution', soln: 'solution',
+  susp: 'suspension'
+};
+
+/**
  * Normalize a free-text drug name/description for IDENTITY comparison:
- * case/punctuation/whitespace only, no pharmaceutical-equivalence
- * reasoning (that would need real RxNorm data — see this file's header).
- * Deliberately conservative: this can only ever fail to recognize a real
- * match (e.g. "Phosp" vs "Phosphate" spelled out differently) and fall
- * through to the concept-resolution path below, never produce a false
- * green from two actually-different drugs looking superficially similar.
+ * case/punctuation/whitespace, common dosage-FORM abbreviations (TAB/
+ * TABS -> tablet, CAP/CAPS -> capsule, SOL -> solution, SUSP ->
+ * suspension), and number/unit spacing only — no pharmaceutical-
+ * equivalence reasoning (that would need real RxNorm data — see this
+ * file's header). Deliberately conservative: this can only ever fail to
+ * recognize a real match (e.g. "Phosp" vs "Phosphate" spelled out
+ * differently) and fall through to the concept-resolution path below,
+ * never produce a false green from two actually-different drugs looking
+ * superficially similar.
  */
 export function normalizeDrugNameString(raw: string): string {
-  return raw
+  const folded = raw
     .toLowerCase()
     .replace(/[®™©]/g, '')
     .replace(/[.,]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // Force exactly one space between a number and a trailing strength
+  // unit, so "2mg" and "2 mg" fold to the same text (unit CASING is
+  // already handled by the toLowerCase() above).
+  const spaced = folded.replace(/(\d)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
+
+  return spaced
+    .split(' ')
+    .map((tok) => DOSAGE_FORM_WORDS[tok] ?? tok)
+    .join(' ');
 }
 
 export function compareDrugs(

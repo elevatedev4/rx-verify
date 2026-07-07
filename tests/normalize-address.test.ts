@@ -18,6 +18,20 @@ describe('compareAddresses', () => {
     expect(r.status).toBe('green');
   });
 
+  it('compares only the first 5 digits of ZIP (W-T10 item 1): dashed +4, undashed 9-digit, and bare 5-digit all match "66047"', () => {
+    const dashed = compareAddresses(
+      { street: '123 Main St', city: 'Lawrence', state: 'KS', zip: '66047-1234' },
+      { street: '123 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+    );
+    expect(dashed.status).toBe('green');
+
+    const undashed = compareAddresses(
+      { street: '123 Main St', city: 'Lawrence', state: 'KS', zip: '660471234' },
+      { street: '123 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+    );
+    expect(undashed.status).toBe('green');
+  });
+
   it('is YELLOW unit_differs on unit-only difference', () => {
     const r = compareAddresses(
       { street: '123 Main St Apt 4', city: 'Springfield', state: 'IL', zip: '62704' },

@@ -248,4 +248,27 @@ public static class FieldCategories
         ["quantity"] = Rx,
         ["refills"] = Rx
     };
+
+    /// <summary>
+    /// Fields that stay VISIBLE in their category's row list (unlike sig,
+    /// which was pulled into its own category above) but must NEVER move
+    /// that category's rolled-up status — per Will's live-test feedback,
+    /// an address difference alone must not escalate the Patient or
+    /// Prescriber header to yellow/red. Address alone is never a
+    /// contradiction that blocks dispensing (patients move; see
+    /// src/normalize/address.ts's own stated philosophy) — it's
+    /// informational at the field level only.
+    ///   - Deliberately a DIFFERENT mechanism than sig's "own category"
+    ///     trick: address needs to stay displayed inline under Patient /
+    ///     Prescriber (it's clearly patient-identity / prescriber data,
+    ///     not its own concern the way sig's fuzzy wording match is), so
+    ///     instead of relocating it, OverlayViewModel filters rows
+    ///     through this set before calling CategoryRollup.RollUp — see
+    ///     PopulateRows.
+    /// </summary>
+    public static readonly IReadOnlySet<string> RollupExcludedFields = new HashSet<string>
+    {
+        "patientAddress",
+        "prescriberAddress"
+    };
 }

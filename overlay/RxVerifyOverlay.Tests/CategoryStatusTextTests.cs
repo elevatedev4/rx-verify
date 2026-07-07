@@ -13,10 +13,11 @@ namespace RxVerifyOverlay.Tests;
 public class CategoryStatusTextTests
 {
     [Fact]
-    public void GreenStatusWithDataReadsExactMatch()
+    public void GreenStatusWithDataReadsMatch()
     {
+        // W-T10 item 3: renamed from "Exact match" to "Match".
         var category = new CategoryViewModel { Name = "Patient", HasData = true, Status = VerdictStatus.Green };
-        Assert.Equal("Exact match", category.StatusText);
+        Assert.Equal("Match", category.StatusText);
     }
 
     [Fact]
@@ -27,10 +28,11 @@ public class CategoryStatusTextTests
     }
 
     [Fact]
-    public void RedStatusWithDataReadsLikelyError()
+    public void RedStatusWithDataReadsVerify()
     {
+        // W-T10 item 3: renamed from "Likely Error" to "Verify".
         var category = new CategoryViewModel { Name = "Rx", HasData = true, Status = VerdictStatus.Red };
-        Assert.Equal("Likely Error", category.StatusText);
+        Assert.Equal("Verify", category.StatusText);
     }
 
     [Fact]

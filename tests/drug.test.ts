@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseNdc, compareDrugs, FixtureProvider } from '../src/drug/index.js';
+import { parseNdc, compareDrugs, normalizeDrugNameString, FixtureProvider } from '../src/drug/index.js';
 
 const provider = new FixtureProvider();
 
@@ -97,6 +97,30 @@ describe('compareDrugs', () => {
       const r = compareDrugs({ name: 'Lisinopril 20mg tablet' }, { name: 'Lisinopril 10mg tablet' }, provider);
       expect(r.status).toBe('red');
       expect(r.reasonCode).toBe('drug_mismatch');
+    });
+
+    describe('dosage-form / casing / spacing variants (W-T10 item 4)', () => {
+      it('is GREEN name_identity_match for "Estradiol 2 MG TABS" vs "Estradiol 2 Mg Tablet"', () => {
+        const r = compareDrugs({ name: 'Estradiol 2 MG TABS' }, { name: 'Estradiol 2 Mg Tablet' }, provider);
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_identity_match');
+      });
+
+      it('is GREEN name_identity_match for "Amoxicillin 500 MG CAP" vs "amoxicillin 500 mg capsule"', () => {
+        const r = compareDrugs({ name: 'Amoxicillin 500 MG CAP' }, { name: 'amoxicillin 500 mg capsule' }, provider);
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_identity_match');
+      });
+
+      it('is GREEN name_identity_match for "Metformin 500MG SUSP" vs "Metformin 500 mg Suspension" (no-space unit + susp abbreviation)', () => {
+        const r = compareDrugs({ name: 'Metformin 500MG SUSP' }, { name: 'Metformin 500 mg Suspension' }, provider);
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_identity_match');
+      });
+
+      it('does not fold "cap" inside an unrelated word like "captopril" into "capsule"', () => {
+        expect(normalizeDrugNameString('Captopril 25mg tablet')).toBe('captopril 25 mg tablet');
+      });
     });
   });
 });
