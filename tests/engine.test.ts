@@ -14,7 +14,7 @@ describe('verify engine', () => {
   it('every field is yellow not_provided when both sides are entirely empty', () => {
     const result = verify({}, {}, provider);
     expect(result.verdicts.every((v) => v.status === 'yellow')).toBe(true);
-    expect(result.summary).toEqual({ green: 0, yellow: 12, red: 0, total: 12 });
+    expect(result.summary).toEqual({ green: 0, yellow: 13, red: 0, total: 13 });
   });
 
   it('produces a summary that adds up to the verdict count', () => {
@@ -25,7 +25,7 @@ describe('verify engine', () => {
     );
     const { green, yellow, red, total } = result.summary;
     expect(green + yellow + red).toBe(total);
-    expect(total).toBe(12);
+    expect(total).toBe(13);
   });
 
   describe('skipDrugLookup (responsiveness: overlay renders every other field immediately, drug row updates in place)', () => {

@@ -15,11 +15,29 @@ public partial class MainWindow : Window
     private readonly OverlaySettings _settings;
     private EngineClient _engineClient;
     private OverlayViewModel _viewModel;
-    private readonly DispatcherTimer _autoRefreshTimer;
+    // Nullable: briefly null between InitializeComponent() (which can raise
+    // Checked for the XAML-default IsChecked="True" on AutoRefreshCheckBox)
+    // and the line below that actually constructs it — see
+    // OnAutoRefreshToggled's null guard.
+    private readonly DispatcherTimer? _autoRefreshTimer;
 
     public MainWindow()
     {
         InitializeComponent();
+
+        // W-T11 item 4: launch near the RIGHT edge of the primary
+        // screen's working area instead of the old fixed Left="20" (left
+        // edge). Computed from the working area so it adapts to whatever
+        // monitor/resolution the workstation has, and clamped so the
+        // window can never end up partially or fully off-screen (e.g. if
+        // WindowWidth were ever larger than the working area itself).
+        // This is only the INITIAL position — the window stays freely
+        // movable afterward, same as before (see the XAML header
+        // comment).
+        const double rightMargin = 20;
+        var workArea = SystemParameters.WorkArea;
+        var left = workArea.Right - Width - rightMargin;
+        Left = Math.Max(workArea.Left, left);
 
         _settings = OverlaySettings.Load();
         _engineClient = new EngineClient(_settings.EngineCliPath, _settings.NodeExecutable);
@@ -41,6 +59,20 @@ public partial class MainWindow : Window
         // case (nothing changed) is nearly free.
         _autoRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _autoRefreshTimer.Tick += async (_, _) => await SafeWatchAsync();
+
+        // W-T11 item 3: Auto-watch now starts CHECKED by default (see
+        // AutoRefreshCheckBox IsChecked="True" in MainWindow.xaml), so
+        // start the timer to match that initial state right here rather
+        // than relying on the Checked routed event firing during
+        // InitializeComponent (unreliable this early — _autoRefreshTimer
+        // doesn't exist yet at that point, see OnAutoRefreshToggled's
+        // null guard). This is now the single source of truth for
+        // "does auto-watch start running on launch", matching whatever
+        // AutoRefreshCheckBox.IsChecked actually is.
+        if (AutoRefreshCheckBox.IsChecked == true)
+        {
+            _autoRefreshTimer.Start();
+        }
 
         // First read on launch so the panel isn't empty while the
         // pharmacist decides whether to enable auto-watch.
@@ -82,6 +114,14 @@ public partial class MainWindow : Window
 
     private void OnAutoRefreshToggled(object sender, RoutedEventArgs e)
     {
+        // Defensive null guard: WPF can raise Checked for a XAML-default
+        // IsChecked="True" (see AutoRefreshCheckBox) during
+        // InitializeComponent, before _autoRefreshTimer is constructed —
+        // the constructor's own explicit start (matching the checkbox's
+        // initial state) already covers that case, so this is a no-op
+        // rather than a NullReferenceException if it fires that early.
+        if (_autoRefreshTimer is null) return;
+
         if (AutoRefreshCheckBox.IsChecked == true)
         {
             _autoRefreshTimer.Start();

@@ -44,7 +44,8 @@ export const FIELD_ORDER = [
   'drug',
   'sig',
   'quantity',
-  'refills'
+  'refills',
+  'daw'
 ] as const;
 
 export type FieldName = (typeof FIELD_ORDER)[number];
@@ -85,6 +86,24 @@ export interface PrescriptionRecord {
   quantity?: string | number;
   quantityUnit?: string;
   refills?: string | number;
+  /**
+   * SOURCE-side only: true when the e-script's MedicationPrescribed >
+   * Substitutions indicator states the prescriber does NOT allow
+   * substitution (NCPDP SCRIPT code 1, "Substitution Not Allowed by
+   * Prescriber") — i.e. DAW is effectively required. false for any other
+   * observed code (0 "No Product Selection Indicated", or a
+   * patient-requested-brand code, all of which permit the pharmacy to
+   * dispense generic); undefined when the e-script didn't provide a
+   * Substitutions indicator at all. Never meaningfully set on the
+   * entered side (see `daw` below for that side of the comparison).
+   */
+  substitutionsNotAllowed?: boolean;
+  /**
+   * ENTERED-side only: whether PioneerRx's DAW checkbox (AutomationId
+   * uxDawCode) is checked. Never meaningfully set on the source side
+   * (see `substitutionsNotAllowed` above for that side).
+   */
+  daw?: boolean;
 }
 
 /** The incoming e-prescription — the presumed source of truth. */

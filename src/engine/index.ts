@@ -28,6 +28,7 @@ import {
   comparePrescriberPhone,
   comparePrescriberAddress
 } from '../quantity/index.js';
+import { compareDaw } from '../daw/index.js';
 
 /**
  * Display formatters are DISCRIMINATED BY CALL SITE, not by duck-typing
@@ -80,6 +81,18 @@ function stringifyAddress(v: Address | null | undefined): string | null {
 function stringifyDrug(v: DrugDescriptor | null | undefined): string | null {
   if (!v) return null;
   return typeof v.name === 'string' && v.name ? v.name : null;
+}
+
+/** Display text for the SOURCE side of the daw field (source.substitutionsNotAllowed). */
+function stringifySubstitutionIndicator(v: boolean | null | undefined): string | null {
+  if (v === null || v === undefined) return null;
+  return v ? 'Substitution NOT allowed (DAW)' : 'Substitution allowed';
+}
+
+/** Display text for the ENTERED side of the daw field (entered.daw). */
+function stringifyDaw(v: boolean | null | undefined): string | null {
+  if (v === null || v === undefined) return null;
+  return v ? 'DAW checked' : 'DAW not checked';
 }
 
 export interface VerifyOptions {
@@ -148,6 +161,7 @@ export function verify(
     enteredSigParsed
   );
   const refillsResult = compareRefills(source.refills, entered.refills);
+  const dawResult = compareDaw(source.substitutionsNotAllowed, entered.daw);
 
   const verdicts: FieldVerdict[] = [
     {
@@ -221,6 +235,12 @@ export function verify(
       ...refillsResult,
       sourceValue: stringifyScalar(source.refills),
       enteredValue: stringifyScalar(entered.refills)
+    },
+    {
+      field: 'daw',
+      ...dawResult,
+      sourceValue: stringifySubstitutionIndicator(source.substitutionsNotAllowed),
+      enteredValue: stringifyDaw(entered.daw)
     }
   ];
 

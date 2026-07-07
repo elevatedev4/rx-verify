@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Parsing;
 
@@ -59,6 +60,7 @@ public sealed class FieldReader
     private static readonly object CacheLock = new();
     private static string? _cachedRxNumber;
     private static PrescriptionRecord? _cachedSource;
+    private static IReadOnlyList<string> _cachedNotes = Array.Empty<string>();
 
     public FieldReader(PioneerRxWindow window)
     {
@@ -87,6 +89,16 @@ public sealed class FieldReader
     /// IsStructuredSourceAvailable and ViewModels/OverlayViewModel.cs.
     /// </summary>
     public string? SourceUnavailableReason { get; private set; }
+
+    /// <summary>
+    /// Free-text notes found on the most recent ReadSource() call (item
+    /// 6) — see EscriptTreeParser.ParseNotes. Empty (never null) when
+    /// none were found, which is the common case (see FieldMap.NodeNote
+    /// doc: UNCONFIRMED against a real dump). Set alongside the per-Rx
+    /// source cache so a cache hit doesn't lose the notes that came with
+    /// the cached source.
+    /// </summary>
+    public IReadOnlyList<string> SourceNotes { get; private set; } = Array.Empty<string>();
 
     /// <summary>
     /// What the technician entered (LEFT RxDetailsPanel), read by
@@ -126,7 +138,12 @@ public sealed class FieldReader
             // DaysSupply removed entirely per Will's live-test feedback —
             // no longer read, compared, or displayed (see
             // Models/EngineModels.cs PrescriptionRecord/FieldOrder).
-            Refills = ReadEditOrCombo(FieldMap.EnteredRefillsId)
+            Refills = ReadEditOrCombo(FieldMap.EnteredRefillsId),
+            // DAW checkbox (item 5) — confirmed AutomationId uxDawCode
+            // (CheckBox, see FieldMap.EnteredDawId). Read via TogglePattern,
+            // not the Edit/ComboBox Name-fallback path (see
+            // UiaTreeWalker.ReadCheckBoxByAutomationId).
+            Daw = ReadCheckBox(FieldMap.EnteredDawId)
         };
     }
 
@@ -178,6 +195,7 @@ public sealed class FieldReader
                 {
                     _escriptTreeFound = true;
                     SourceUnavailableReason = null;
+                    SourceNotes = _cachedNotes;
                     return _cachedSource;
                 }
             }
@@ -209,6 +227,8 @@ public sealed class FieldReader
             }
 
             var record = EscriptTreeParser.Parse(messageNode);
+            var notes = EscriptTreeParser.ParseNotes(messageNode);
+            SourceNotes = notes;
 
             SourceUnavailableReason =
                 string.IsNullOrWhiteSpace(record.PatientName) && string.IsNullOrWhiteSpace(record.Drug?.Name)
@@ -221,6 +241,7 @@ public sealed class FieldReader
                 {
                     _cachedRxNumber = _rxNumber;
                     _cachedSource = record;
+                    _cachedNotes = notes;
                 }
             }
 
@@ -272,6 +293,12 @@ public sealed class FieldReader
     private string? ReadEditOrCombo(string automationId)
     {
         try { return _walker.ReadEditOrComboByAutomationId(automationId); }
+        catch { return null; }
+    }
+
+    private bool? ReadCheckBox(string automationId)
+    {
+        try { return _walker.ReadCheckBoxByAutomationId(automationId); }
         catch { return null; }
     }
 

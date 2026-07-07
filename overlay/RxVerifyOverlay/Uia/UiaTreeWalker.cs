@@ -71,6 +71,38 @@ public sealed class UiaTreeWalker
     }
 
     /// <summary>
+    /// Reads a CheckBox's checked state by AutomationId (e.g.
+    /// FieldMap.EnteredDawId) via TogglePattern — a CheckBox's .Name is
+    /// its static label text ("DAW"), never its checked state, so
+    /// ReadEditOrComboByAutomationId's Name-fallback path would be wrong
+    /// here; this reads ToggleState directly instead. Returns null (not
+    /// "unchecked") if the element isn't found or TogglePattern isn't
+    /// supported — the caller/engine treats null as "not provided"
+    /// (yellow), never a false "unchecked".
+    /// </summary>
+    public bool? ReadCheckBoxByAutomationId(string automationId)
+    {
+        var element = FindDescendantByAutomationId(automationId);
+        if (element is null) return null;
+
+        try
+        {
+            if (!element.Patterns.Toggle.IsSupported) return null;
+            var state = element.Patterns.Toggle.Pattern.ToggleState.ValueOrDefault;
+            return state switch
+            {
+                ToggleState.On => true,
+                ToggleState.Off => false,
+                _ => null // Indeterminate, or the provider didn't resolve a real state
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Finds the first descendant (anywhere under the window, no fixed
     /// ancestor path) with the given AutomationId. Returns null rather
     /// than throwing if it isn't present — the corresponding tab/panel
@@ -304,6 +336,28 @@ public sealed class UiaTreeWalker
     /// tab was never opened this session" case FieldReader/
     /// IsStructuredSourceAvailable use to show the "open the Escript tab"
     /// message rather than ten yellow fields.
+    ///
+    /// PERFORMANCE (W-T11 item 2 — "the e-script data read feels slow"):
+    /// this used to fully recurse the ENTIRE tree unconditionally. A real
+    /// e-script's Escript tree runs to ~150 TreeItems (confirmed against
+    /// escript-249.txt), and EscriptTreeParser only ever reads three of
+    /// NewRx's children — Patient, Prescriber, MedicationPrescribed (see
+    /// FieldMap.NodePatient/NodePrescriber/NodeMedicationPrescribed). The
+    /// other ~⅓-½ of the tree (Header, BenefitsCoordination/
+    /// PayerIdentification, Observation/vital-sign measurements, Pharmacy,
+    /// Supervisor, ...) was being fully walked and converted to
+    /// EscriptNodes on every cache miss for no reason — every single one
+    /// of those nodes is at least 2-3 cross-process UIA COM calls (.Name,
+    /// .ControlType, .FindAllChildren()), which is real, measurable
+    /// latency on a live workstation (COM/UIA marshaling, not local
+    /// memory access). BuildPrunedMessageNode below walks the
+    /// Message -> Body -> NewRx spine BY NAME (cheap — each of those
+    /// levels has only 1-2 real children) and then fully recurses ONLY
+    /// the three relevant NewRx children, cutting total TreeItem visits
+    /// by roughly half on a typical script. See FieldReader.ReadSource
+    /// for the complementary per-Rx cache, which already avoids paying
+    /// this cost more than once per Rx — this makes that one unavoidable
+    /// walk itself cheaper.
     /// </summary>
     public EscriptNode? BuildEscriptTree()
     {
@@ -326,19 +380,134 @@ public sealed class UiaTreeWalker
             // that isn't a TreeItem.
             if (controlType != ControlType.TreeItem) continue;
 
-            return BuildEscriptNode(child);
+            return BuildPrunedMessageNode(child);
         }
 
         return null;
     }
 
+    /// <summary>NewRx's only children EscriptTreeParser ever reads — see BuildEscriptTree's perf doc above.</summary>
+    private static readonly string[] RelevantNewRxChildNames =
+    {
+        FieldMap.NodePatient,
+        FieldMap.NodePrescriber,
+        FieldMap.NodeMedicationPrescribed
+    };
+
+    /// <summary>
+    /// Builds the Message -&gt; Body -&gt; NewRx spine by exact child name
+    /// (not a full recursive walk — each of these levels only has 1-2
+    /// real children in practice), then fully recurses ONLY NewRx's
+    /// Patient/Prescriber/MedicationPrescribed children via the unchanged
+    /// full-recursion BuildEscriptNode. Degrades gracefully (never
+    /// throws) at every step exactly like the old full-recursion did for
+    /// a missing/differently-shaped message — a message that isn't a
+    /// NewRx at all (e.g. a renewal response) still yields a Message node
+    /// whose Body/NewRx simply weren't found, which EscriptTreeParser.Parse
+    /// already treats as an empty PrescriptionRecord.
+    /// </summary>
+    private static EscriptNode BuildPrunedMessageNode(AutomationElement messageElement)
+    {
+        var messageNode = new EscriptNode(SafeName(messageElement));
+
+        // Message-level Note (item 6, pharmacy-directed free text) —
+        // preserved even though it's a sibling of Body, since
+        // EscriptTreeParser.ParseNotes looks for it directly on the
+        // Message node. See FieldMap.NodeNote (UNCONFIRMED shape).
+        CollectNoteChildrenIfPresent(messageElement, messageNode);
+
+        var bodyElement = FindNamedTreeItemChild(messageElement, FieldMap.NodeBody);
+        if (bodyElement is null) return messageNode;
+
+        var bodyNode = new EscriptNode(SafeName(bodyElement));
+        messageNode.Children.Add(bodyNode);
+
+        var newRxElement = FindNamedTreeItemChild(bodyElement, FieldMap.NodeNewRx);
+        if (newRxElement is null) return messageNode;
+
+        var newRxNode = new EscriptNode(SafeName(newRxElement));
+        bodyNode.Children.Add(newRxNode);
+
+        // NewRx-level Note (item 6, medication-directed free text) — same
+        // UNCONFIRMED caveat as above.
+        CollectNoteChildrenIfPresent(newRxElement, newRxNode);
+
+        foreach (var wantedName in RelevantNewRxChildNames)
+        {
+            var childElement = FindNamedTreeItemChild(newRxElement, wantedName);
+            if (childElement is not null)
+            {
+                newRxNode.Children.Add(BuildEscriptNode(childElement));
+            }
+        }
+
+        return messageNode;
+    }
+
+    /// <summary>
+    /// Finds any direct TreeItem child of <paramref name="parent"/> that
+    /// is either a "Note" CONTAINER (exact name match) or a bare
+    /// "Note: &lt;text&gt;" LEAF (name starts with "Note: "), and fully
+    /// recurses it (BuildEscriptNode — a Note subtree is small either
+    /// way) onto <paramref name="target"/>.Children. Used for the item-6
+    /// Note lookups in BuildPrunedMessageNode — see FieldMap.NodeNote
+    /// (UNCONFIRMED shape, neither variant has been seen in a real dump)
+    /// and EscriptTreeParser.CollectNotesFrom, which handles both shapes
+    /// once the node is in the tree.
+    /// </summary>
+    private static void CollectNoteChildrenIfPresent(AutomationElement parent, EscriptNode target)
+    {
+        AutomationElement[] children;
+        try { children = parent.FindAllChildren(); }
+        catch { return; }
+
+        var notePrefix = FieldMap.NodeNote + ": ";
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; }
+            catch { continue; }
+            if (controlType != ControlType.TreeItem) continue;
+
+            var name = SafeName(child);
+            var isNoteContainer = string.Equals(name, FieldMap.NodeNote, StringComparison.Ordinal);
+            var isBareNoteLeaf = name.StartsWith(notePrefix, StringComparison.Ordinal);
+            if (isNoteContainer || isBareNoteLeaf)
+            {
+                target.Children.Add(BuildEscriptNode(child));
+            }
+        }
+    }
+
+    /// <summary>Finds a direct TreeItem child of <paramref name="parent"/> with an exact Name match — used only for the cheap Message/Body/NewRx spine (see BuildPrunedMessageNode), never for the relevant subtrees themselves (those still use the general FindAllChildren-based BuildEscriptNode below).</summary>
+    private static AutomationElement? FindNamedTreeItemChild(AutomationElement parent, string name)
+    {
+        AutomationElement[] children;
+        try { children = parent.FindAllChildren(); }
+        catch { return null; }
+
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; }
+            catch { continue; }
+
+            if (controlType != ControlType.TreeItem) continue;
+            if (string.Equals(SafeName(child), name, StringComparison.Ordinal)) return child;
+        }
+
+        return null;
+    }
+
+    private static string SafeName(AutomationElement element)
+    {
+        try { return element.Name ?? string.Empty; }
+        catch { return string.Empty; }
+    }
+
     private static EscriptNode BuildEscriptNode(AutomationElement element)
     {
-        string name;
-        try { name = element.Name ?? string.Empty; }
-        catch { name = string.Empty; }
-
-        var node = new EscriptNode(name);
+        var node = new EscriptNode(SafeName(element));
 
         AutomationElement[] children;
         try { children = element.FindAllChildren(); }

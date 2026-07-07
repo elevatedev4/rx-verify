@@ -7,7 +7,7 @@
         MinWidth="340" MinHeight="300"
         Topmost="True"
         WindowStartupLocation="Manual"
-        Left="20" Top="20"
+        Top="20"
         ResizeMode="CanResizeWithGrip"
         Background="#FF1E1E1E">
     <!--
@@ -19,6 +19,13 @@
         pin — WPF remembers wherever the user drags it for the rest of
         that run; persisting position across launches is a nice-to-have,
         not done in v0 (see README "Deferred").
+
+        W-T11 item 4: Left is deliberately NOT set here (was a fixed
+        Left="20", i.e. hugging the LEFT edge) — it's computed in
+        MainWindow.xaml.cs's constructor from the primary screen's
+        working-area width so the window launches near the RIGHT edge
+        instead, since Left="20" here would just be overwritten before
+        the window is shown anyway.
     -->
     <Window.Resources>
         <SolidColorBrush x:Key="GreenBrush" Color="#FF2E7D32" />
@@ -76,6 +83,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" /> <!-- Title -->
             <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
+            <RowDefinition Height="Auto" /> <!-- W-T11 item 6: e-script notes, red text, only when present -->
             <RowDefinition Height="Auto" /> <!-- Bottom bar: status message + Refresh/Dump/Auto-watch controls -->
             <RowDefinition Height="Auto" /> <!-- Settings (collapsible-ish, just always shown small in v0) -->
         </Grid.RowDefinitions>
@@ -145,44 +153,25 @@
                             <Border Background="{StaticResource BoxGrayBrush}" BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,4">
                                 <StackPanel>
                                     <!--
-                                        Category header: rolled-up status glyph LEADS the row
-                                        (matches the same WCAG convention as the field rows
-                                        below, where the glyph is the FIRST visual element
-                                        rather than a trailing indicator, so the worst-status-
-                                        wins rollup for the whole category reads before
-                                        anything else at a glance), followed immediately by
-                                        the category name, then the status label text right
-                                        NEXT TO the name (e.g. "Patient — Match") — per
-                                        Will's W-T9 item 4 feedback, this must sit right next
-                                        to the title (not pinned out to the box's right edge)
-                                        and must NOT be italic (see
-                                        CategoryViewModel.HeaderStatusText, which supplies the
-                                        "— <StatusText>" text directly so no XAML
-                                        StringFormat/MultiBinding gymnastics are needed here).
+                                        Category header (W-T11 item 1: REWORKED back to a
+                                        plain, quiet heading — this REVERSES the earlier
+                                        W-T9 item 4 styling above). The rolled-up status
+                                        glyph and "— <StatusText>" label (e.g. "Match" /
+                                        "Partial match" / "Verify") are gone entirely, along
+                                        with the header's own background color — per Will's
+                                        feedback, the header was drawing the eye when the
+                                        field ROWS below (which already carry the same
+                                        green/yellow/red whole-row coloring, see the Rows
+                                        ItemsControl below) are the thing that should be
+                                        looked at. Just the bare category name, small and
+                                        muted, blending into the window background rather
+                                        than announcing itself as its own colored block.
+                                        CategoryViewModel.Glyph/StatusText/HeaderStatusText
+                                        still exist in code (still covered by
+                                        Tests/CategoryStatusTextTests.cs) — they're simply no
+                                        longer bound anywhere in this template.
                                     -->
-                                    <Border CornerRadius="3,3,0,0" Padding="5,2">
-                                        <Border.Style>
-                                            <Style TargetType="Border">
-                                                <Setter Property="Background" Value="{StaticResource GreenBrush}" />
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Yellow}">
-                                                        <Setter Property="Background" Value="{StaticResource YellowBrush}" />
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding Status}" Value="{x:Static models:VerdictStatus.Red}">
-                                                        <Setter Property="Background" Value="{StaticResource RedBrush}" />
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding HasData}" Value="False">
-                                                        <Setter Property="Background" Value="{StaticResource GrayBrush}" />
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Border.Style>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding Glyph}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" TextAlignment="Center" Width="18" />
-                                            <TextBlock Text="{Binding Name}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" />
-                                            <TextBlock Text="{Binding HeaderStatusText}" Foreground="White" FontSize="10" VerticalAlignment="Center" Margin="4,0,0,0" />
-                                        </StackPanel>
-                                    </Border>
+                                    <TextBlock Text="{Binding Name}" Foreground="#FF888888" FontWeight="Bold" FontSize="11" Margin="5,3,0,2" />
 
                                     <!--
                                         Field rows: status icon | Field | Source | Entered, with
@@ -329,7 +318,38 @@
         </Grid>
 
         <!--
-            Row 2: BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
+            Row 2 (W-T11 item 6): e-script notes (NCPDP Note element, see
+            Parsing/EscriptTreeParser.ParseNotes and
+            OverlayViewModel.Notes/HasNotes) — RED text, at the BOTTOM of
+            the overlay (below the verdict table, above the bottom
+            controls bar), and only rendered at all when at least one
+            note was found. Collapsed via HasNotes so an Rx with no notes
+            (the common case) shows nothing here at all — no empty red
+            box.
+        -->
+        <Border Grid.Row="2" Margin="0,4,0,0" Padding="0,0,0,4">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding HasNotes}" Value="True">
+                            <Setter Property="Visibility" Value="Visible" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <ItemsControl ItemsSource="{Binding Notes}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" Foreground="#FFEF5350" FontSize="10" FontWeight="Bold"
+                                   TextWrapping="Wrap" Margin="0,1" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Border>
+
+        <!--
+            Row 3: BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
             the Auto-watch checkbox, and the "last checked"/status text
             all moved down here from the old top toolbar, so the verdict
             list above gets the space and the pharmacist's eye starts on
@@ -338,21 +358,30 @@
             RefreshDrugFieldAsync) sits above the button row, both inside
             one bottom-anchored block.
         -->
-        <Border Grid.Row="2" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
+        <Border Grid.Row="3" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
             <StackPanel>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
                            TextWrapping="Wrap" Margin="0,0,0,4" />
                 <StackPanel Orientation="Horizontal">
                     <Button Content="Refresh" Margin="0,0,6,0" Click="OnRefreshClick" />
                     <Button Content="Dump UIA Tree..." Margin="0,0,6,0" Click="OnDumpTreeClick" />
+                    <!--
+                        W-T11 item 3: DEFAULT ON — checked by construction
+                        (IsChecked="True") so watching begins automatically
+                        at launch instead of requiring a manual click every
+                        session. See MainWindow.xaml.cs constructor for how
+                        the timer is actually started to match this initial
+                        state (Checked doesn't reliably fire off of the XAML
+                        default before the timer field exists).
+                    -->
                     <CheckBox x:Name="AutoRefreshCheckBox" Content="Auto-watch" Foreground="#FFCCCCCC" VerticalAlignment="Center"
-                              Checked="OnAutoRefreshToggled" Unchecked="OnAutoRefreshToggled" />
+                              IsChecked="True" Checked="OnAutoRefreshToggled" Unchecked="OnAutoRefreshToggled" />
                 </StackPanel>
             </StackPanel>
         </Border>
 
-        <!-- Row 3: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="3" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
+        <!-- Row 4: engine path settings, always visible in v0 (small footprint, no PHI) -->
+        <Expander Grid.Row="4" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">

@@ -66,6 +66,22 @@ public sealed class PrescriptionRecord
     // DaysSupply removed: per Will's live-test feedback, days supply is
     // no longer read, compared, or displayed anywhere — see FieldOrder
     // below and types.ts's matching removal.
+
+    /// <summary>
+    /// SOURCE-side only. Mirrors types.ts PrescriptionRecord.substitutionsNotAllowed:
+    /// true when the e-script's MedicationPrescribed &gt; Substitutions
+    /// indicator is NCPDP code 1 ("Substitution Not Allowed by
+    /// Prescriber"); false for any other observed code; null when not
+    /// provided. See Parsing/EscriptTreeParser.cs ParseSubstitutionsNotAllowed.
+    /// </summary>
+    public bool? SubstitutionsNotAllowed { get; set; }
+
+    /// <summary>
+    /// ENTERED-side only. Mirrors types.ts PrescriptionRecord.daw: whether
+    /// PioneerRx's DAW checkbox (AutomationId uxDawCode) is checked. See
+    /// Uia/FieldReader.cs.
+    /// </summary>
+    public bool? Daw { get; set; }
 }
 
 /// <summary>Request body sent to verify-cli on stdin: { source, entered, skipDrugLookup }.</summary>
@@ -165,7 +181,8 @@ public static class FieldOrder
         "drug",
         "sig",
         "quantity",
-        "refills"
+        "refills",
+        "daw"
     };
 
     /// <summary>
@@ -189,12 +206,13 @@ public static class FieldOrder
         ["drug"] = "Drug",
         ["sig"] = "Sig / Directions",
         ["quantity"] = "Quantity",
-        ["refills"] = "Refills"
+        ["refills"] = "Refills",
+        ["daw"] = "DAW"
     };
 }
 
 /// <summary>
-/// Groups the 12 FieldOrder.Fields into the 4 categories the overlay's
+/// Groups the 13 FieldOrder.Fields into the 4 categories the overlay's
 /// compact table displays (Patient / Prescriber / Rx / Sig), per Will's
 /// spec: "Patient (name, DOB), Prescriber (name, NPI), Rx (drug,
 /// quantity, days supply, refills, written date — whatever applies)" —
@@ -246,7 +264,8 @@ public static class FieldCategories
         ["drug"] = Rx,
         ["sig"] = Sig,
         ["quantity"] = Rx,
-        ["refills"] = Rx
+        ["refills"] = Rx,
+        ["daw"] = Rx
     };
 
     /// <summary>

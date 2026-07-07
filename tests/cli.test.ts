@@ -51,7 +51,7 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
 
     expect(code).toBe(0);
     expect(result.summary.red).toBe(0);
-    expect(result.verdicts).toHaveLength(12);
+    expect(result.verdicts).toHaveLength(13);
     expect(result.verdicts[0].field).toBe('patientName');
     expect(result.verdicts[0].status).toBe('green');
   }, 15000);

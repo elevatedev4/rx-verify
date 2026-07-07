@@ -216,6 +216,24 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// <summary>The 3 categories, always in FieldCategories.Order — MainWindow.xaml binds directly to this.</summary>
     public ObservableCollection<CategoryViewModel> Categories { get; } = new();
 
+    /// <summary>
+    /// E-script free-text notes (item 6, NCPDP Note element — see
+    /// Parsing/EscriptTreeParser.ParseNotes), rendered in red at the
+    /// bottom of the overlay only when non-empty (see MainWindow.xaml's
+    /// HasNotes-gated notes Border). Populated from FieldReader.SourceNotes
+    /// on every RefreshAsync; cleared alongside the categories on every
+    /// early-return branch.
+    /// </summary>
+    public ObservableCollection<string> Notes { get; } = new();
+
+    /// <summary>True once Notes has at least one entry — drives the notes Border's visibility in MainWindow.xaml (collapsed/no-op when there's nothing to show).</summary>
+    private bool _hasNotes;
+    public bool HasNotes
+    {
+        get => _hasNotes;
+        private set { if (_hasNotes == value) return; _hasNotes = value; OnPropertyChanged(); }
+    }
+
     private string _statusMessage = "Not attached to PioneerRx yet.";
     public string StatusMessage
     {
@@ -303,6 +321,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             reader = new FieldReader(window);
             entered = reader.ReadEntered();
             source = reader.ReadSource();
+            UpdateNotes(reader.SourceNotes);
         }
         catch (Exception ex)
         {
@@ -416,7 +435,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         foreach (var field in FieldOrder.Fields)
         {
             var verdict = result.Verdicts.FirstOrDefault(v => v.Field == field);
-            if (verdict is null) continue; // defensive: engine contract guarantees all 12 fields, but never crash the UI on a contract drift
+            if (verdict is null) continue; // defensive: engine contract guarantees all 13 fields, but never crash the UI on a contract drift
 
             var categoryName = FieldCategories.CategoryByField.TryGetValue(field, out var mapped)
                 ? mapped
@@ -529,6 +548,16 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             category.Status = VerdictStatus.Green; // Status is meaningless with no data; HasData=false is what actually drives the gray "no data" display (see MainWindow.xaml).
             category.HasData = false;
         }
+
+        UpdateNotes(Array.Empty<string>());
+    }
+
+    /// <summary>Replaces Notes' contents and recomputes HasNotes — shared by RefreshAsync's ReadSource call and every ClearCategories early-return.</summary>
+    private void UpdateNotes(IReadOnlyList<string> notes)
+    {
+        Notes.Clear();
+        foreach (var note in notes) Notes.Add(note);
+        HasNotes = Notes.Count > 0;
     }
 
     /// <summary>

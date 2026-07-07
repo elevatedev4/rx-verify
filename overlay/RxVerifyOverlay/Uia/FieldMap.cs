@@ -89,6 +89,16 @@ public static class FieldMap
     public const string EnteredRefillsId = "uxRefills";
 
     /// <summary>
+    /// CheckBox, name "DAW" — confirmed against escript-249.txt's paired
+    /// entered-panel dump (uia-dump.txt shows the same control): "CheckBox
+    /// name='DAW' id='uxDawCode'". Read via IsToggled (ToggleState), not
+    /// ValuePattern/Name (see UiaTreeWalker.ReadCheckBoxByAutomationId) —
+    /// a CheckBox's .Name is its static label ("DAW"), not its checked
+    /// state.
+    /// </summary>
+    public const string EnteredDawId = "uxDawCode";
+
+    /// <summary>
     /// Edit. UNLIKE every other Edit field above, .Name on THIS control
     /// is confirmed (in both real dumps) to already BE the actual typed
     /// sig text — not a placeholder — e.g. "APPLY A SMALL AMOUNT TO THE
@@ -148,6 +158,36 @@ public static class FieldMap
     public const string NodeQuantity = "Quantity";
     public const string NodeWrittenDate = "WrittenDate";
     public const string NodeSig = "Sig";
+
+    /// <summary>
+    /// Direct leaf on MedicationPrescribed, format "Substitutions: &lt;code&gt;
+    /// (&lt;description&gt;)" — confirmed against escript-249.txt, e.g.
+    /// "Substitutions: 0 (No Product Selection Indicated)". No embedded
+    /// ": " inside the parenthetical description, so the general
+    /// first-": "-split (Leaf()) parses this correctly without a
+    /// Refills-style special case. NCPDP SCRIPT code 1 ("Substitution Not
+    /// Allowed by Prescriber") is the only code that means DAW is
+    /// required; every other code observed/documented permits
+    /// substitution. See EscriptTreeParser.ParseSubstitutionsNotAllowed.
+    /// </summary>
+    public const string KeySubstitutions = "Substitutions";
+
+    /// <summary>
+    /// Container name for prescriber/message free-text notes (NCPDP
+    /// SCRIPT "Note" element). UNCONFIRMED against a real dump — neither
+    /// escript-249.txt nor any other captured dump contains a NewRx
+    /// message WITH a Note present (the sample script has none), so this
+    /// name/shape is inferred from the NCPDP SCRIPT schema convention,
+    /// not verified against Will's live UIA tree. Flag: a fresh "Dump UIA
+    /// Tree" capture on an e-script that actually carries a note is
+    /// needed to confirm the exact node name/nesting before trusting this
+    /// in production — see EscriptTreeParser.ParseNotes for the
+    /// defensive, best-effort search this drives.
+    /// </summary>
+    public const string NodeNote = "Note";
+
+    /// <summary>Leaf key for note free text, if Note is a container rather than a direct "Note: &lt;text&gt;" leaf. Same UNCONFIRMED caveat as NodeNote.</summary>
+    public const string KeyNoteText = "NoteText";
 
     /// <summary>
     /// Container under Prescriber (and Patient/Pharmacy) holding

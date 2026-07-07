@@ -118,12 +118,17 @@
       "field": "refills",
       "status": "green",
       "reasonCode": "exact_match"
+    },
+    {
+      "field": "daw",
+      "status": "yellow",
+      "reasonCode": "not_provided"
     }
   ],
   "expectedSummary": {
     "green": 12,
-    "yellow": 0,
+    "yellow": 1,
     "red": 0,
-    "total": 12
+    "total": 13
   }
 }

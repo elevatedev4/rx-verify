@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using RxVerifyOverlay.Models;
@@ -49,8 +50,113 @@ public static class EscriptTreeParser
             QuantityUnit = ParseQuantityUnit(newRx),
             // DaysSupply removed entirely per Will's live-test feedback —
             // no longer read, compared, or displayed.
-            Refills = ParseRefills(newRx)
+            Refills = ParseRefills(newRx),
+            SubstitutionsNotAllowed = ParseSubstitutionsNotAllowed(newRx)
         };
+    }
+
+    /// <summary>
+    /// Best-effort search for e-script free-text notes (NCPDP SCRIPT
+    /// "Note" element), at both the message level (sibling of Body,
+    /// pharmacy-directed) and the NewRx/MedicationPrescribed level
+    /// (medication-directed) — per Will's item 6 feedback ("message-level
+    /// or medication-level"). UNCONFIRMED against a real dump: no
+    /// captured e-script (escript-249.txt) has a Note present at all, so
+    /// this searches every plausible location defensively rather than
+    /// assuming one, and returns an empty list (never throws) if none is
+    /// found — which is also the expected/common case. FLAG: a fresh
+    /// "Dump UIA Tree" capture on an e-script that actually carries a
+    /// note is needed to confirm the exact node shape before trusting
+    /// this in production (see FieldMap.NodeNote/KeyNoteText doc).
+    /// Called separately from Parse() (not part of PrescriptionRecord)
+    /// since notes are a source-only, display-only concern, not part of
+    /// the engine's field-by-field comparison contract — see
+    /// Uia/FieldReader.cs SourceNotes.
+    /// </summary>
+    public static IReadOnlyList<string> ParseNotes(EscriptNode message)
+    {
+        var notes = new List<string>();
+
+        // Message-level: a Note that's a direct sibling of Body.
+        CollectNotesFrom(message, notes);
+
+        var body = Child(message, FieldMap.NodeBody);
+        var newRx = body is null ? null : Child(body, FieldMap.NodeNewRx);
+        if (newRx is null) return notes;
+
+        // NewRx-level (medication-directed notes not nested under
+        // MedicationPrescribed in some NCPDP variants).
+        CollectNotesFrom(newRx, notes);
+
+        var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
+        if (med is not null)
+        {
+            CollectNotesFrom(med, notes);
+        }
+
+        return notes;
+    }
+
+    /// <summary>
+    /// Looks for a direct child of <paramref name="container"/> named
+    /// "Note" (FieldMap.NodeNote) and appends its text to
+    /// <paramref name="notes"/> if found and non-blank. Handles both
+    /// shapes defensively: a container with a nested "NoteText: ..." leaf
+    /// (or any leaf child at all, joined), or a bare "Note: &lt;text&gt;"
+    /// leaf directly (SplitKeyValue would then parse it as Key="Note",
+    /// Value=&lt;text&gt; — Child() only matches by exact whole-Name
+    /// equality though, so a bare leaf is found via the same
+    /// prefix-scan Leaf() uses instead).
+    /// </summary>
+    private static void CollectNotesFrom(EscriptNode container, List<string> notes)
+    {
+        // Case 1: "Note" as a CONTAINER (no ": " in its own Name).
+        var noteContainer = Child(container, FieldMap.NodeNote);
+        if (noteContainer is not null)
+        {
+            var text = Leaf(noteContainer, FieldMap.KeyNoteText);
+            if (text is null && noteContainer.Children.Count > 0)
+            {
+                // Unknown leaf key — fall back to joining every leaf
+                // value found directly under it rather than dropping the
+                // note entirely.
+                var parts = new List<string>();
+                foreach (var child in noteContainer.Children)
+                {
+                    var (_, v) = SplitKeyValue(child.Name);
+                    var trimmed = NullIfEmpty(v);
+                    if (trimmed is not null) parts.Add(trimmed);
+                }
+                text = parts.Count > 0 ? string.Join(' ', parts) : null;
+            }
+            if (text is not null) notes.Add(text);
+        }
+
+        // Case 2: "Note: <text>" as a bare LEAF directly on container.
+        var bareLeaf = Leaf(container, FieldMap.NodeNote);
+        if (bareLeaf is not null) notes.Add(bareLeaf);
+    }
+
+    /// <summary>
+    /// Parses MedicationPrescribed &gt; Substitutions (FieldMap.KeySubstitutions),
+    /// e.g. "0 (No Product Selection Indicated)" or "1 (Substitution Not
+    /// Allowed by Prescriber)" — confirmed leaf shape against
+    /// escript-249.txt (code 0 case only; code 1's exact description text
+    /// is inferred from the NCPDP SCRIPT code table, not confirmed
+    /// against a real code-1 dump). Only code "1" means substitutions are
+    /// NOT allowed (DAW required); every other numeric code (0 and the
+    /// patient-requested-brand codes 2-9) means substitution IS permitted.
+    /// Returns null (not comparable) if the leaf is missing or its
+    /// leading code isn't parseable as an integer.
+    /// </summary>
+    private static bool? ParseSubstitutionsNotAllowed(EscriptNode newRx)
+    {
+        var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
+        var raw = med is null ? null : Leaf(med, FieldMap.KeySubstitutions);
+        if (raw is null) return null;
+
+        var codeText = raw.Split(' ', 2)[0].Trim();
+        return int.TryParse(codeText, out var code) ? code == 1 : null;
     }
 
     // ------------------------------------------------------------------

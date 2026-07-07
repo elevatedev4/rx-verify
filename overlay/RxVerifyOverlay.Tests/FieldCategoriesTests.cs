@@ -6,7 +6,7 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for the FieldCategories mapping (Models/EngineModels.cs)
-/// that groups the 12 FieldOrder.Fields into the overlay's 4 compact-
+/// that groups the 13 FieldOrder.Fields into the overlay's 4 compact-
 /// table categories (Patient/Prescriber/Rx/Sig — sig split out of Rx and
 /// into its own last-listed category per W-T9 item 6). Pure data checks
 /// — no UIA, no engine call, no synthetic PHI needed.

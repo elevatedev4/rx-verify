@@ -234,6 +234,86 @@ public class EscriptTreeParserTests
     }
 
     [Fact]
+    public void Parse_FullTree_SubstitutionsNotAllowedIsFalseForCodeZero()
+    {
+        // BuildFullSyntheticMessage's MedicationPrescribed carries
+        // "Substitutions: 0 (No Product Selection Indicated)" — code 0
+        // means substitution IS permitted (SubstitutionsNotAllowed should
+        // be false, not null/true).
+        var record = EscriptTreeParser.Parse(BuildFullSyntheticMessage());
+        Assert.False(record.SubstitutionsNotAllowed);
+    }
+
+    [Fact]
+    public void Parse_SubstitutionsCodeOne_MeansNotAllowedIsTrue()
+    {
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("NewRx",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        EscriptNode.Leaf("Substitutions", "1 (Substitution Not Allowed by Prescriber)")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.True(record.SubstitutionsNotAllowed);
+    }
+
+    [Fact]
+    public void Parse_MissingSubstitutionsLeaf_YieldsNullNotFalse()
+    {
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("NewRx",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Null(record.SubstitutionsNotAllowed);
+    }
+
+    [Fact]
+    public void ParseNotes_NoNotePresent_ReturnsEmptyList()
+    {
+        // The common case, confirmed against escript-249.txt (no real
+        // captured e-script has a Note at all).
+        var notes = EscriptTreeParser.ParseNotes(BuildFullSyntheticMessage());
+        Assert.Empty(notes);
+    }
+
+    [Fact]
+    public void ParseNotes_MessageLevelBareLeaf_IsCollected()
+    {
+        var message = EscriptNode.Container("Message",
+            new EscriptNode("Note: Patient prefers afternoon pickup"),
+            EscriptNode.Container("Body",
+                EscriptNode.Container("NewRx",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet")))));
+
+        var notes = EscriptTreeParser.ParseNotes(message);
+
+        Assert.Contains("Patient prefers afternoon pickup", notes);
+    }
+
+    [Fact]
+    public void ParseNotes_MedicationLevelContainerWithNoteText_IsCollected()
+    {
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("NewRx",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        EscriptNode.Container("Note",
+                            EscriptNode.Leaf("NoteText", "Counsel patient on application technique"))))));
+
+        var notes = EscriptTreeParser.ParseNotes(message);
+
+        Assert.Contains("Counsel patient on application technique", notes);
+    }
+
+    [Fact]
     public void Parse_PrescriberNpiNestedUnderIdentification_NotADirectLeaf()
     {
         var message = EscriptNode.Container("Message",
