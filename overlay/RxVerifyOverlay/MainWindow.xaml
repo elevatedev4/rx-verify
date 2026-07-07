@@ -3,11 +3,10 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:models="clr-namespace:RxVerifyOverlay.Models"
         Title="Rx Verify"
-        Width="420" Height="620"
+        Width="420" Height="720"
         MinWidth="340" MinHeight="300"
         Topmost="True"
         WindowStartupLocation="Manual"
-        Top="20"
         ResizeMode="CanResizeWithGrip"
         Background="#FF1E1E1E">
     <!--
@@ -26,6 +25,13 @@
         working-area width so the window launches near the RIGHT edge
         instead, since Left="20" here would just be overwritten before
         the window is shown anyway.
+
+        W-T13 item 2: Top is likewise deliberately NOT set here (was a
+        fixed Top="20", i.e. hugging the very top of the screen) — it's
+        now computed in MainWindow.xaml.cs's constructor as ~200px down
+        from the work area's top, clamped on-screen the same way Left
+        is, so the window no longer launches crammed against the top
+        edge.
     -->
     <Window.Resources>
         <SolidColorBrush x:Key="GreenBrush" Color="#FF2E7D32" />
@@ -155,23 +161,29 @@
                                     <!--
                                         Category header (W-T11 item 1: REWORKED back to a
                                         plain, quiet heading — this REVERSES the earlier
-                                        W-T9 item 4 styling above). The rolled-up status
-                                        glyph and "— <StatusText>" label (e.g. "Match" /
-                                        "Partial match" / "Verify") are gone entirely, along
-                                        with the header's own background color — per Will's
-                                        feedback, the header was drawing the eye when the
-                                        field ROWS below (which already carry the same
-                                        green/yellow/red whole-row coloring, see the Rows
-                                        ItemsControl below) are the thing that should be
-                                        looked at. Just the bare category name, small and
-                                        muted, blending into the window background rather
-                                        than announcing itself as its own colored block.
+                                        W-T9 item 4 styling above; W-T13 item 1: re-tuned
+                                        from muted-gray-on-gray to bold-white-on-window-bg).
+                                        The rolled-up status glyph and "— <StatusText>"
+                                        label (e.g. "Match" / "Partial match" / "Verify")
+                                        are gone entirely — per Will's feedback, the header
+                                        was drawing the eye when the field ROWS below (which
+                                        already carry the same green/yellow/red whole-row
+                                        coloring, see the Rows ItemsControl below) are the
+                                        thing that should be looked at. The header row's
+                                        Background is set to the window's own #FF1E1E1E
+                                        (not the card's BoxGrayBrush behind it) so it forms
+                                        no distinct band/tint of its own — it visually
+                                        punches through the card into the window background
+                                        — while the text is bold WHITE so the category name
+                                        still reads clearly at a glance.
                                         CategoryViewModel.Glyph/StatusText/HeaderStatusText
                                         still exist in code (still covered by
                                         Tests/CategoryStatusTextTests.cs) — they're simply no
                                         longer bound anywhere in this template.
                                     -->
-                                    <TextBlock Text="{Binding Name}" Foreground="#FF888888" FontWeight="Bold" FontSize="11" Margin="5,3,0,2" />
+                                    <Border Background="#FF1E1E1E">
+                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="11" Margin="5,3,0,2" />
+                                    </Border>
 
                                     <!--
                                         Field rows: status icon | Field | Source | Entered, with

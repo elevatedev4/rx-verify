@@ -39,6 +39,18 @@ public partial class MainWindow : Window
         var left = workArea.Right - Width - rightMargin;
         Left = Math.Max(workArea.Left, left);
 
+        // W-T13 item 2: launch ~200px down from the top of the working
+        // area instead of hugging the very top edge (old fixed Top="20"
+        // in XAML). Clamped the same way Left is above so the window can
+        // never end up partially or fully off the bottom of the screen
+        // on a short/small display — this is only the INITIAL position,
+        // same free-move behavior afterward (see the XAML header
+        // comment).
+        const double topOffset = 200;
+        var top = workArea.Top + topOffset;
+        var maxTop = Math.Max(workArea.Top, workArea.Bottom - Height);
+        Top = Math.Min(Math.Max(workArea.Top, top), maxTop);
+
         _settings = OverlaySettings.Load();
         _engineClient = new EngineClient(_settings.EngineCliPath, _settings.NodeExecutable);
         _viewModel = new OverlayViewModel(_engineClient);
