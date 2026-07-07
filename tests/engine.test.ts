@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { verify } from '../src/engine/index.js';
+import { verify, PENDING_DRUG_LOOKUP_REASON_CODE } from '../src/engine/index.js';
 import { FixtureProvider } from '../src/drug/index.js';
 import { FIELD_ORDER } from '../src/types.js';
 
@@ -26,6 +26,48 @@ describe('verify engine', () => {
     const { green, yellow, red, total } = result.summary;
     expect(green + yellow + red).toBe(total);
     expect(total).toBe(12);
+  });
+
+  describe('skipDrugLookup (responsiveness: overlay renders every other field immediately, drug row updates in place)', () => {
+    it('never calls the provider and marks the drug field pending, while every other field gets its real verdict', () => {
+      let providerCalled = false;
+      const spyProvider = {
+        getConcept: () => {
+          providerCalled = true;
+          return null;
+        }
+      };
+
+      const result = verify(
+        { patientName: 'John Smith', drug: { name: 'Lisinopril 10mg tablet', ndc: '00071015523' } },
+        { patientName: 'John Smith', drug: { name: 'Lisinopril 10mg tablet', ndc: null } as any },
+        spyProvider,
+        { skipDrugLookup: true }
+      );
+
+      expect(providerCalled).toBe(false);
+
+      const nameVerdict = result.verdicts.find((v) => v.field === 'patientName')!;
+      expect(nameVerdict.status).toBe('green');
+
+      const drugVerdict = result.verdicts.find((v) => v.field === 'drug')!;
+      expect(drugVerdict.status).toBe('yellow');
+      expect(drugVerdict.reasonCode).toBe(PENDING_DRUG_LOOKUP_REASON_CODE);
+      // The drug NAME is still shown immediately — only the comparison verdict is deferred.
+      expect(drugVerdict.sourceValue).toBe('Lisinopril 10mg tablet');
+      expect(drugVerdict.enteredValue).toBe('Lisinopril 10mg tablet');
+    });
+
+    it('omitting the option (or passing false) behaves exactly like before — a real drug verdict', () => {
+      const result = verify(
+        { drug: { name: 'Lisinopril 10mg tablet', ndc: '00071015523' } },
+        { drug: { name: 'Lisinopril 10mg tablet', ndc: null } as any },
+        provider
+      );
+      const drugVerdict = result.verdicts.find((v) => v.field === 'drug')!;
+      expect(drugVerdict.reasonCode).not.toBe(PENDING_DRUG_LOOKUP_REASON_CODE);
+      expect(drugVerdict.status).toBe('green');
+    });
   });
 
   it('every verdict includes a reason code and explanation', () => {
@@ -86,6 +128,38 @@ describe('verify engine', () => {
       expect(drug.enteredValue).toBe('Clindamycin Phosp 1% Lotion');
       expect(drug.sourceValue).not.toMatch(/ndc/i);
       expect(drug.enteredValue).not.toMatch(/^\{/);
+    });
+
+    // The overlay never touches verify()'s in-memory return value — it
+    // only ever sees whatever comes back through JSON.stringify(result)
+    // on stdout (see src/cli.ts) and is then JSON-deserialized on the C#
+    // side (see overlay/RxVerifyOverlay/Engine/EngineClient.cs,
+    // Models/EngineModels.cs FieldVerdict.SourceValue/EnteredValue,
+    // both typed `string?`). Asserting only against the in-memory object
+    // wouldn't catch a bug that only appears after that JSON hop, so
+    // this test goes through JSON.stringify/JSON.parse exactly like the
+    // real subprocess boundary does.
+    it('address and drug survive the JSON.stringify/parse subprocess boundary as plain strings, never objects', () => {
+      const result = verify(
+        {
+          patientAddress: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' },
+          drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: '12345-6789-01' }
+        },
+        {
+          patientAddress: { street: '123 Main St Testville, KS 54321' } as any,
+          drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: null } as any
+        },
+        provider
+      );
+
+      const roundTripped = JSON.parse(JSON.stringify(result)) as typeof result;
+      const patientAddress = roundTripped.verdicts.find((v) => v.field === 'patientAddress')!;
+      const drug = roundTripped.verdicts.find((v) => v.field === 'drug')!;
+
+      for (const value of [patientAddress.sourceValue, patientAddress.enteredValue, drug.sourceValue, drug.enteredValue]) {
+        expect(typeof value).toBe('string');
+        expect(value).not.toBeInstanceOf(Object);
+      }
     });
   });
 });

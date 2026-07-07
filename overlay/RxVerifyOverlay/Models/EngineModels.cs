@@ -68,11 +68,29 @@ public sealed class PrescriptionRecord
     // below and types.ts's matching removal.
 }
 
-/// <summary>Request body sent to verify-cli on stdin: { source, entered }.</summary>
+/// <summary>Request body sent to verify-cli on stdin: { source, entered, skipDrugLookup }.</summary>
 public sealed class VerifyCliRequest
 {
     public PrescriptionRecord Source { get; set; } = new();
     public PrescriptionRecord Entered { get; set; } = new();
+
+    /// <summary>
+    /// See rx-verify src/engine/index.ts VerifyOptions.skipDrugLookup and
+    /// src/cli.ts CliInput.skipDrugLookup. When true, verify-cli never
+    /// constructs LocalNdcProvider (the expensive dataset load/gunzip)
+    /// and the drug field comes back with ReasonCode ==
+    /// PendingDrugLookupReasonCode instead of a real verdict. Used by
+    /// EngineClient.VerifyFastAsync / OverlayViewModel.RefreshAsync to
+    /// render every other field immediately without waiting on the drug
+    /// lookup — see ViewModels/OverlayViewModel.cs RefreshAsync.
+    /// </summary>
+    public bool SkipDrugLookup { get; set; }
+}
+
+/// <summary>Mirrors rx-verify src/engine/index.ts PENDING_DRUG_LOOKUP_REASON_CODE exactly — the drug FieldVerdict's ReasonCode when SkipDrugLookup was requested.</summary>
+public static class ReasonCodes
+{
+    public const string PendingDrugLookup = "pending_lookup";
 }
 
 public enum VerdictStatus

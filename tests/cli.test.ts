@@ -56,6 +56,32 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
     expect(result.verdicts[0].status).toBe('green');
   }, 15000);
 
+  it('skipDrugLookup=true returns all non-drug fields immediately and marks drug as pending_lookup, never touching LocalNdcProvider', async () => {
+    // Regression for Will's "big delay after clicking Refresh" report:
+    // the overlay now sends skipDrugLookup=true on its first, immediate
+    // call per refresh. This must return every other field's real
+    // verdict (not deferred) and a drug row the overlay can render as
+    // "still computing" rather than blank or wrong.
+    const input = JSON.stringify({
+      source: { patientName: 'John Smith', drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: '00168020360' } },
+      entered: { patientName: 'John Smith', drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: null } },
+      skipDrugLookup: true
+    });
+
+    const { stdout, code } = await runCli(input);
+    const result = JSON.parse(stdout);
+
+    expect(code).toBe(0);
+    const nameVerdict = result.verdicts.find((v: any) => v.field === 'patientName');
+    expect(nameVerdict.status).toBe('green');
+
+    const drugVerdict = result.verdicts.find((v: any) => v.field === 'drug');
+    expect(drugVerdict.reasonCode).toBe('pending_lookup');
+    // The name is still shown immediately even though the verdict is deferred.
+    expect(drugVerdict.sourceValue).toBe('Clindamycin Phosp 1% Lotion');
+    expect(drugVerdict.enteredValue).toBe('Clindamycin Phosp 1% Lotion');
+  }, 15000);
+
   it('reports an error object + non-zero exit on invalid JSON', async () => {
     const { stdout, code } = await runCli('not json');
     const result = JSON.parse(stdout);

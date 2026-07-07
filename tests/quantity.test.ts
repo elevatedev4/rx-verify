@@ -35,6 +35,32 @@ describe('compareQuantity', () => {
     expect(r.status).toBe('yellow');
     expect(r.reasonCode).toBe('not_provided');
   });
+
+  // Repro for Will's live-test bug report: an Rx with quantity "90" on
+  // BOTH sides flagged a RED mismatch. Root cause: the e-script's
+  // QuantityUnitOfMeasure is frequently the NCPDP code "C38046
+  // (Unspecified)" (see overlay EscriptTreeParser.ParseQuantityUnit,
+  // which extracts just the parenthetical -> "Unspecified"), while the
+  // entered side's unit comes from PioneerRx's own unit ComboBox (e.g.
+  // "ML", "EA"). "Unspecified" was being unit-normalized like any other
+  // real unit and then compared literally against "ml"/"ea" — since
+  // "unspecified" !== "ml", unitsCompatible was false and the whole
+  // comparison short-circuited to RED unit_mismatch even though the
+  // numeric quantities were IDENTICAL. "Unspecified" isn't a real,
+  // conflicting unit — it's the source explicitly saying it didn't
+  // specify one, so it must be treated as "not provided" for unit
+  // comparison purposes (no unit-compatibility check at all), not as a
+  // hard mismatch.
+  it('is GREEN on 90 vs 90 when the source unit is the NCPDP "Unspecified" placeholder', () => {
+    const r = compareQuantity(90, 'Unspecified', 90, 'ML', null);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('is GREEN on 90 vs 90 when the source unit is null/empty and only the entered side has a real unit', () => {
+    const r = compareQuantity(90, null, 90, 'EA', null);
+    expect(r.status).toBe('green');
+  });
 });
 
 describe('compareRefills', () => {

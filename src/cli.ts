@@ -32,12 +32,24 @@
  */
 
 import { verify } from './engine/index.js';
-import { LocalNdcProvider } from './drug/index.js';
+import { LocalNdcProvider, type RxNormProvider } from './drug/index.js';
 import type { ScriptData, EnteredData } from './types.js';
+
+/** Never consulted when skipDrugLookup is true (verify() skips compareDrugs entirely in that mode) — exists only so a provider value is always available to pass, without paying LocalNdcProvider's dataset-load cost. */
+const NULL_PROVIDER: RxNormProvider = { getConcept: () => null };
 
 interface CliInput {
   source: ScriptData;
   entered: EnteredData;
+  /**
+   * See VerifyOptions.skipDrugLookup (src/engine/index.ts). When true,
+   * this process never constructs LocalNdcProvider at all — that's the
+   * expensive part (loads + gunzips the ~130k-concept openFDA dataset),
+   * not just the compareDrugs call — so a fast/non-drug refresh pays
+   * none of that cost. The overlay sets this on its first, immediate
+   * call per refresh; see overlay/RxVerifyOverlay/Engine/EngineClient.cs.
+   */
+  skipDrugLookup?: boolean;
 }
 
 function readStdin(): Promise<string> {
@@ -72,9 +84,12 @@ async function main(): Promise<void> {
     throw new Error('Input JSON must be an object with "source" and "entered" keys.');
   }
 
-  const { source, entered } = parsed as CliInput;
-  const provider = new LocalNdcProvider();
-  const result = verify(source, entered, provider);
+  const { source, entered, skipDrugLookup } = parsed as CliInput;
+  // Only pay the LocalNdcProvider construction cost (dataset load +
+  // gunzip) when a real drug lookup is actually going to happen — see
+  // CliInput.skipDrugLookup doc above.
+  const provider = skipDrugLookup ? NULL_PROVIDER : new LocalNdcProvider();
+  const result = verify(source, entered, provider, { skipDrugLookup });
 
   process.stdout.write(JSON.stringify(result));
 }

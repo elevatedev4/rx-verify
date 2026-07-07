@@ -82,7 +82,44 @@ function stringifyDrug(v: DrugDescriptor | null | undefined): string | null {
   return typeof v.name === 'string' && v.name ? v.name : null;
 }
 
-export function verify(source: ScriptData, entered: EnteredData, provider: RxNormProvider): VerifyResult {
+export interface VerifyOptions {
+  /**
+   * Skip the drug-identity lookup (compareDrugs, which consults
+   * RxNormProvider — the LocalNdcProvider backing it loads/decompresses
+   * a ~130k-concept dataset, see src/drug/index.ts). Every OTHER field
+   * (name/DOB/address/prescriber/sig/quantity/refills) is pure string/
+   * date/number comparison and is effectively instant — there is no
+   * reason those should wait on the drug lookup.
+   *
+   * Added per Will's live-test feedback: clicking Refresh in the
+   * overlay had a noticeable lag before ANY field updated, because the
+   * old single verify() call blocked on the drug lookup before
+   * returning anything at all. The overlay now calls verify() twice per
+   * refresh (see overlay/RxVerifyOverlay/ViewModels/OverlayViewModel.cs
+   * RefreshAsync + Engine/EngineClient.cs): once with
+   * skipDrugLookup=true for an immediate render of every field except
+   * drug, and once (in the background, not blocking the UI) with
+   * skipDrugLookup=false (or omitted) for the real drug verdict, which
+   * then updates just that one row when it resolves.
+   *
+   * When true, the drug field's sourceValue/enteredValue are still
+   * populated (stringifyDrug is cheap — no provider lookup), only the
+   * comparison verdict itself is deferred — so the overlay can show the
+   * actual drug names immediately with a "computing" indicator instead
+   * of a blank field.
+   */
+  skipDrugLookup?: boolean;
+}
+
+/** Reason code the drug field carries while skipDrugLookup defers the real comparison — see VerifyOptions.skipDrugLookup. Callers (the overlay) check for this exact code to know a field is still computing, not actually unverifiable. */
+export const PENDING_DRUG_LOOKUP_REASON_CODE = 'pending_lookup';
+
+export function verify(
+  source: ScriptData,
+  entered: EnteredData,
+  provider: RxNormProvider,
+  options: VerifyOptions = {}
+): VerifyResult {
   const enteredSigParsed = entered.sig ? parseSig(entered.sig) : null;
 
   const nameResult = compareNames(source.patientName, entered.patientName);
@@ -95,7 +132,13 @@ export function verify(source: ScriptData, entered: EnteredData, provider: RxNor
   const prescriberPhoneResult = comparePrescriberPhone(source.prescriber?.phone, entered.prescriber?.phone);
   const prescriberAddressResult = comparePrescriberAddress(source.prescriber?.address, entered.prescriber?.address);
   const dateWrittenResult = compareDates(source.dateWritten, entered.dateWritten);
-  const drugResult = compareDrugs(source.drug, entered.drug, provider);
+  const drugResult = options.skipDrugLookup
+    ? {
+        status: 'yellow' as const,
+        reasonCode: PENDING_DRUG_LOOKUP_REASON_CODE,
+        explanation: 'Drug identity lookup is still running against the local NDC dataset — this field will update in place.'
+      }
+    : compareDrugs(source.drug, entered.drug, provider);
   const sigResult = compareSigs(source.sig, entered.sig);
   const quantityResult = compareQuantity(
     source.quantity,

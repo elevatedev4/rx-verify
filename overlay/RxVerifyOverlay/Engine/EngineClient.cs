@@ -62,7 +62,14 @@ public sealed class EngineClient
         NodeExecutable = nodeExecutable;
     }
 
-    public async Task<VerifyResult> VerifyAsync(PrescriptionRecord source, PrescriptionRecord entered, CancellationToken cancellationToken = default)
+    /// <param name="skipDrugLookup">
+    /// See VerifyCliRequest.SkipDrugLookup. Pass true for the fast,
+    /// immediate-render pass over every field except drug; pass false
+    /// (the default) for the real drug verdict — see
+    /// ViewModels/OverlayViewModel.cs RefreshAsync for how the two calls
+    /// are sequenced so the UI never blocks on the drug lookup.
+    /// </param>
+    public async Task<VerifyResult> VerifyAsync(PrescriptionRecord source, PrescriptionRecord entered, bool skipDrugLookup = false, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(CliScriptPath))
         {
@@ -73,7 +80,7 @@ public sealed class EngineClient
             };
         }
 
-        var request = new VerifyCliRequest { Source = source, Entered = entered };
+        var request = new VerifyCliRequest { Source = source, Entered = entered, SkipDrugLookup = skipDrugLookup };
         var requestJson = JsonSerializer.Serialize(request, JsonOptions);
 
         var psi = new ProcessStartInfo

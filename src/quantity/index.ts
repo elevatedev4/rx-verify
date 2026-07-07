@@ -47,9 +47,25 @@ const UNIT_ALIASES: Record<string, string> = {
   gtt: 'gtt', gtts: 'gtt', drop: 'gtt', drops: 'gtt'
 };
 
+/**
+ * "Unspecified" is the human-readable form of NCPDP code C38046, which
+ * the e-script's QuantityUnitOfMeasure field carries constantly (see
+ * overlay EscriptTreeParser.ParseQuantityUnit — it extracts just the
+ * parenthetical out of "C38046 (Unspecified)"). It means "the source
+ * didn't specify a unit", not "the source specified a unit that happens
+ * to be named Unspecified" — treating it as a real unit caused a false
+ * RED unit_mismatch against whatever real unit (e.g. "ML"/"EA") the
+ * technician picked in PioneerRx's own unit ComboBox, even when the
+ * numeric quantity was IDENTICAL on both sides (Will's live-test bug:
+ * "90" vs "90" flagged red). Fold it to null so it's treated exactly
+ * like no-unit-provided — no unit-compatibility check happens at all.
+ */
+const UNSPECIFIED_UNIT = 'unspecified';
+
 function normalizeUnit(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const folded = raw.toLowerCase().trim();
+  if (folded === UNSPECIFIED_UNIT) return null;
   return UNIT_ALIASES[folded] ?? folded;
 }
 

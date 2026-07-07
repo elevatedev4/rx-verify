@@ -49,6 +49,19 @@ public sealed class VerdictRowViewModel
     public bool IsTabularField => TabularFieldKeys.Contains(FieldKey);
 
     /// <summary>
+    /// True only for the drug row, only while its real verdict is still
+    /// being looked up in the background (see OverlayViewModel.RefreshAsync's
+    /// two-phase refresh + EngineClient.VerifyAsync's skipDrugLookup).
+    /// MainWindow.xaml swaps the row's leading glyph for a spinner
+    /// (indeterminate ProgressBar) while this is true, instead of
+    /// showing the placeholder "!" yellow glyph as if it were a real
+    /// "needs a look" verdict — the drug NAME itself (SourceValue/
+    /// EnteredValue) is already showing at this point, only the
+    /// comparison judgment is still pending.
+    /// </summary>
+    public bool IsPending => ReasonCode == Models.ReasonCodes.PendingDrugLookup;
+
+    /// <summary>
     /// Glyph for the status — WCAG requires color never be the ONLY
     /// signal, so this is the PRIMARY indicator and cell color is
     /// reinforcement. "!" (not "?") for yellow/uncertain: a question
@@ -184,6 +197,17 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     private int _redCount;
     public int RedCount { get => _redCount; private set { _redCount = value; OnPropertyChanged(); } }
 
+    /// <summary>
+    /// Monotonic counter, bumped at the START of every RefreshAsync call.
+    /// The background drug-lookup phase (RefreshDrugFieldAsync) captures
+    /// the value current at its own start and checks it again before
+    /// applying its result — if a NEWER refresh (e.g. the pharmacist hit
+    /// Refresh again, or PioneerRx moved to a different Rx) has started
+    /// in the meantime, the stale drug result is silently dropped instead
+    /// of being written into rows that no longer belong to it.
+    /// </summary>
+    private int _refreshGeneration;
+
     public OverlayViewModel(EngineClient engineClient)
     {
         _engineClient = engineClient;
@@ -205,9 +229,28 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// (window not found, UIA read error, engine error) becomes a
     /// StatusMessage rather than an exception, so the overlay never
     /// crashes mid-shift.
+    ///
+    /// TWO-PHASE (per Will's live-test feedback: a noticeable delay after
+    /// clicking Refresh before ANYTHING updated). Name/DOB/address/
+    /// prescriber/sig/quantity/refills comparisons are cheap string/date/
+    /// number logic; only the drug field's identity lookup is slow (it
+    /// consults the bundled ~130k-concept local NDC dataset — see
+    /// rx-verify src/drug/index.ts LocalNdcProvider). So:
+    ///   Phase 1 (awaited, blocks this method briefly): call the engine
+    ///     with skipDrugLookup=true. This never touches the NDC dataset
+    ///     at all (see EngineClient.VerifyAsync / src/cli.ts), so it
+    ///     returns fast. Every field except drug gets its real verdict;
+    ///     the drug row shows its name/value immediately with a PENDING
+    ///     indicator (spinner) instead of a verdict glyph.
+    ///   Phase 2 (fire-and-forget, does NOT block this method or the UI
+    ///     thread): the real drug lookup, via RefreshDrugFieldAsync. When
+    ///     it resolves, only the drug row (and its category's rollup +
+    ///     the overall summary) is updated in place.
     /// </summary>
     public async Task RefreshAsync()
     {
+        var generation = ++_refreshGeneration;
+
         using var window = PioneerRxWindow.TryAttach();
         if (window is null)
         {
@@ -244,36 +287,52 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
-        var result = await _engineClient.VerifyAsync(source, entered);
+        // Phase 1: fast pass, skips the drug lookup entirely.
+        var fastResult = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: true);
 
-        if (!string.IsNullOrEmpty(result.Error))
+        if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
+
+        if (!string.IsNullOrEmpty(fastResult.Error))
         {
-            StatusMessage = result.Error;
+            StatusMessage = fastResult.Error;
             return;
         }
 
+        PopulateRows(fastResult);
+        UpdateSummary(fastResult.Summary);
+        StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}. Drug lookup running…";
+
+        // Phase 2: NOT awaited — runs in the background so this method
+        // (and whatever caller triggered it, e.g. the Refresh button
+        // click handler) returns immediately. See RefreshDrugFieldAsync
+        // for the staleness guard against a newer refresh superseding
+        // this one before it resolves.
+        _ = RefreshDrugFieldAsync(source, entered, generation);
+    }
+
+    /// <summary>
+    /// Rebuilds every category's Rows from a VerifyResult, in
+    /// FieldOrder.Fields order within each category. Used by Phase 1 of
+    /// RefreshAsync to populate every row; Phase 2 (RefreshDrugFieldAsync)
+    /// only ever replaces the single "drug" row, but goes through the
+    /// same BuildRow helper below so the two phases can never drift apart
+    /// on how a FieldVerdict becomes a VerdictRowViewModel.
+    /// </summary>
+    private void PopulateRows(VerifyResult result)
+    {
         foreach (var category in Categories) category.Rows.Clear();
 
         foreach (var field in FieldOrder.Fields)
         {
             var verdict = result.Verdicts.FirstOrDefault(v => v.Field == field);
-            if (verdict is null) continue; // defensive: engine contract guarantees all 10 fields, but never crash the UI on a contract drift
+            if (verdict is null) continue; // defensive: engine contract guarantees all 12 fields, but never crash the UI on a contract drift
 
             var categoryName = FieldCategories.CategoryByField.TryGetValue(field, out var mapped)
                 ? mapped
                 : FieldCategories.Rx; // defensive fallback for a future field the engine adds that this map hasn't been updated for yet
             var category = Categories.First(c => c.Name == categoryName);
 
-            category.Rows.Add(new VerdictRowViewModel
-            {
-                FieldKey = field,
-                DisplayName = FieldOrder.DisplayNames[field],
-                Status = verdict.Status,
-                Explanation = verdict.Explanation,
-                ReasonCode = verdict.ReasonCode,
-                SourceValue = verdict.SourceValue ?? "(not provided)",
-                EnteredValue = verdict.EnteredValue ?? "(not provided)"
-            });
+            category.Rows.Add(BuildRow(field, verdict));
         }
 
         foreach (var category in Categories)
@@ -281,7 +340,74 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             category.Status = CategoryRollup.RollUp(category.Rows.Select(r => r.Status));
             category.HasData = category.Rows.Count > 0;
         }
+    }
 
+    private static VerdictRowViewModel BuildRow(string field, FieldVerdict verdict) => new()
+    {
+        FieldKey = field,
+        DisplayName = FieldOrder.DisplayNames[field],
+        Status = verdict.Status,
+        Explanation = verdict.Explanation,
+        ReasonCode = verdict.ReasonCode,
+        SourceValue = verdict.SourceValue ?? "(not provided)",
+        EnteredValue = verdict.EnteredValue ?? "(not provided)"
+    };
+
+    /// <summary>
+    /// Phase 2 of RefreshAsync: the real (slow) drug-identity lookup,
+    /// run in the background. Re-runs a full verify() (skipDrugLookup
+    /// false/omitted) rather than adding a third "drug-only" CLI mode —
+    /// the non-drug comparisons are cheap enough that recomputing them
+    /// costs nothing measurable, and reusing the exact same engine call
+    /// shape keeps this file's engine contract to just the one
+    /// skipDrugLookup flag. Only the "drug" row (and its category
+    /// rollup + overall summary) from this second result is ever
+    /// applied — every other row already rendered in Phase 1 is left
+    /// untouched, so the pharmacist never sees the rest of the panel
+    /// flicker or reset while this runs.
+    /// </summary>
+    private async Task RefreshDrugFieldAsync(PrescriptionRecord source, PrescriptionRecord entered, int generation)
+    {
+        VerifyResult result;
+        try
+        {
+            result = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: false);
+        }
+        catch (Exception ex)
+        {
+            if (generation == _refreshGeneration) StatusMessage = $"Drug lookup failed: {ex.Message}";
+            return;
+        }
+
+        if (generation != _refreshGeneration) return; // a newer refresh superseded this one — drop the stale result
+
+        if (!string.IsNullOrEmpty(result.Error))
+        {
+            StatusMessage = result.Error;
+            return;
+        }
+
+        var drugVerdict = result.Verdicts.FirstOrDefault(v => v.Field == "drug");
+        if (drugVerdict is null) return;
+
+        var drugCategoryName = FieldCategories.CategoryByField.TryGetValue("drug", out var mapped) ? mapped : FieldCategories.Rx;
+        var drugCategory = Categories.FirstOrDefault(c => c.Name == drugCategoryName);
+        if (drugCategory is null) return;
+
+        var existingIndex = -1;
+        for (var i = 0; i < drugCategory.Rows.Count; i++)
+        {
+            if (drugCategory.Rows[i].FieldKey == "drug") { existingIndex = i; break; }
+        }
+        if (existingIndex < 0) return; // the panel was cleared (e.g. window lost) before this resolved — nothing to update
+
+        // Replacing (not mutating) the row is required: VerdictRowViewModel's
+        // properties are init-only / not INotifyPropertyChanged, so a
+        // fresh instance in the ObservableCollection is what actually
+        // triggers the DataTemplate to re-render this row's glyph/colors.
+        drugCategory.Rows[existingIndex] = BuildRow("drug", drugVerdict);
+
+        drugCategory.Status = CategoryRollup.RollUp(drugCategory.Rows.Select(r => r.Status));
         UpdateSummary(result.Summary);
         StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}.";
     }
