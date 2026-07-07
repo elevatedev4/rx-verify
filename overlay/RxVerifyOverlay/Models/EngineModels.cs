@@ -194,19 +194,28 @@ public static class FieldOrder
 }
 
 /// <summary>
-/// Groups the 12 FieldOrder.Fields into the 3 categories the overlay's
-/// compact table displays (Patient / Prescriber / Rx), per Will's spec:
-/// "Patient (name, DOB), Prescriber (name, NPI), Rx (drug, sig, quantity,
-/// days supply, refills, written date — whatever applies)" — days supply
-/// has since been removed per the live-test feedback round, and
-/// prescriber split into 4 fields (name/NPI/phone/address), all mapped to
-/// the same Prescriber category here.
+/// Groups the 12 FieldOrder.Fields into the 4 categories the overlay's
+/// compact table displays (Patient / Prescriber / Rx / Sig), per Will's
+/// spec: "Patient (name, DOB), Prescriber (name, NPI), Rx (drug,
+/// quantity, days supply, refills, written date — whatever applies)" —
+/// days supply has since been removed per the live-test feedback round,
+/// and prescriber split into 4 fields (name/NPI/phone/address), all
+/// mapped to the same Prescriber category here.
 ///   - "patientAddress" isn't in Will's 2-field Patient example, but it's
 ///     one of the fields the engine always returns and is clearly
 ///     patient-identity data, not Rx or Prescriber data — it's grouped
 ///     under Patient here as the only sensible home for it rather than
 ///     silently dropped from the compact view. Flag to Will if he'd
 ///     rather it live elsewhere or be hidden.
+///   - "sig" (W-T9 item 6): pulled OUT of Rx into its OWN category,
+///     listed LAST in Order. Sig/directions matching is inherently
+///     fuzzy (wording/punctuation/abbreviation variance), so a yellow
+///     sig verdict should never drag the whole Rx category to red just
+///     because of phrasing differences. Since OverlayViewModel.
+///     PopulateRows rolls up each category from only its own Rows (see
+///     CategoryRollup.RollUp), giving sig its own category is sufficient
+///     on its own to exclude it from the Rx rollup — no separate
+///     "exclude this field" flag needed.
 /// FieldOrder.Fields happens to already list all fields for one category
 /// contiguously (patientName, patientDOB, patientAddress, prescriberName,
 /// prescriberNpi, prescriberPhone, prescriberAddress, dateWritten, drug,
@@ -219,9 +228,10 @@ public static class FieldCategories
     public const string Patient = "Patient";
     public const string Prescriber = "Prescriber";
     public const string Rx = "Rx";
+    public const string Sig = "Sig";
 
-    /// <summary>Fixed category display order — Patient, then Prescriber, then Rx.</summary>
-    public static readonly IReadOnlyList<string> Order = new[] { Patient, Prescriber, Rx };
+    /// <summary>Fixed category display order — Patient, then Prescriber, then Rx, then Sig LAST (see Sig doc above).</summary>
+    public static readonly IReadOnlyList<string> Order = new[] { Patient, Prescriber, Rx, Sig };
 
     public static readonly IReadOnlyDictionary<string, string> CategoryByField = new Dictionary<string, string>
     {
@@ -234,7 +244,7 @@ public static class FieldCategories
         ["prescriberAddress"] = Prescriber,
         ["dateWritten"] = Rx,
         ["drug"] = Rx,
-        ["sig"] = Rx,
+        ["sig"] = Sig,
         ["quantity"] = Rx,
         ["refills"] = Rx
     };

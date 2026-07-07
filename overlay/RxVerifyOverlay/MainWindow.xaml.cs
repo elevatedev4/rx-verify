@@ -29,11 +29,21 @@ public partial class MainWindow : Window
         CliPathTextBox.Text = _settings.EngineCliPath;
         NodeExeTextBox.Text = _settings.NodeExecutable;
 
-        _autoRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-        _autoRefreshTimer.Tick += async (_, _) => await SafeRefreshAsync();
+        // AUTO-WATCH (W-T9 item 5): a 1s tick calling OverlayViewModel.
+        // WatchAsync, NOT a fixed "always do a full RefreshAsync every
+        // 5s" timer like before. WatchAsync itself only does a cheap
+        // PioneerRx title read on every tick and only runs the real
+        // (expensive) verify when the pre-check/edit/new-rx screen's
+        // presence or Rx number actually changed since the last tick —
+        // see PioneerRxWindow.GetScreenSignature +
+        // OverlayViewModel.WatchAsync for the full change-detection
+        // approach. A 1s tick is safe specifically because the common
+        // case (nothing changed) is nearly free.
+        _autoRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _autoRefreshTimer.Tick += async (_, _) => await SafeWatchAsync();
 
         // First read on launch so the panel isn't empty while the
-        // pharmacist decides whether to enable auto-refresh.
+        // pharmacist decides whether to enable auto-watch.
         Loaded += async (_, _) => await SafeRefreshAsync();
     }
 
@@ -52,6 +62,20 @@ public partial class MainWindow : Window
             // against anything unexpected so a bad refresh can never
             // crash the whole overlay mid-shift.
             MessageBox.Show(this, $"Unexpected error during refresh: {ex.Message}", "Rx Verify",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>Timer-driven counterpart to SafeRefreshAsync, calling the cheap WatchAsync instead of always forcing a full RefreshAsync — see the auto-watch timer setup in the constructor.</summary>
+    private async Task SafeWatchAsync()
+    {
+        try
+        {
+            await _viewModel.WatchAsync();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Unexpected error during auto-watch: {ex.Message}", "Rx Verify",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }

@@ -6,9 +6,10 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for the FieldCategories mapping (Models/EngineModels.cs)
-/// that groups the 10 FieldOrder.Fields into the overlay's 3 compact-
-/// table categories (Patient/Prescriber/Rx). Pure data checks — no UIA,
-/// no engine call, no synthetic PHI needed.
+/// that groups the 12 FieldOrder.Fields into the overlay's 4 compact-
+/// table categories (Patient/Prescriber/Rx/Sig — sig split out of Rx and
+/// into its own last-listed category per W-T9 item 6). Pure data checks
+/// — no UIA, no engine call, no synthetic PHI needed.
 /// </summary>
 public class FieldCategoriesTests
 {
@@ -42,15 +43,28 @@ public class FieldCategoriesTests
     }
 
     [Fact]
-    public void RxCategoryContainsDrugSigQuantityRefillsAndWrittenDate()
+    public void RxCategoryContainsDrugQuantityRefillsAndWrittenDateButNotSig()
     {
         // daysSupply intentionally absent -- removed entirely per Will's
         // live-test feedback (not in FieldOrder.Fields at all anymore).
-        var rxFields = new[] { "dateWritten", "drug", "sig", "quantity", "refills" };
+        // sig intentionally absent -- split into its own Sig category
+        // per W-T9 item 6, so sig's fuzzy match variance never drags the
+        // Rx category rollup to red (see FieldCategories.CategoryByField
+        // doc).
+        var rxFields = new[] { "dateWritten", "drug", "quantity", "refills" };
         foreach (var field in rxFields)
         {
             Assert.Equal(FieldCategories.Rx, FieldCategories.CategoryByField[field]);
         }
+
+        Assert.NotEqual(FieldCategories.Rx, FieldCategories.CategoryByField["sig"]);
+    }
+
+    [Fact]
+    public void SigHasItsOwnCategoryAndIsListedLast()
+    {
+        Assert.Equal(FieldCategories.Sig, FieldCategories.CategoryByField["sig"]);
+        Assert.Equal(FieldCategories.Sig, FieldCategories.Order[^1]);
     }
 
     [Fact]
@@ -61,9 +75,9 @@ public class FieldCategoriesTests
     }
 
     [Fact]
-    public void CategoryOrderIsPatientThenPrescriberThenRx()
+    public void CategoryOrderIsPatientThenPrescriberThenRxThenSig()
     {
-        Assert.Equal(new[] { FieldCategories.Patient, FieldCategories.Prescriber, FieldCategories.Rx }, FieldCategories.Order);
+        Assert.Equal(new[] { FieldCategories.Patient, FieldCategories.Prescriber, FieldCategories.Rx, FieldCategories.Sig }, FieldCategories.Order);
     }
 
     [Fact]

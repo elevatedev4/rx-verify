@@ -103,6 +103,7 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(Glyph));
             OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(HeaderStatusText));
         }
     }
 
@@ -126,6 +127,7 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(Glyph));
             OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(HeaderStatusText));
         }
     }
 
@@ -158,6 +160,17 @@ public sealed class CategoryViewModel : INotifyPropertyChanged
             VerdictStatus.Red => "Likely Error",
             _ => "Partial match"
         };
+
+    /// <summary>
+    /// "— StatusText", for rendering immediately to the right of the
+    /// category title on the header row (e.g. "Patient — Exact match") —
+    /// per Will's W-T9 item 4 feedback, this must sit right next to the
+    /// title (not pinned to the box's right edge) and must NOT be
+    /// italic. Kept as its own bindable property (rather than a XAML
+    /// StringFormat/MultiBinding) so MainWindow.xaml can bind one
+    /// TextBlock directly next to Name with no extra markup.
+    /// </summary>
+    public string HeaderStatusText => $"— {StatusText}";
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
@@ -329,6 +342,62 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // for the staleness guard against a newer refresh superseding
         // this one before it resolves.
         _ = RefreshDrugFieldAsync(source, entered, generation);
+    }
+
+    /// <summary>
+    /// Last screen signature observed by WatchAsync (see below) — null
+    /// until the first watch tick. Compared against the current tick's
+    /// signature to decide whether a full RefreshAsync is warranted.
+    /// </summary>
+    private PioneerRxWindow.ScreenSignature? _lastWatchedSignature;
+
+    /// <summary>
+    /// AUTO-WATCH (W-T9 item 5): replaces the old fixed-interval "just
+    /// re-run the full verify every 5s" polling with cheap
+    /// change-detection. Call this on a short timer (MainWindow.xaml.cs
+    /// uses ~1s) instead of RefreshAsync directly.
+    ///
+    /// Each tick calls PioneerRxWindow.GetScreenSignature(), which is
+    /// drastically cheaper than a full RefreshAsync: it only enumerates
+    /// top-level desktop windows and reads ONE window's title text (no
+    /// FieldReader panel walk, no Escript tree read, no engine subprocess
+    /// call) — see PioneerRxWindow.GetScreenSignature for how the Rx
+    /// number is parsed straight out of the title
+    /// ("Edit Rx - &lt;rx number&gt; - ...").
+    ///
+    /// A full RefreshAsync only actually runs when:
+    ///   - the pre-check/edit/new-rx screen just appeared (wasn't present
+    ///     last tick), or
+    ///   - it's present but the Rx number/title changed since last tick
+    ///     (pharmacist moved to a different Rx).
+    /// If the screen disappeared since last tick, the categories are
+    /// cleared (mirrors RefreshAsync's own "window not found" branch)
+    /// without needing a full refresh. If nothing changed, this is a
+    /// no-op beyond the cheap signature read — no engine call, no UIA
+    /// panel read, so it's safe to poll frequently without hammering
+    /// PioneerRx or the machine.
+    /// </summary>
+    public async Task WatchAsync()
+    {
+        var signature = PioneerRxWindow.GetScreenSignature();
+        var previous = _lastWatchedSignature;
+        _lastWatchedSignature = signature;
+
+        if (!signature.Present)
+        {
+            if (previous is { Present: true })
+            {
+                StatusMessage = "Waiting for a PioneerRx Pre-Check/Edit/New Rx window...";
+                ClearCategories();
+                UpdateSummary(null);
+            }
+            return;
+        }
+
+        var changed = previous is null || !previous.Value.Present || previous.Value.RxNumber != signature.RxNumber;
+        if (!changed) return;
+
+        await RefreshAsync();
     }
 
     /// <summary>

@@ -40,76 +40,75 @@
         <SolidColorBrush x:Key="BoxRedBrush" Color="#FF4A1F1F" />
         <SolidColorBrush x:Key="BoxGrayBrush" Color="#FF2A2A2A" />
 
-        <Style x:Key="PillTextStyle" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="FontWeight" Value="Bold" />
-            <Setter Property="FontSize" Value="12" />
-            <Setter Property="HorizontalAlignment" Value="Center" />
-            <Setter Property="VerticalAlignment" Value="Center" />
+        <!--
+            W-T9 item 3: buttons were "too bright" (default WPF chrome is
+            light gray/white), which draws the eye away from the verdict
+            list — the actual point of the overlay. This implicit Style
+            (no x:Key, so it applies to EVERY Button in the window,
+            toolbar and Settings expander alike) recolors them close to
+            the window's own #FF1E1E1E background: a subtle dark gray
+            fill with a slightly lighter border for definition and
+            legible (but low-contrast, non-attention-grabbing) light-gray
+            text. Hover/pressed states get a small step up in brightness
+            so the button still visibly responds to interaction without
+            being bright at rest.
+        -->
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#FF2A2A2A" />
+            <Setter Property="Foreground" Value="#FFCCCCCC" />
+            <Setter Property="BorderBrush" Value="#FF3A3A3A" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FF353535" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="#FF404040" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
+
     </Window.Resources>
 
     <Grid Margin="8">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" /> <!-- Title / summary counts -->
-            <RowDefinition Height="Auto" /> <!-- Status message -->
-            <RowDefinition Height="Auto" /> <!-- Toolbar buttons -->
-            <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) -->
+            <RowDefinition Height="Auto" /> <!-- Title -->
+            <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
+            <RowDefinition Height="Auto" /> <!-- Bottom bar: status message + Refresh/Dump/Auto-watch controls -->
             <RowDefinition Height="Auto" /> <!-- Settings (collapsible-ish, just always shown small in v0) -->
         </Grid.RowDefinitions>
 
-        <!-- Row 0: title + green/yellow/red summary pills -->
-        <Grid Grid.Row="0" Margin="0,0,0,4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-
-            <TextBlock Grid.Column="0" Text="Rx Verify" Foreground="White" FontSize="16" FontWeight="Bold" VerticalAlignment="Center" />
-
-            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <Border Background="{StaticResource GreenBrush}" CornerRadius="4" Padding="6,2" Margin="2,0">
-                    <TextBlock Style="{StaticResource PillTextStyle}" Text="{Binding GreenCount, StringFormat=✓ {0}}" />
-                </Border>
-                <Border Background="{StaticResource YellowBrush}" CornerRadius="4" Padding="6,2" Margin="2,0">
-                    <TextBlock Style="{StaticResource PillTextStyle}" Text="{Binding YellowCount, StringFormat=? {0}}" />
-                </Border>
-                <Border Background="{StaticResource RedBrush}" CornerRadius="4" Padding="6,2" Margin="2,0">
-                    <TextBlock Style="{StaticResource PillTextStyle}" Text="{Binding RedCount, StringFormat=✗ {0}}" />
-                </Border>
-            </StackPanel>
-        </Grid>
-
-        <!-- Row 1: status line -->
-        <TextBlock Grid.Row="1" Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
-                   TextWrapping="Wrap" Margin="0,0,0,4" />
-
-        <!-- Row 2: toolbar -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,4">
-            <Button Content="Refresh" Padding="8,3" Margin="0,0,6,0" Click="OnRefreshClick" />
-            <Button Content="Dump UIA Tree..." Padding="8,3" Margin="0,0,6,0" Click="OnDumpTreeClick" />
-            <CheckBox x:Name="AutoRefreshCheckBox" Content="Auto (5s)" Foreground="White" VerticalAlignment="Center"
-                      Checked="OnAutoRefreshToggled" Unchecked="OnAutoRefreshToggled" />
-        </StackPanel>
+        <!-- Row 0: title only. The green/yellow/red summary count pills that used to live here were removed per Will's W-T9 item 2 feedback (not needed — the per-category header rollups below already convey this). -->
+        <TextBlock Grid.Row="0" Text="Rx Verify" Foreground="White" FontSize="16" FontWeight="Bold" Margin="0,0,0,4" />
 
         <!--
-            Row 3: compact grouped table — 3 categories (Patient /
-            Prescriber / Rx, see Models/EngineModels.cs FieldCategories),
-            each with a rolled-up status header (worst-status-wins: any
-            Red field -> Red header, else any Yellow -> Yellow, else
-            Green) and its field rows below in small print, FIXED
-            PHARMACIST FIELD ORDER within the category (never re-sorted —
-            hard requirement: rows must mirror the data-entry screen's
-            order, never jump around by severity). Binds directly to
-            OverlayViewModel.Categories (built/rolled-up every refresh in
-            OverlayViewModel.RefreshAsync). Reason code + explanation are
-            NOT always-visible text anymore (that's what made the old
-            per-field-card layout tall) — they're a hover tooltip on the
-            row instead (VerdictRowViewModel.TooltipText), so the whole
-            table stays small enough to see all 10 fields at once for a
-            normal Rx without scrolling.
+            Row 1: compact grouped table — 4 categories (Patient /
+            Prescriber / Rx / Sig, see Models/EngineModels.cs
+            FieldCategories), each with a rolled-up status header
+            (worst-status-wins: any Red field -> Red header, else any
+            Yellow -> Yellow, else Green) and its field rows below in
+            small print, FIXED PHARMACIST FIELD ORDER within the category
+            (never re-sorted — hard requirement: rows must mirror the
+            data-entry screen's order, never jump around by severity).
+            Binds directly to OverlayViewModel.Categories (built/rolled-up
+            every refresh in OverlayViewModel.RefreshAsync), which is
+            already in FieldCategories.Order — Patient, Prescriber, Rx,
+            then Sig LAST (W-T9 item 6: sig gets its own box, listed
+            last, and is excluded from the Rx rollup since it lives in
+            its own category with its own Rows/Status — see
+            FieldCategories.CategoryByField doc). Reason code +
+            explanation are NOT always-visible text (that's what made the
+            old per-field-card layout tall) — they're a hover tooltip on
+            the row instead (VerdictRowViewModel.TooltipText), so the
+            whole table stays small enough to see all fields at once for
+            a normal Rx without scrolling. This is now the main content,
+            given the full remaining vertical space (Height="*") — the
+            toolbar/status controls that used to live above it moved to
+            the bottom bar below (W-T9 item 1).
         -->
-        <Grid Grid.Row="3">
+        <Grid Grid.Row="1">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -147,16 +146,19 @@
                                 <StackPanel>
                                     <!--
                                         Category header: rolled-up status glyph LEADS the row
-                                        (moved in front of the category name per Will's
-                                        live-test feedback — matches the same WCAG convention
-                                        as the field rows below, where the glyph is the FIRST
-                                        visual element rather than a trailing indicator, so the
-                                        worst-status-wins rollup for the whole category reads
-                                        before anything else at a glance). A text status label
-                                        ("Exact match" / "Partial match" / "Likely Error" — see
-                                        CategoryViewModel.StatusText) now follows the category
-                                        name, spelling out the same rollup the glyph/color
-                                        already convey, per Will's live-test feedback.
+                                        (matches the same WCAG convention as the field rows
+                                        below, where the glyph is the FIRST visual element
+                                        rather than a trailing indicator, so the worst-status-
+                                        wins rollup for the whole category reads before
+                                        anything else at a glance), followed immediately by
+                                        the category name, then the status label text right
+                                        NEXT TO the name (e.g. "Patient — Exact match") — per
+                                        Will's W-T9 item 4 feedback, this must sit right next
+                                        to the title (not pinned out to the box's right edge)
+                                        and must NOT be italic (see
+                                        CategoryViewModel.HeaderStatusText, which supplies the
+                                        "— <StatusText>" text directly so no XAML
+                                        StringFormat/MultiBinding gymnastics are needed here).
                                     -->
                                     <Border CornerRadius="3,3,0,0" Padding="5,2">
                                         <Border.Style>
@@ -175,16 +177,11 @@
                                                 </Style.Triggers>
                                             </Style>
                                         </Border.Style>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="18" />
-                                                <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="{Binding Glyph}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" TextAlignment="Center" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Name}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0" />
-                                            <TextBlock Grid.Column="2" Text="{Binding StatusText}" Foreground="White" FontSize="10" FontStyle="Italic" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                                        </Grid>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Glyph}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" TextAlignment="Center" Width="18" />
+                                            <TextBlock Text="{Binding Name}" Foreground="White" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding HeaderStatusText}" Foreground="White" FontSize="10" VerticalAlignment="Center" Margin="4,0,0,0" />
+                                        </StackPanel>
                                     </Border>
 
                                     <!--
@@ -331,8 +328,31 @@
             </ScrollViewer>
         </Grid>
 
-        <!-- Row 4: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="4" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
+        <!--
+            Row 2: BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
+            the Auto-watch checkbox, and the "last checked"/status text
+            all moved down here from the old top toolbar, so the verdict
+            list above gets the space and the pharmacist's eye starts on
+            data, not controls. Status message (which includes "Last
+            checked h:mm:ss" — see OverlayViewModel.RefreshAsync/
+            RefreshDrugFieldAsync) sits above the button row, both inside
+            one bottom-anchored block.
+        -->
+        <Border Grid.Row="2" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
+            <StackPanel>
+                <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
+                           TextWrapping="Wrap" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal">
+                    <Button Content="Refresh" Margin="0,0,6,0" Click="OnRefreshClick" />
+                    <Button Content="Dump UIA Tree..." Margin="0,0,6,0" Click="OnDumpTreeClick" />
+                    <CheckBox x:Name="AutoRefreshCheckBox" Content="Auto-watch" Foreground="#FFCCCCCC" VerticalAlignment="Center"
+                              Checked="OnAutoRefreshToggled" Unchecked="OnAutoRefreshToggled" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- Row 3: engine path settings, always visible in v0 (small footprint, no PHI) -->
+        <Expander Grid.Row="3" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">
@@ -341,13 +361,13 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBox x:Name="CliPathTextBox" Grid.Column="0" Padding="4" />
-                    <Button Grid.Column="1" Content="Browse..." Margin="4,0,0,0" Padding="8,4" Click="OnBrowseCliPathClick" />
+                    <Button Grid.Column="1" Content="Browse..." Margin="4,0,0,0" Click="OnBrowseCliPathClick" />
                 </Grid>
 
                 <TextBlock Text="Node executable (usually just 'node'):" Foreground="#FFBBBBBB" FontSize="11" />
                 <TextBox x:Name="NodeExeTextBox" Padding="4" Margin="0,2,0,6" />
 
-                <Button Content="Save settings" Padding="8,4" HorizontalAlignment="Left" Click="OnSaveSettingsClick" />
+                <Button Content="Save settings" HorizontalAlignment="Left" Click="OnSaveSettingsClick" />
             </StackPanel>
         </Expander>
     </Grid>
