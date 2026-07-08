@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -8,6 +9,7 @@ using System.Threading.Tasks;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
 using Windows.Storage.Streams;
+using RxVerifyOverlay.Models;
 
 namespace RxVerifyOverlay.Ocr;
 
@@ -68,10 +70,38 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
         var ocrResult = await ocrEngine.RecognizeAsync(softwareBitmap);
 
         var lines = ocrResult.Lines.Select(l => l.Text).ToList();
+
+        // Flatten every line's words into the flat Words list
+        // src/ocr/parseEscriptOcr.ts consumes — it reconstructs its own
+        // line grouping from (x, y, w, h), so no line boundary needs to
+        // be preserved here beyond each word's own box. Windows.Media.Ocr's
+        // OcrWord.BoundingRect is already in the same screen-pixel space
+        // as the captured bitmap (see EscriptImageCapture.CaptureRegion),
+        // so no coordinate translation is needed — these boxes are
+        // relative to the CAPTURED REGION, not the full screen; that's
+        // fine, parseEscriptOcr only ever compares words to each other
+        // (relative geometry), never to an absolute screen position.
+        var words = new List<RxVerifyOverlay.Models.OcrWord>();
+        foreach (var line in ocrResult.Lines)
+        {
+            foreach (var word in line.Words)
+            {
+                words.Add(new RxVerifyOverlay.Models.OcrWord
+                {
+                    Text = word.Text ?? "",
+                    X = word.BoundingRect.X,
+                    Y = word.BoundingRect.Y,
+                    W = word.BoundingRect.Width,
+                    H = word.BoundingRect.Height
+                });
+            }
+        }
+
         return new OcrTextResult
         {
             Text = ocrResult.Text ?? "",
-            Lines = lines
+            Lines = lines,
+            Words = words
         };
     }
 

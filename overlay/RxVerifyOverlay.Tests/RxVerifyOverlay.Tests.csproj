@@ -15,11 +15,13 @@
       for the whole solution.
 
       Nothing in these tests actually touches WPF/WinRT/FlaUI/UIA
-      directly — they exercise EscriptTreeParser and (as of this branch)
-      OcrEscriptParser only, both pure UIA/WinRT-free classes (see
-      Parsing/EscriptNode.cs / EscriptTreeParser.cs / OcrEscriptParser.cs)
-      — but the ProjectReference below still forces this TFM match
-      regardless of what the tests themselves use.
+      directly — they exercise EscriptTreeParser and other pure
+      UIA/WinRT-free classes (see Parsing/EscriptNode.cs /
+      EscriptTreeParser.cs). OcrEscriptParser.cs (and its tests) was
+      RETIRED on the VerifyOCR v1 branch — OCR label/value parsing now
+      lives in rx-verify's TS engine (src/ocr/parseEscriptOcr.ts,
+      vitest-tested there instead). The ProjectReference below still
+      forces this TFM match regardless of what the tests themselves use.
     -->
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>

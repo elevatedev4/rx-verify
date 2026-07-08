@@ -1,10 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Linq;
 using System.Threading.Tasks;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
-using RxVerifyOverlay.Parsing;
 
 namespace RxVerifyOverlay.Uia;
 
@@ -13,10 +14,16 @@ namespace RxVerifyOverlay.Uia;
 /// SOURCE side of the comparison by capturing a screen region (no tab
 /// switch — see Ocr/EscriptImageCapture.cs) and running local OCR over
 /// it (Ocr/IOcrEngine — WindowsMediaOcrEngine by default), instead of
-/// walking PioneerRx's Escript UIA tree. Feeds the exact same
-/// PrescriptionRecord shape into the SAME unchanged EngineClient.
-/// VerifyAsync the UIA path always used — the TS engine is blind to how
-/// the source was produced (see rx-verify src/cli.ts).
+/// walking PioneerRx's Escript UIA tree.
+///
+/// v1: this class no longer parses OCR output into a PrescriptionRecord
+/// itself (the C# OcrEscriptParser it used to call is retired — see
+/// branch report). It hands back the structured OCR Words instead;
+/// EngineClient.VerifyAsync(IReadOnlyList&lt;OcrWord&gt;, ...) sends those
+/// words straight to the TS engine (src/cli.ts), which derives the
+/// source PrescriptionRecord itself via src/ocr/parseEscriptOcr.ts — the
+/// label/value association logic is safety-critical enough to live in
+/// the one place it can actually be unit-tested (vitest), not here.
 ///
 /// FieldReader.ReadEntered() (the technician-entered/UIA side) is
 /// UNTOUCHED and still used directly by OverlayViewModel — only the
@@ -32,11 +39,12 @@ public sealed class OcrFieldReader
     }
 
     /// <summary>
-    /// Capture -&gt; OCR -&gt; OcrEscriptParser.Parse -&gt; PrescriptionRecord,
-    /// with full Stopwatch timing and a raw-text log line on every call
-    /// (see Ocr/OcrLogger.cs — the headline v0 deliverable: proving speed
-    /// and text quality). Never throws — any capture/OCR failure becomes
-    /// OcrCaptureResult.Error (with a blank Record) so a bad read shows a
+    /// Capture -&gt; OCR -&gt; structured Words (v1: no parsing happens here
+    /// any more — see class doc), with full Stopwatch timing and both a
+    /// raw-text AND structured-word log line on every call (see
+    /// Ocr/OcrLogger.cs — the headline v0 deliverable: proving speed and
+    /// text quality). Never throws — any capture/OCR failure becomes
+    /// OcrCaptureResult.Error (with empty Words) so a bad read shows a
     /// status message instead of crashing the overlay (see
     /// ViewModels/OverlayViewModel.cs RefreshAsync, mirroring how
     /// FieldReader.ReadSource's UIA failures were always handled).
@@ -78,14 +86,15 @@ public sealed class OcrFieldReader
             var ocrText = await _ocrEngine.RecognizeAsync(bitmap);
             var ocrMs = ocrStopwatch.ElapsedMilliseconds;
 
-            var record = OcrEscriptParser.Parse(ocrText.Text);
             var totalMs = totalStopwatch.ElapsedMilliseconds;
 
-            OcrLogger.LogRead(captureMs, ocrMs, totalMs, ocrText.Text);
+            // Structured word dump (branch brief item 7), alongside the
+            // flat-text diagnostic log v0 already had — see OcrLogger.LogRead.
+            OcrLogger.LogRead(captureMs, ocrMs, totalMs, ocrText.Text, ocrText.Words);
 
             return new OcrCaptureResult
             {
-                Record = record,
+                Words = ocrText.Words,
                 RawText = ocrText.Text,
                 CaptureMs = captureMs,
                 OcrMs = ocrMs,
@@ -132,13 +141,25 @@ public sealed class OcrFieldReader
     }
 
     /// <summary>
-    /// Mirrors FieldReader.IsStructuredSourceAvailable's gate (patient
-    /// name AND drug name both present) — the OCR path has no equivalent
-    /// of "the Escript tree control wasn't found at all", so this is
-    /// purely a content check on the parsed record.
+    /// v1 cheap pre-gate: is there enough OCR text to bother sending to
+    /// the engine at all? v0's IsSourceUsable checked the PARSED record
+    /// for patient name + drug name both present — that check no longer
+    /// exists here since parsing moved to the TS engine (see class doc).
+    /// This is deliberately a much cheaper heuristic (a minimum word
+    /// count) rather than re-implementing field detection twice: a
+    /// genuinely bad/empty capture will have very few recognized words,
+    /// while a real e-script pane (13 labels + 13 values, at minimum)
+    /// always has well more than this threshold. A capture that passes
+    /// this gate but still doesn't parse into a usable record surfaces
+    /// as "not provided" (yellow) verdicts from the engine itself, not a
+    /// hard error — see src/ocr/parseEscriptOcr.ts's "never associate a
+    /// misassigned value" philosophy. Threshold picked conservatively
+    /// low (not tuned against a real capture — flagged in branch report).
     /// </summary>
-    public static bool IsSourceUsable(PrescriptionRecord source)
+    private const int MinUsableWordCount = 10;
+
+    public static bool IsSourceUsable(IReadOnlyList<OcrWord> words)
     {
-        return !string.IsNullOrWhiteSpace(source.PatientName) && !string.IsNullOrWhiteSpace(source.Drug?.Name);
+        return words.Count(w => !string.IsNullOrWhiteSpace(w.Text)) >= MinUsableWordCount;
     }
 }

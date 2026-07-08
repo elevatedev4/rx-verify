@@ -378,28 +378,31 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
-        var source = ocrResult.Record;
+        var ocrWords = ocrResult.Words;
 
-        // OCR path has no notes extraction in v0 (OcrEscriptParser.Parse's
-        // signature returns only a PrescriptionRecord — see that file's
-        // doc) — always empty here, vs. the UIA path's SourceNotes.
+        // OCR path has no notes extraction (v0 or v1 — see
+        // src/ocr/parseEscriptOcr.ts's documented "notes" gap: no
+        // PrescriptionRecord.notes field exists to extract into) — always
+        // empty here, vs. the UIA path's SourceNotes.
         UpdateNotes(Array.Empty<string>());
 
-        if (!OcrFieldReader.IsSourceUsable(source))
+        if (!OcrFieldReader.IsSourceUsable(ocrWords))
         {
-            // Mirrors the old IsStructuredSourceAvailable gate (patient
-            // name AND drug name both present), but against the OCR
-            // parser's output instead of the Escript UIA tree — see
-            // Uia/OcrFieldReader.cs IsSourceUsable.
-            StatusMessage = "OCR didn't find a patient name and drug on the captured e-script image. " +
+            // v1: a cheap word-count pre-gate on the raw OCR output, NOT
+            // a check of a parsed record (parsing now happens inside the
+            // TS engine call below) — see Uia/OcrFieldReader.cs
+            // IsSourceUsable doc for why.
+            StatusMessage = "OCR didn't find enough text on the captured e-script image to attempt a comparison. " +
                              "Check the capture region (Engine settings) and the raw OCR text below.";
             ClearCategories();
             UpdateSummary(null);
             return;
         }
 
-        // Phase 1: fast pass, skips the drug lookup entirely.
-        var fastResult = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: true);
+        // Phase 1: fast pass, skips the drug lookup entirely. Sends the
+        // raw OCR words straight to the engine (v1) — see
+        // Engine/EngineClient.cs VerifyAsync(IReadOnlyList&lt;OcrWord&gt;, ...).
+        var fastResult = await _engineClient.VerifyAsync(ocrWords, entered, skipDrugLookup: true);
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
 
@@ -418,7 +421,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // click handler) returns immediately. See RefreshDrugFieldAsync
         // for the staleness guard against a newer refresh superseding
         // this one before it resolves.
-        _ = RefreshDrugFieldAsync(source, entered, generation);
+        _ = RefreshDrugFieldAsync(ocrWords, entered, generation);
     }
 
     /// <summary>
@@ -550,12 +553,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// untouched, so the pharmacist never sees the rest of the panel
     /// flicker or reset while this runs.
     /// </summary>
-    private async Task RefreshDrugFieldAsync(PrescriptionRecord source, PrescriptionRecord entered, int generation)
+    private async Task RefreshDrugFieldAsync(IReadOnlyList<OcrWord> ocr, PrescriptionRecord entered, int generation)
     {
         VerifyResult result;
         try
         {
-            result = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: false);
+            result = await _engineClient.VerifyAsync(ocr, entered, skipDrugLookup: false);
         }
         catch (Exception ex)
         {

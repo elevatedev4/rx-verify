@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Text.Json;
+using RxVerifyOverlay.Models;
 
 namespace RxVerifyOverlay.Ocr;
 
@@ -63,7 +66,17 @@ public static class OcrLogger
     /// overlay (see OcrFieldReader.ReadSourceFromOcrAsync, which calls
     /// this from inside its own try).
     /// </summary>
-    public static void LogRead(long captureMs, long ocrMs, long totalMs, string rawText)
+    /// <param name="words">
+    /// v1 addition (branch brief item 7): the structured word+bounding-box
+    /// dump alongside the flat raw text v0 already logged — lets Will
+    /// (or a future debugging session) see exactly what geometry
+    /// src/ocr/parseEscriptOcr.ts had to work with, not just the flat
+    /// text. Same PHI caveat as the raw text below (class doc
+    /// "BOUNDED PHI LOG") — it's the same data, just with coordinates.
+    /// Optional/nullable so existing call sites/tests that only pass the
+    /// four required args keep compiling.
+    /// </param>
+    public static void LogRead(long captureMs, long ocrMs, long totalMs, string rawText, IReadOnlyList<OcrWord>? words = null)
     {
         try
         {
@@ -86,6 +99,19 @@ public static class OcrLogger
                 sb.AppendLine("--- raw text ---");
                 sb.AppendLine(rawText);
                 sb.AppendLine("--- end raw text ---");
+                if (words is { Count: > 0 })
+                {
+                    sb.AppendLine("--- words (structured, x/y/w/h) ---");
+                    try
+                    {
+                        sb.AppendLine(JsonSerializer.Serialize(words));
+                    }
+                    catch
+                    {
+                        sb.AppendLine("(structured word dump failed to serialize)");
+                    }
+                    sb.AppendLine("--- end words ---");
+                }
                 sb.AppendLine();
 
                 File.AppendAllText(LogFilePath, sb.ToString());

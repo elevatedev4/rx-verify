@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -11,15 +12,18 @@ using RxVerifyOverlay.Models;
 namespace RxVerifyOverlay.Engine;
 
 /// <summary>
-/// Calls the EXISTING, 128-tested rx-verify TypeScript engine as a local
-/// subprocess: `node dist/cli.js`, JSON in on stdin, JSON out on stdout.
-/// See rx-verify/src/cli.ts for the Node-side half of this contract.
+/// Calls the EXISTING, heavily-tested rx-verify TypeScript engine as a
+/// local subprocess: `node dist/cli.js`, JSON in on stdin, JSON out on
+/// stdout. See rx-verify/src/cli.ts for the Node-side half of this
+/// contract.
 ///
 /// WHY A SUBPROCESS INSTEAD OF PORTING THE ENGINE TO C#: the engine's
 /// value is in its rules (name/nickname/date/address normalization, sig
 /// abbreviation expansion, NDC/RxNorm comparison, quantity/days-supply
-/// reconciliation) which already have 128 passing tests and real
-/// production nuance (see rx-verify/README.md "Status / what's
+/// reconciliation, and — as of VerifyOCR v1 — OCR label/value
+/// association, see src/ocr/parseEscriptOcr.ts) which already have 200+
+/// passing vitest tests and real production nuance (see
+/// rx-verify/README.md "Status / what's
 /// stubbed"). Porting that logic to C# would mean re-deriving and
 /// re-testing all of it in a second language for zero behavior change —
 /// pure risk, no reward, for a v0. A subprocess call costs a few
@@ -69,7 +73,38 @@ public sealed class EngineClient
     /// ViewModels/OverlayViewModel.cs RefreshAsync for how the two calls
     /// are sequenced so the UI never blocks on the drug lookup.
     /// </param>
-    public async Task<VerifyResult> VerifyAsync(PrescriptionRecord source, PrescriptionRecord entered, bool skipDrugLookup = false, CancellationToken cancellationToken = default)
+    public Task<VerifyResult> VerifyAsync(PrescriptionRecord source, PrescriptionRecord entered, bool skipDrugLookup = false, CancellationToken cancellationToken = default)
+    {
+        var request = new VerifyCliRequest { Source = source, Entered = entered, SkipDrugLookup = skipDrugLookup };
+        return RunCliAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// VerifyOCR v1: same contract as the PrescriptionRecord overload
+    /// above, but for the OCR source path — sends the RAW OCR words
+    /// straight to verify-cli ({ ocr, entered, skipDrugLookup }, see
+    /// src/cli.ts) instead of a pre-parsed source record. Label/value
+    /// association now happens entirely inside the tested TS engine
+    /// (src/ocr/parseEscriptOcr.ts) — see Uia/OcrFieldReader.cs, which no
+    /// longer parses OCR output itself. Same two-phase (skipDrugLookup
+    /// true then false) call pattern as OverlayViewModel.RefreshAsync
+    /// already used for the PrescriptionRecord path.
+    /// </summary>
+    public Task<VerifyResult> VerifyAsync(IReadOnlyList<OcrWord> ocr, PrescriptionRecord entered, bool skipDrugLookup = false, CancellationToken cancellationToken = default)
+    {
+        var request = new VerifyOcrCliRequest { Ocr = new List<OcrWord>(ocr), Entered = entered, SkipDrugLookup = skipDrugLookup };
+        return RunCliAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// The actual `node dist/cli.js` subprocess call, shared by both
+    /// VerifyAsync overloads above — everything past "serialize this
+    /// request object to stdin" is identical regardless of whether the
+    /// request is a VerifyCliRequest (source) or VerifyOcrCliRequest
+    /// (ocr), so this is generic over the request type rather than
+    /// duplicated per overload.
+    /// </summary>
+    private async Task<VerifyResult> RunCliAsync<TRequest>(TRequest request, CancellationToken cancellationToken)
     {
         if (!File.Exists(CliScriptPath))
         {
@@ -80,7 +115,6 @@ public sealed class EngineClient
             };
         }
 
-        var request = new VerifyCliRequest { Source = source, Entered = entered, SkipDrugLookup = skipDrugLookup };
         var requestJson = JsonSerializer.Serialize(request, JsonOptions);
 
         var psi = new ProcessStartInfo
