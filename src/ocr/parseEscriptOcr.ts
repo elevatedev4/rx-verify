@@ -60,7 +60,20 @@ type LabelKey =
   | 'quantity'
   | 'directions'
   | 'note'
-  | 'substitutions';
+  | 'substitutions'
+  | 'refills'
+  // Recognize-but-ignore labels (branch brief "RECOGNIZE-BUT-IGNORE"):
+  // they don't map to any PrescriptionRecord field, but recognizing them
+  // lets Pass A/B and trimValueNoise treat them as slot/value boundaries
+  // instead of letting their text bleed into a neighboring real field.
+  | 'gender'
+  | 'agentName'
+  | 'licenses'
+  | 'supervisor'
+  | 'spi'
+  | 'ds2'
+  | 'dxCodes'
+  | 'order';
 
 interface LabelDef {
   key: LabelKey;
@@ -68,6 +81,8 @@ interface LabelDef {
   canonical: string;
   /** Max leading OCR words this label might be split across (OCR word-splitting noise, e.g. "Di recti ons" -> 3 words for "Directions"). */
   maxWords: number;
+  /** Recognized as a label (bounds neighboring values / consumes a positional slot) but never assigned into the PrescriptionRecord. */
+  ignore?: boolean;
 }
 
 // maxWords is deliberately 3 for every label (not just the longer ones):
@@ -77,21 +92,33 @@ interface LabelDef {
 // this from over-matching into unrelated value text.
 const LABELS: LabelDef[] = [
   { key: 'patient', canonical: 'patient', maxWords: 3 },
+  { key: 'gender', canonical: 'gender', maxWords: 2, ignore: true },
   { key: 'address', canonical: 'address', maxWords: 3 },
   { key: 'dob', canonical: 'dob', maxWords: 3 },
   { key: 'prescriber', canonical: 'prescriber', maxWords: 3 },
+  { key: 'agentName', canonical: 'agentname', maxWords: 2, ignore: true },
   { key: 'location', canonical: 'location', maxWords: 3 },
+  { key: 'licenses', canonical: 'licenses', maxWords: 2, ignore: true },
   { key: 'phone', canonical: 'phone', maxWords: 3 },
+  { key: 'supervisor', canonical: 'supervisor', maxWords: 2, ignore: true },
+  { key: 'spi', canonical: 'spi', maxWords: 1, ignore: true },
   { key: 'written', canonical: 'written', maxWords: 3 },
   { key: 'ndc', canonical: 'ndc', maxWords: 3 },
   { key: 'medication', canonical: 'medication', maxWords: 3 },
   { key: 'quantity', canonical: 'quantity', maxWords: 3 },
   { key: 'directions', canonical: 'directions', maxWords: 3 },
+  { key: 'refills', canonical: 'refills', maxWords: 2 },
+  { key: 'ds2', canonical: 'ds', maxWords: 1, ignore: true },
   { key: 'note', canonical: 'note', maxWords: 3 },
-  { key: 'substitutions', canonical: 'substitutions', maxWords: 3 }
+  { key: 'substitutions', canonical: 'substitutions', maxWords: 3 },
+  { key: 'dxCodes', canonical: 'dxcodes', maxWords: 3, ignore: true },
+  { key: 'order', canonical: 'order', maxWords: 2, ignore: true }
 ];
 
-/** Chrome/toolbar tokens actually observed (see branch brief) — used only as a defensive secondary filter; the primary chrome guard is "drop everything before the first recognized label line" (chrome always renders above the data pane). Normalized (lowercase, alnum only). */
+/** Field keys whose inline/positional raw text is prone to absorbing a following recognized label or pharmacy-chrome token on the same OCR line (branch brief defect #3 — "Agent name"/"spr <SPI>"/"/ Mab" bleed). Trimmed via trimValueNoise before being stored. NOT applied to address/location — those get trailing bare-digit noise (a bled-in license number) stripped by parseAddressBlob's own targeted retry instead, since a generic trim there would also eat the address's own trailing ZIP digits. */
+const NOISE_TRIM_KEYS = new Set<LabelKey>(['patient', 'prescriber', 'phone']);
+
+/** Chrome/toolbar tokens actually observed (see branch brief) — used both as a defensive secondary filter (drop chrome LINES) and, via trimValueNoise, to truncate chrome words that bleed onto the END of a value already assigned to a NOISE_TRIM_KEYS field. Normalized (lowercase, alnum only). */
 const CHROME_TOKENS = new Set([
   'dispense',
   'image',
@@ -111,7 +138,15 @@ const CHROME_TOKENS = new Set([
   'refilled',
   'time',
   'zoom',
-  'select'
+  'select',
+  'mab',
+  'sn',
+  'spi',
+  'supervisor',
+  'agent',
+  'order',
+  'refill',
+  'replace'
 ]);
 
 // ---------------------------------------------------------------------
@@ -150,8 +185,20 @@ function fuzzyThreshold(len: number): number {
   return 3;
 }
 
+/**
+ * Used for CHROME_TOKENS matching only (isChromeLine / trimValueNoise).
+ * Very short chrome tokens ("DS", "SN") are only 1 edit away from common
+ * real content (ZIP-adjacent state codes "KS"/"MO", street-type "ST") —
+ * fuzzy-matching those with the normal 1-char budget produces false
+ * positives that wrongly classify a legitimate value line/word as chrome
+ * (observed while adding "SN"/"Mab"/etc. per branch brief: "123 SYNTH ST
+ * ... KS ..." tripped 2 false hits — "ST"~"SN" and "KS"~"DS" — and got
+ * dropped as chrome). Tokens of length <=2 require an EXACT match here;
+ * longer tokens keep the normal fuzzy budget.
+ */
 function isFuzzyMatch(candidate: string, canonical: string): boolean {
   if (!candidate) return false;
+  if (canonical.length <= 2) return candidate === canonical;
   const dist = levenshtein(candidate, canonical);
   return dist <= fuzzyThreshold(canonical.length);
 }
@@ -230,6 +277,60 @@ function findLabelAtLineStart(line: OcrWord[]): LabelMatch | null {
   return best ? { label: best.label, consumed: best.consumed } : null;
 }
 
+/** Like findLabelAtLineStart, but tries a 1-3 word window starting at an arbitrary index (not just the start of a line) — used to find where a NEXT recognized label bleeds into the tail of a value that's already been assigned to a different field. */
+function findLabelAt(words: OcrWord[], start: number): LabelMatch | null {
+  let best: { label: LabelDef; consumed: number; ratio: number } | null = null;
+  const maxConsume = Math.min(3, words.length - start);
+
+  for (let consumed = 1; consumed <= maxConsume; consumed++) {
+    const candidate = normalize(wordsToText(words.slice(start, start + consumed)));
+    if (!candidate) continue;
+
+    for (const label of LABELS) {
+      if (consumed > label.maxWords) continue;
+      const dist = levenshtein(candidate, label.canonical);
+      if (dist > fuzzyThreshold(label.canonical.length)) continue;
+      const ratio = dist / label.canonical.length;
+      if (!best || ratio < best.ratio) {
+        best = { label, consumed, ratio };
+      }
+    }
+  }
+
+  return best ? { label: best.label, consumed: best.consumed } : null;
+}
+
+/**
+ * Truncates a value's word list at the first point (after its first word,
+ * so a value is never trimmed to nothing) where either a known chrome
+ * token or another recognized field label starts — the fix for branch
+ * brief defect #3 ("noise bleeds into text values"): e.g. prescriber name
+ * "Demo, Dana Agent name" -> "Demo, Dana", or prescriber phone
+ * "(555) 555-0199 spr 1526938475001" -> "(555) 555-0199" (the "spr" OCR
+ * mangle fuzzy-matches the "SPI" ignore-label). Only applied to
+ * NOISE_TRIM_KEYS fields — see that const's doc for why address/location
+ * are handled separately.
+ */
+function trimValueNoise(words: OcrWord[]): OcrWord[] {
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i] as OcrWord;
+    const norm = normalize(w.text);
+    if (!norm) continue;
+
+    let isChrome = false;
+    for (const token of CHROME_TOKENS) {
+      if (isFuzzyMatch(norm, token)) {
+        isChrome = true;
+        break;
+      }
+    }
+    if (isChrome) return words.slice(0, i);
+
+    if (findLabelAt(words, i)) return words.slice(0, i);
+  }
+  return words;
+}
+
 /** Defensive secondary chrome filter (see CHROME_TOKENS doc): a line is chrome if 2+ of its words fuzzily match known chrome tokens. */
 function isChromeLine(line: OcrWord[]): boolean {
   let hits = 0;
@@ -261,11 +362,22 @@ function isChromeLine(line: OcrWord[]): boolean {
  * "<state><zip>" shape is recognized — never throws, never guesses city
  * beyond the one trailing token before the state.
  */
+const ADDRESS_RE = /^(.*?)[,\s]+([A-Za-z]{2})\s*(\d{5})(\d{4})?\s*$/;
+
 function parseAddressBlob(raw: string): Address {
   const trimmed = raw.trim();
   if (!trimmed) return {};
 
-  const m = /^(.*?)[,\s]+([A-Za-z]{2})\s*(\d{5})(\d{4})?\s*$/.exec(trimmed);
+  let m = ADDRESS_RE.exec(trimmed);
+  if (!m) {
+    // A bled-in noise token (e.g. a license number appended after the
+    // real ZIP — branch brief defect #3) breaks the end anchor above.
+    // Best-effort: strip ONE trailing bare 6+ digit token and retry once.
+    const stripped = trimmed.replace(/\s+\d{6,}\s*$/, '');
+    if (stripped !== trimmed) {
+      m = ADDRESS_RE.exec(stripped);
+    }
+  }
   if (!m) return { street: trimmed };
 
   const before = (m[1] ?? '').trim();
@@ -287,12 +399,24 @@ function parseAddressBlob(raw: string): Address {
   };
 }
 
-/** "60 EA" -> {quantity: "60", quantityUnit: "EA"}; "60" -> {quantity: "60"}. Mirrors the C# OcrEscriptParser.ApplyQuantity that this module supersedes. */
+/** Unit tokens that mean "no real unit" and should fold to undefined rather than being stored (branch brief: "quantityUnit fold Unspecified/Unit/EA/each -> undefined"). Normalized (lowercase, alnum only). */
+const QUANTITY_UNIT_FOLD = new Set(['unspecified', 'unit', 'ea', 'each']);
+
+/** "50.0000 Unspecified" -> {quantity: "50.0000"} (unit folded away); "20 EA" -> {quantity: "20"} (EA folds too); "60 TABLET" -> {quantity: "60", quantityUnit: "TABLET"}. Mirrors the C# OcrEscriptParser.ApplyQuantity that this module supersedes, extended per branch brief to fold PioneerRx's non-units. */
 function parseQuantity(raw: string): { quantity?: string; quantityUnit?: string } {
   const trimmed = raw.trim();
   if (!trimmed) return {};
-  const parts = trimmed.split(/\s+/, 2);
-  return { quantity: parts[0], quantityUnit: parts[1] };
+  const parts = trimmed.split(/\s+/);
+  const quantity = parts[0];
+  const unitRaw = parts.slice(1).join(' ').trim();
+  const quantityUnit = unitRaw && !QUANTITY_UNIT_FOLD.has(normalize(unitRaw)) ? unitRaw : undefined;
+  return { quantity, quantityUnit };
+}
+
+/** "1 (additional refills)" -> "1". Only the leading integer is trusted; any trailing descriptive text is dropped. Returns undefined if the value doesn't start with a number. */
+function parseRefills(raw: string): string | undefined {
+  const m = /^(\d+)/.exec(raw.trim());
+  return m ? m[1] : undefined;
 }
 
 /** Mirrors Models/EngineModels.cs SubstitutionsNotAllowed semantics — "not allowed"/DAW indicator => true; "allowed" => false; blank/ambiguous => undefined (never guessed). Checks "not allowed" before the bare "allowed" substring match. */
@@ -309,13 +433,39 @@ function parseSubstitutionsNotAllowed(raw: string | undefined): boolean | undefi
 // correct) label-geometry association. See class doc point 4.
 // ---------------------------------------------------------------------
 
-/** A bare (no punctuation) all-digit token of the given exact length, e.g. NPI=10, NDC=11. Deliberately requires the WHOLE word to be digits — a formatted phone number ("(555) 555-0100") keeps its punctuation in OCR text and will not collide with this. */
+/** A bare (no punctuation) all-digit token of the given exact length, e.g. NPI=10. Deliberately requires the WHOLE word to be digits — a formatted phone number ("(555) 555-0100") keeps its punctuation in OCR text and will not collide with this. */
 function findDigitToken(words: OcrWord[], length: number, exclude: Set<string>): string | null {
   for (const w of words) {
     const t = w.text.trim();
     if (t.length === length && /^\d+$/.test(t) && !exclude.has(t)) return t;
   }
   return null;
+}
+
+/** Real NDCs on the fixed e-script layout render DASHED (5-4-2 or similar, e.g. "00168-0203-60", "82619-0105-01") — v1 only looked for 11 bare digits and missed every one (branch brief defect #1). Matches either shape; the matched token (dashes included) is kept as-is per branch brief ("fine to keep the value as the matched token"). */
+const NDC_DASHED_RE = /^\d{4,5}-\d{3,4}-\d{1,2}$/;
+
+function findNdcToken(words: OcrWord[], exclude: Set<string>): string | null {
+  for (const w of words) {
+    const t = w.text.trim();
+    if (exclude.has(t)) continue;
+    if ((t.length === 11 && /^\d+$/.test(t)) || NDC_DASHED_RE.test(t)) return t;
+  }
+  return null;
+}
+
+/**
+ * Best-effort repair for a written/DOB date whose "/" between day and
+ * year got OCR-dropped, merging them into one run (branch brief defect
+ * #2, e.g. "07/022026" should be "07/02/2026"): re-splits a trailing
+ * 6-digit run into a 2-digit day + 4-digit year and re-inserts the "/".
+ * Returns null (no repair attempted) for anything that doesn't match
+ * this specific shape — never guesses beyond it.
+ */
+function repairMangledDate(raw: string): string | null {
+  const m = /^(\d{1,2})\/(\d{2})(\d{4})$/.exec(raw.trim());
+  if (!m) return null;
+  return `${m[1]}/${m[2]}/${m[3]}`;
 }
 
 // ---------------------------------------------------------------------
@@ -361,7 +511,10 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         continue;
       }
       labelOrder.push(match.label.key);
-      const remainderWords = stripLeadingColon(line.slice(match.consumed));
+      const remainderWordsRaw = stripLeadingColon(line.slice(match.consumed));
+      const remainderWords = NOISE_TRIM_KEYS.has(match.label.key)
+        ? trimValueNoise(remainderWordsRaw)
+        : remainderWordsRaw;
       const remainder = wordsToText(remainderWords);
       if (remainder) raw[match.label.key] = remainder;
     }
@@ -375,7 +528,8 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     missingLabels.forEach((key, i) => {
       const line = leftoverLines[i];
       if (line) {
-        const text = wordsToText(line);
+        const words = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(line) : line;
+        const text = wordsToText(words);
         if (text) raw[key] = text;
       }
     });
@@ -383,12 +537,14 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // ---- Pattern anchors: NPI / NDC, independent of any label ----
     // Per branch brief: NPI/NDC have no reliable label at all (or their
     // labeled slot can land on the wrong value after a block-layout
-    // shift) — anchor them purely by exact digit-count, searching every
-    // word in the recognized region.
+    // shift) — anchor them purely by exact digit-count/format, searching
+    // every word in the recognized region. NDC accepts either 11 bare
+    // digits or the dashed forms actually observed on the live layout
+    // (branch brief defect #1) — see findNdcToken.
     const usedDigitTokens = new Set<string>();
     const npi = findDigitToken(lines.flat(), 10, usedDigitTokens);
     if (npi) usedDigitTokens.add(npi);
-    const ndc = findDigitToken(lines.flat(), 11, usedDigitTokens);
+    const ndc = findNdcToken(lines.flat(), usedDigitTokens);
     if (ndc) usedDigitTokens.add(ndc);
 
     // ---- Date validation/correction for dob & written ----
@@ -406,17 +562,26 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     }
 
     function resolveDateField(current: string | undefined): string | undefined {
-      if (current && parseDate(current)) return current;
+      if (current) {
+        if (parseDate(current)) return current;
+        const repaired = repairMangledDate(current);
+        if (repaired && parseDate(repaired)) return repaired;
+      }
       for (const candidate of candidatePool) {
         if (claimedFromPool.has(candidate)) continue;
         if (parseDate(candidate)) {
           claimedFromPool.add(candidate);
           return candidate;
         }
+        const repaired = repairMangledDate(candidate);
+        if (repaired && parseDate(repaired)) {
+          claimedFromPool.add(candidate);
+          return repaired;
+        }
       }
-      // No label-associated value parsed as a date, and no unclaimed
-      // pool candidate does either — better to leave the field unset
-      // (surfaces as "not provided" in the engine) than to trust a
+      // No label-associated value parsed (or repaired) as a date, and no
+      // unclaimed pool candidate does either — better to leave the field
+      // unset (surfaces as "not provided" in the engine) than to trust a
       // value that doesn't look like a date at all (see branch brief's
       // "never associate a misassigned value" pattern-validation goal).
       return undefined;
@@ -446,6 +611,10 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       const q = parseQuantity(raw.quantity);
       if (q.quantity) record.quantity = q.quantity;
       if (q.quantityUnit) record.quantityUnit = q.quantityUnit;
+    }
+    if (raw.refills) {
+      const refills = parseRefills(raw.refills);
+      if (refills) record.refills = refills;
     }
 
     const prescriber: Prescriber = {};

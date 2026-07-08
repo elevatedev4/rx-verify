@@ -135,7 +135,10 @@ describe('parseEscriptOcr', () => {
     expect(record.drug?.name).toBe('Amoxicillin 500mg');
     expect(record.drug?.ndc).toBe('12345678901');
     expect(record.quantity).toBe('20');
-    expect(record.quantityUnit).toBe('EA');
+    // CHANGED expectation (branch brief): "EA" now folds to undefined —
+    // it's not a real unit on the live e-script layout, same as
+    // Unspecified/Unit/each. Was 'EA' before this branch.
+    expect(record.quantityUnit).toBeUndefined();
     expect(record.sig).toBe('TAKE 1 CAPSULE TWICE DAILY');
     expect(record.substitutionsNotAllowed).toBe(false);
   });
@@ -207,6 +210,147 @@ describe('parseEscriptOcr', () => {
     // 9-digit ZIP-shaped junk as a date.
     expect(record.patientDOB).toBe('07/01/2026');
     expect(record.dateWritten).toBeUndefined();
+  });
+
+  it('(f) [live-tuning fixture 1] dashed NDC, quantity/written/refills extraction, and label-noise boundaries — mirrors a real e-script capture (PHI replaced)', () => {
+    // SYNTHETIC — fabricated for this test, mirrors the shape of a real
+    // owner capture with the PHI replaced. Deliberately merges a couple
+    // of noise tokens onto the SAME row as an adjacent field's value (as
+    // observed on the live layout) to exercise the branch's noise-trim
+    // fix; every other field keeps the clean label-block/value-block
+    // shape from fixture (a).
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['Address:']),
+      row(140, ['DOB']),
+      row(160, ['Prescriber']),
+      row(180, ['Location:']),
+      row(200, ['Phone']),
+      row(220, ['Written']),
+      row(240, ['NDC']),
+      row(260, ['Medication']),
+      row(280, ['Quantity']),
+      row(300, ['Directions:']),
+      row(320, ['Refills']),
+      row(340, ['Substitutions'])
+    ];
+    const valueRows = [
+      // "/ Mab" bleed (branch brief defect #3, item 1) — "Mab" is
+      // pharmacy chrome that landed on the patient-name row.
+      row(360, ['Sample,', 'Pat', 'Q', 'Mab']),
+      row(380, ['100', 'MAPLE', 'ST', 'FAKETOWN', 'KS660000000']),
+      row(400, ['01/02/1970']),
+      // "Agent name" bleed (defect #3, item 2).
+      row(420, ['Demo,', 'Dana', 'Agent', 'name']),
+      // Trailing license number bleed (defect #3, item 3 variant) —
+      // must NOT end up glued into the parsed street/zip.
+      row(440, ['200', 'OAK', 'AVE', 'FAKETOWN,', 'KS', '660001111', '5380389']),
+      // "spr <SPI digits>" bleed (defect #3, item 3 as literally observed).
+      row(460, ['(555)', '555-0199', 'spr', '1526938475001']),
+      row(480, ['03/03/2026']),
+      // Dashed NDC (defect #1) — v1 missed this entirely.
+      row(500, ['00168-0203-60']),
+      row(520, ['CLINDAMYCIN', 'PHOSPHATE', '1%', 'LOTION']),
+      // "50.0000 Unspecified" (defect #2) — quantity + unit-fold.
+      row(540, ['50.0000', 'Unspecified']),
+      row(560, ['Apply', 'to', 'scalp', 'Externally', 'Twice', 'a', 'day', 'when', 'needed', 'for', 'flares']),
+      // "1 (additional refills)" (defect #2) — refills wasn't extracted
+      // at all in v1. The bare 10-digit NPI rides along on this same
+      // row (a plausible on-screen shape, per fixture (a)'s NPI-on-
+      // phone-row precedent) — parseRefills only reads the LEADING
+      // integer, so it doesn't interfere.
+      row(580, ['1', '(additional', 'refills)', '1234567890']),
+      row(600, ['Allowed'])
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Sample, Pat Q');
+    expect(record.patientAddress).toEqual({
+      street: '100 MAPLE ST',
+      city: 'FAKETOWN',
+      state: 'KS',
+      zip: '66000'
+    });
+    expect(record.patientDOB).toBe('01/02/1970');
+    // NOT "Demo, Dana Agent name".
+    expect(record.prescriber?.name).toBe('Demo, Dana');
+    // License number "5380389" must not be glued into the address.
+    expect(record.prescriber?.address).toEqual({
+      street: '200 OAK AVE',
+      city: 'FAKETOWN',
+      state: 'KS',
+      zip: '66000'
+    });
+    expect(record.prescriber?.npi).toBe('1234567890');
+    // NOT "(555) 555-0199 spr 1526938475001".
+    expect(record.prescriber?.phone).toBe('(555) 555-0199');
+    expect(record.dateWritten).toBe('03/03/2026');
+    // Dashed NDC recognized (bare-digit or dashed both acceptable; we
+    // keep the matched dashed token as-is per branch brief).
+    expect(record.drug?.ndc).toBe('00168-0203-60');
+    expect(record.drug?.name).toBe('CLINDAMYCIN PHOSPHATE 1% LOTION');
+    expect(record.quantity).toBe('50.0000');
+    expect(record.quantityUnit).toBeUndefined();
+    expect(record.sig).toBe('Apply to scalp Externally Twice a day when needed for flares');
+    expect(record.refills).toBe('1');
+    expect(record.substitutionsNotAllowed).toBe(false);
+  });
+
+  it('(g) [live-tuning fixture 2] messier capture: unit in address, mangled written date, mangled phone, alternate dashed NDC', () => {
+    // SYNTHETIC — messier variant per branch brief. Only asserting the
+    // critical numeric/dated fields resolve and that text fields don't
+    // absorb noise; the mangled phone's exact text isn't asserted (only
+    // that it doesn't corrupt other fields) since best-effort repair for
+    // it isn't in scope.
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['Address:']),
+      row(140, ['DOB']),
+      row(160, ['Prescriber']),
+      row(180, ['Location:']),
+      row(200, ['Phone']),
+      row(220, ['Written']),
+      row(240, ['NDC']),
+      row(260, ['Medication'])
+    ];
+    const valueRows = [
+      row(360, ['Roe,', 'Jamie', 'SN']),
+      row(380, ['500', 'ELM', 'ST', 'Suite', '202', 'FAKETOWN,', 'KS', '660009999']),
+      row(400, ['05/06/1985']),
+      row(420, ['Alt,', 'Robin']),
+      // NPI rides along on the location row (10-digit, trailing) — must
+      // still resolve even though it's noise for the address parse.
+      row(440, ['300', 'PINE', 'RD', 'FAKETOWN', 'KS', '660008888', '1234567890']),
+      // OCR-mangled phone (branch brief literal example) — not asserted
+      // exactly, just must not corrupt neighboring fields.
+      row(460, ['085)', '256-9632']),
+      // Mangled written date: missing "/" between day and year.
+      row(480, ['07/022026']),
+      // Alternate dashed NDC shape (5-4-2).
+      row(500, ['82619-0105-01']),
+      row(520, ['AMOXICILLIN', '500MG'])
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    // "SN" chrome bleed stripped from patient name.
+    expect(record.patientName).toBe('Roe, Jamie');
+    expect(record.patientAddress?.city).toBe('FAKETOWN');
+    expect(record.patientAddress?.state).toBe('KS');
+    expect(record.patientAddress?.zip).toBe('66000');
+    expect(record.patientDOB).toBe('05/06/1985');
+    expect(record.prescriber?.name).toBe('Alt, Robin');
+    // NPI still found by pure 10-digit pattern despite riding on the
+    // address row.
+    expect(record.prescriber?.npi).toBe('1234567890');
+    expect(record.prescriber?.phone).toBeDefined();
+    // Repaired mangled date: "07/022026" -> "07/02/2026".
+    expect(record.dateWritten).toBe('07/02/2026');
+    expect(record.drug?.ndc).toBe('82619-0105-01');
+    expect(record.drug?.name).toBe('AMOXICILLIN 500MG');
   });
 
   it('never throws on garbage/empty input and returns a blank record', () => {
