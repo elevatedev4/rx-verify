@@ -2,21 +2,56 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- .NET 8 WPF, Windows-only (UI Automation + WPF are Windows APIs). -->
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!--
+      VERIFY-OCR BRANCH (parallel to main's plain net8.0-windows): bumped
+      to a Windows-10 target platform moniker so this UNPACKAGED WPF app
+      can call the WinRT Windows.Media.Ocr API (Ocr/WindowsMediaOcrEngine.cs)
+      via Windows.Graphics.Imaging.SoftwareBitmap. The .NET SDK auto-adds
+      the WinRT projection reference (Microsoft.Windows.SDK.NET.dll /
+      WinRT.Runtime.dll) whenever TargetFramework carries a
+      "-windows10.0.xxxxx.0" suffix — no extra PackageReference needed for
+      that part. 19041.0 (Windows 10 2004) is comfortably below Will's
+      Windows 10/11 workstations and is a common, well-trodden TFM for
+      this exact "unpackaged desktop app calls WinRT OCR" pattern.
+
+      BUILD RISK TO WATCH (flagged per the branch brief — unverifiable on
+      this Mac): this project has never actually been built. The TFM bump
+      + implicit WinRT projection is a standard, widely-documented
+      pattern (Windows Community Toolkit / MS docs "call WinRT APIs in a
+      desktop app"), so confidence is MODERATE-HIGH, but the very first
+      `dotnet run` on Windows is the real test — if it doesn't restore/
+      build cleanly, the likely culprits are (a) TargetPlatformMinVersion
+      too low/high for the installed Windows SDK, or (b) needing an
+      explicit <UseWinRT>true</UseWinRT> (newer SDKs default this on
+      automatically for a windows10.x TFM, but if not, add it here).
+    -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      RootNamespace/AssemblyName deliberately UNCHANGED from main
+      (RxVerifyOverlay) — this is a separate branch, never built
+      alongside main, so renaming would only create churn that blocks
+      reconciling engine fixes between branches later. Window title +
+      an in-window "VerifyOCR" badge (MainWindow.xaml) are what
+      distinguish this build visually when run side-by-side with main.
+    -->
     <RootNamespace>RxVerifyOverlay</RootNamespace>
     <AssemblyName>RxVerifyOverlay</AssemblyName>
     <!-- Add <ApplicationIcon>Assets\rxverify.ico</ApplicationIcon> once you
          have a real icon file; omitted for v0 so the project builds as-is. -->
     <!--
-      This app reads the local screen (via UI Automation) and calls a
-      local Node subprocess. It never opens a socket, never calls a
-      remote API, and never writes PHI to disk except the optional
-      debug tree-dump file the pharmacist explicitly triggers. See
-      README.md "Local-only, by construction" for the full audit.
+      This app reads the local screen (via UI Automation AND, on this
+      branch, a screen-region OCR capture of the on-screen e-script image
+      — see Ocr/EscriptImageCapture.cs) and calls a local Node subprocess.
+      It never opens a socket, never calls a remote API. It now DOES write
+      one new local-only diagnostic log by construction (the OCR raw-text/
+      timing log, Ocr/OcrLogger.cs, %TEMP%\VerifyOCR\ocr-*.log) in addition
+      to the optional debug tree-dump file the pharmacist explicitly
+      triggers — both stay on the local workstation. See README.md
+      "Local-only, by construction" for the full audit.
     -->
   </PropertyGroup>
 
@@ -27,6 +62,16 @@
          Not-Focusable text nodes (see Uia/UiaTreeWalker.cs). -->
     <PackageReference Include="FlaUI.Core" Version="4.0.0" />
     <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+    <!--
+      System.Drawing.Common: Bitmap/Graphics.CopyFromScreen for the
+      no-tab-switch screen-region capture (Ocr/EscriptImageCapture.cs).
+      NOT part of the Microsoft.WindowsDesktop.App shared framework by
+      default on .NET 6+ even for WPF apps — must be referenced
+      explicitly. Works fine on Windows (the only place this branch ever
+      runs); this repo never targets non-Windows, so the "GDI+ only
+      works on Windows" caveat on this package doesn't apply here.
+    -->
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>
 
 </Project>

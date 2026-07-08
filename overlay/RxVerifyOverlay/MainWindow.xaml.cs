@@ -6,11 +6,12 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 using RxVerifyOverlay.Engine;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.ViewModels;
 
 namespace RxVerifyOverlay;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Window, IOverlayVisibilityController
 {
     private readonly OverlaySettings _settings;
     private EngineClient _engineClient;
@@ -53,11 +54,19 @@ public partial class MainWindow : Window
 
         _settings = OverlaySettings.Load();
         _engineClient = new EngineClient(_settings.EngineCliPath, _settings.NodeExecutable);
-        _viewModel = new OverlayViewModel(_engineClient);
+        _viewModel = new OverlayViewModel(_engineClient, _settings, overlayVisibilityController: this);
         DataContext = _viewModel;
 
         CliPathTextBox.Text = _settings.EngineCliPath;
         NodeExeTextBox.Text = _settings.NodeExecutable;
+
+        // VerifyOCR capture-region override — see Models/OverlaySettings.cs
+        // and MainWindow.xaml's "OCR capture region" section.
+        UseExplicitCaptureRegionCheckBox.IsChecked = _settings.UseExplicitCaptureRegion;
+        CaptureRegionLeftTextBox.Text = _settings.CaptureRegionLeft.ToString();
+        CaptureRegionTopTextBox.Text = _settings.CaptureRegionTop.ToString();
+        CaptureRegionWidthTextBox.Text = _settings.CaptureRegionWidth.ToString();
+        CaptureRegionHeightTextBox.Text = _settings.CaptureRegionHeight.ToString();
 
         // AUTO-WATCH (W-T9 item 5): a 1s tick calling OverlayViewModel.
         // WatchAsync, NOT a fixed "always do a full RefreshAsync every
@@ -193,15 +202,64 @@ public partial class MainWindow : Window
     {
         _settings.EngineCliPath = CliPathTextBox.Text.Trim();
         _settings.NodeExecutable = string.IsNullOrWhiteSpace(NodeExeTextBox.Text) ? "node" : NodeExeTextBox.Text.Trim();
+
+        // VerifyOCR capture-region override. Non-numeric/blank text boxes
+        // fall back to 0 (int.TryParse's default 'out' value) rather than
+        // throwing — an accidental bad value here just yields an
+        // empty/invalid region, which OcrFieldReader.ReadSourceFromOcrAsync
+        // already reports as a clear "capture region is empty" status
+        // message rather than crashing settings save.
+        _settings.UseExplicitCaptureRegion = UseExplicitCaptureRegionCheckBox.IsChecked == true;
+        int.TryParse(CaptureRegionLeftTextBox.Text, out var captureLeft);
+        int.TryParse(CaptureRegionTopTextBox.Text, out var captureTop);
+        int.TryParse(CaptureRegionWidthTextBox.Text, out var captureWidth);
+        int.TryParse(CaptureRegionHeightTextBox.Text, out var captureHeight);
+        _settings.CaptureRegionLeft = captureLeft;
+        _settings.CaptureRegionTop = captureTop;
+        _settings.CaptureRegionWidth = captureWidth;
+        _settings.CaptureRegionHeight = captureHeight;
+
         _settings.Save();
 
         // Rebuild the engine client with the new paths and rewire the
         // view model, since EngineClient's paths are immutable per
         // instance (see Engine/EngineClient.cs).
         _engineClient = new EngineClient(_settings.EngineCliPath, _settings.NodeExecutable);
-        _viewModel = new OverlayViewModel(_engineClient);
+        _viewModel = new OverlayViewModel(_engineClient, _settings, overlayVisibilityController: this);
         DataContext = _viewModel;
 
         MessageBox.Show(this, "Settings saved.", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    // ------------------------------------------------------------------
+    // IOverlayVisibilityController — see Ocr/IOverlayVisibilityController.cs
+    // and Uia/OcrFieldReader.cs's SELF-OCCLUSION GUARD doc. Called around
+    // EscriptImageCapture.CaptureRegion only, never during OCR itself.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Hides this window (Window.Hide() — Visibility=Hidden, same
+    /// mechanism WPF already uses, so no new behavior to reason about)
+    /// and then waits for the screen area it was covering to actually
+    /// repaint. Hiding a Topmost window is usually near-instant, but DWM
+    /// composition isn't guaranteed synchronous with the Visibility
+    /// change, so this yields to the Dispatcher at Render priority (lets
+    /// any pending layout/render pass flush) plus a short fixed delay
+    /// before returning — long enough to avoid a stale frame of the
+    /// overlay's own UI still being on screen when CaptureRegion runs,
+    /// short enough (~30ms) that the hide/show round-trip isn't a
+    /// noticeable flicker to the pharmacist.
+    /// </summary>
+    public async Task HideForCaptureAsync()
+    {
+        Hide();
+        await Dispatcher.Yield(DispatcherPriority.Render);
+        await Task.Delay(30);
+    }
+
+    /// <summary>Restores the overlay after a capture — called from OcrFieldReader's finally, so this always runs even if the capture itself threw.</summary>
+    public void RestoreAfterCapture()
+    {
+        Show();
     }
 }

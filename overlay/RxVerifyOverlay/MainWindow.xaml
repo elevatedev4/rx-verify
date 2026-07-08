@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:models="clr-namespace:RxVerifyOverlay.Models"
-        Title="Rx Verify"
+        Title="VerifyOCR"
         Width="420" Height="720"
         MinWidth="340" MinHeight="300"
         Topmost="True"
@@ -90,12 +90,28 @@
             <RowDefinition Height="Auto" /> <!-- Title -->
             <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
             <RowDefinition Height="Auto" /> <!-- W-T11 item 6: e-script notes, red text, only when present -->
+            <RowDefinition Height="Auto" /> <!-- VerifyOCR: OCR status line + raw-text expander -->
             <RowDefinition Height="Auto" /> <!-- Bottom bar: status message + Refresh/Dump/Auto-watch controls -->
             <RowDefinition Height="Auto" /> <!-- Settings (collapsible-ish, just always shown small in v0) -->
         </Grid.RowDefinitions>
 
-        <!-- Row 0: title only. The green/yellow/red summary count pills that used to live here were removed per Will's W-T9 item 2 feedback (not needed — the per-category header rollups below already convey this). -->
-        <TextBlock Grid.Row="0" Text="Rx Verify" Foreground="White" FontSize="16" FontWeight="Bold" Margin="0,0,0,4" />
+        <!--
+            Row 0: title + a small "VerifyOCR" badge so it's obvious which
+            build is running when this and the main Rx Verify overlay are
+            open side by side (this branch deliberately keeps the window
+            Title itself as the only OTHER identity marker — see
+            RxVerifyOverlay.csproj header for why namespace/assembly stay
+            unchanged). The green/yellow/red summary count pills that used
+            to live here were removed per Will's W-T9 item 2 feedback (not
+            needed — the per-category header rollups below already convey
+            this).
+        -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4" VerticalAlignment="Center">
+            <TextBlock Text="Rx Verify" Foreground="White" FontSize="16" FontWeight="Bold" />
+            <Border Background="#FF2E7D32" CornerRadius="3" Padding="5,1" Margin="6,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="VerifyOCR" Foreground="White" FontSize="10" FontWeight="Bold" />
+            </Border>
+        </StackPanel>
 
         <!--
             Row 1: compact grouped table — 4 categories (Patient /
@@ -361,7 +377,27 @@
         </Border>
 
         <!--
-            Row 3: BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
+            Row 3 (VerifyOCR): always-visible OCR timing/char-count status
+            line (branch brief item 3 — the headline diagnostic: proving
+            capture+OCR speed and letting Will judge text quality on his
+            real screen) plus a collapsed-by-default expander showing the
+            full raw OCR text from the last read. Ocr/OcrLogger.cs writes
+            the same numbers + full text to %TEMP%\VerifyOCR\ocr-*.log on
+            every read, for a permanent record — this is the live/
+            in-the-moment view of the same data.
+        -->
+        <StackPanel Grid.Row="3" Margin="0,0,0,4">
+            <TextBlock Text="{Binding OcrStatusText}" Foreground="#FF9CCC65" FontSize="10" TextWrapping="Wrap" />
+            <Expander Header="Raw OCR text (last read)" Foreground="#FFBBBBBB" FontSize="10" Margin="0,2,0,0">
+                <TextBox Text="{Binding LastOcrRawText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                         AcceptsReturn="True" MaxHeight="150" VerticalScrollBarVisibility="Auto"
+                         Background="#FF141414" Foreground="#FFDDDDDD" FontFamily="Consolas" FontSize="10"
+                         BorderBrush="#FF3A3A3A" Margin="0,2,0,0" Padding="4" />
+            </Expander>
+        </StackPanel>
+
+        <!--
+            Row 4: BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
             the Auto-watch checkbox, and the "last checked"/status text
             all moved down here from the old top toolbar, so the verdict
             list above gets the space and the pharmacist's eye starts on
@@ -370,7 +406,7 @@
             RefreshDrugFieldAsync) sits above the button row, both inside
             one bottom-anchored block.
         -->
-        <Border Grid.Row="3" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
+        <Border Grid.Row="4" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
             <StackPanel>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
                            TextWrapping="Wrap" Margin="0,0,0,4" />
@@ -392,8 +428,8 @@
             </StackPanel>
         </Border>
 
-        <!-- Row 4: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="4" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
+        <!-- Row 5: engine path settings, always visible in v0 (small footprint, no PHI) -->
+        <Expander Grid.Row="5" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">
@@ -407,6 +443,43 @@
 
                 <TextBlock Text="Node executable (usually just 'node'):" Foreground="#FFBBBBBB" FontSize="11" />
                 <TextBox x:Name="NodeExeTextBox" Padding="4" Margin="0,2,0,6" />
+
+                <!--
+                    VerifyOCR capture-region override (see
+                    Models/OverlaySettings.cs and
+                    Ocr/EscriptImageCapture.cs ResolveCaptureRegion).
+                    Default (unchecked) auto-detects the center Escript
+                    pane's on-screen bounds — this section only matters if
+                    that auto-detection doesn't land on the right part of
+                    Will's screen.
+                -->
+                <TextBlock Text="OCR capture region (advanced — leave unchecked to auto-detect the Escript pane):"
+                           Foreground="#FFBBBBBB" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap" />
+                <CheckBox x:Name="UseExplicitCaptureRegionCheckBox" Content="Use explicit region below" Foreground="#FFCCCCCC" Margin="0,2,0,4" />
+                <Grid Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Margin="0,0,3,0">
+                        <TextBlock Text="Left" Foreground="#FF888888" FontSize="9" />
+                        <TextBox x:Name="CaptureRegionLeftTextBox" Padding="4" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="3,0,3,0">
+                        <TextBlock Text="Top" Foreground="#FF888888" FontSize="9" />
+                        <TextBox x:Name="CaptureRegionTopTextBox" Padding="4" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Margin="3,0,3,0">
+                        <TextBlock Text="Width" Foreground="#FF888888" FontSize="9" />
+                        <TextBox x:Name="CaptureRegionWidthTextBox" Padding="4" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="3" Margin="3,0,0,0">
+                        <TextBlock Text="Height" Foreground="#FF888888" FontSize="9" />
+                        <TextBox x:Name="CaptureRegionHeightTextBox" Padding="4" />
+                    </StackPanel>
+                </Grid>
 
                 <Button Content="Save settings" HorizontalAlignment="Left" Click="OnSaveSettingsClick" />
             </StackPanel>
