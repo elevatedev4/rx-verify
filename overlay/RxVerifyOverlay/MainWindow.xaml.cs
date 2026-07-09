@@ -22,6 +22,16 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // OnAutoRefreshToggled's null guard.
     private readonly DispatcherTimer? _autoRefreshTimer;
 
+    // Defensive suppression flag, same pattern as _autoRefreshTimer's
+    // null guard below: InitializeComponent() can raise Checked for the
+    // XAML-default IsChecked="True" on MethodOcrRadioButton before
+    // _settings/_viewModel exist, and the constructor also programmatically
+    // sets IsChecked once _settings is loaded (which raises Checked
+    // again). Both must be no-ops — OnMethodChanged should only react to
+    // an actual user click. Starts true and is flipped to false at the
+    // very end of the constructor, once real initialization is done.
+    private bool _suppressMethodChangeHandler = true;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -68,6 +78,16 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             if (!string.IsNullOrWhiteSpace(resolved))
             {
                 _settings.EngineCliPath = resolved;
+
+                // Persist immediately so settings.json carries the
+                // resolved path going forward — the whole point of
+                // "preset" is that the user never has to touch this
+                // (see Models/OverlaySettings.cs ResolveDefaultCliPath
+                // doc). If the resolver instead returns "" (engine not
+                // built yet), we leave EngineCliPath blank and don't
+                // write anything — the next launch after `npm run
+                // build` creates dist/cli.js resolves it then.
+                _settings.Save();
             }
         }
 
@@ -77,6 +97,21 @@ public partial class MainWindow : Window, IOverlayVisibilityController
 
         CliPathTextBox.Text = _settings.EngineCliPath;
         NodeExeTextBox.Text = _settings.NodeExecutable;
+
+        // Verification method toggle — reflect the saved/default setting
+        // in the radio buttons (default is Ocr, see Models/
+        // OverlaySettings.cs VerificationMethod) without treating this as
+        // a user-driven change (see _suppressMethodChangeHandler doc).
+        if (_settings.Method == VerificationMethod.Uia)
+        {
+            MethodUiaRadioButton.IsChecked = true;
+        }
+        else
+        {
+            MethodOcrRadioButton.IsChecked = true;
+        }
+        UpdateMethodBadge();
+        _suppressMethodChangeHandler = false;
 
         // VerifyOCR capture-region override — see Models/OverlaySettings.cs
         // and MainWindow.xaml's "OCR capture region" section.
@@ -169,6 +204,37 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         {
             _autoRefreshTimer.Stop();
         }
+    }
+
+    /// <summary>
+    /// Verification-method toggle (Step 5: combine "Verify"/"VerifyOCR"
+    /// into one app, runtime-selectable). Fires on either RadioButton's
+    /// Checked event; the OTHER one's Unchecked also fires but we only
+    /// need one handler since GroupName guarantees exactly one is
+    /// checked at a time. Saves settings and kicks off an immediate
+    /// RefreshAsync so switching takes effect right away rather than
+    /// waiting for the next auto-watch tick.
+    /// </summary>
+    private async void OnMethodChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppressMethodChangeHandler) return;
+
+        var newMethod = MethodUiaRadioButton.IsChecked == true ? VerificationMethod.Uia : VerificationMethod.Ocr;
+        if (_settings.Method == newMethod) return;
+
+        _settings.Method = newMethod;
+        _settings.Save();
+        UpdateMethodBadge();
+
+        await SafeRefreshAsync();
+    }
+
+    /// <summary>Reflects the active verification method in the window title and the small badge next to "Rx Verify" (MethodBadgeText) — called on startup and every OnMethodChanged.</summary>
+    private void UpdateMethodBadge()
+    {
+        var label = _settings.Method == VerificationMethod.Uia ? "Escript tab" : "OCR";
+        MethodBadgeText.Text = label;
+        Title = $"Rx Verify — {label}";
     }
 
     private void OnDumpTreeClick(object sender, RoutedEventArgs e)

@@ -347,8 +347,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         PrescriptionRecord entered;
         try
         {
-            // ENTERED side unchanged: still UIA/AutomationId via
-            // FieldReader (see Uia/FieldReader.cs ReadEntered).
+            // ENTERED side unchanged regardless of Method: still
+            // UIA/AutomationId via FieldReader (see Uia/FieldReader.cs
+            // ReadEntered).
             reader = new FieldReader(window);
             entered = reader.ReadEntered();
         }
@@ -358,9 +359,25 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
-        // SOURCE side (VerifyOCR): screen-region capture + local OCR,
-        // NO tab switch — replaces FieldReader.ReadSource()'s Escript-tab
-        // UIA-tree walk entirely. See Uia/OcrFieldReader.cs.
+        // SOURCE side branches on _settings.Method (runtime-selectable —
+        // see MainWindow.xaml's method toggle and Models/OverlaySettings.
+        // cs VerificationMethod). Ocr is the default: screen-region
+        // capture + local OCR, no tab switch. Uia reads the Escript
+        // tab's structured UIA tree directly (the original "Verify"
+        // behavior, pre-VerifyOCR).
+        if (_settings.Method == VerificationMethod.Uia)
+        {
+            await RefreshFromUiaAsync(reader, entered, generation);
+        }
+        else
+        {
+            await RefreshFromOcrAsync(window, entered, generation);
+        }
+    }
+
+    /// <summary>OCR source path — screen-region capture + local OCR, NO tab switch. Replaces FieldReader.ReadSource()'s Escript-tab UIA-tree walk entirely. See Uia/OcrFieldReader.cs.</summary>
+    private async Task RefreshFromOcrAsync(PioneerRxWindow window, PrescriptionRecord entered, int generation)
+    {
         var ocrResult = await _ocrFieldReader.ReadSourceFromOcrAsync(window, _settings, _overlayVisibilityController);
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting OCR
@@ -422,6 +439,62 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // for the staleness guard against a newer refresh superseding
         // this one before it resolves.
         _ = RefreshDrugFieldAsync(ocrWords, entered, generation);
+    }
+
+    /// <summary>UIA source path — reads the Escript tab's structured UIA tree directly via FieldReader.ReadSource() (the original "Verify" behavior). No OCR/screen capture involved.</summary>
+    private async Task RefreshFromUiaAsync(FieldReader reader, PrescriptionRecord entered, int generation)
+    {
+        // OCR is inert in this mode — no capture/OCR ever runs, so this
+        // just tells the pharmacist which mode is active instead of
+        // showing stale/misleading OCR timing text.
+        OcrStatusText = "OCR off — reading Escript tab directly";
+        LastOcrRawText = "";
+
+        PrescriptionRecord source;
+        try
+        {
+            source = reader.ReadSource();
+            UpdateNotes(reader.SourceNotes);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"UIA source read failed: {ex.Message}. Try 'Dump UIA Tree' to diagnose.";
+            ClearCategories();
+            UpdateSummary(null);
+            return;
+        }
+
+        if (!reader.IsStructuredSourceAvailable(source))
+        {
+            // Mirrors the OCR path's "not usable" branch above: a clear
+            // status message + cleared categories rather than a
+            // half-populated/misleading table.
+            StatusMessage = reader.SourceUnavailableReason ?? "Open the Escript tab to verify this e-script.";
+            ClearCategories();
+            UpdateSummary(null);
+            return;
+        }
+
+        // Phase 1: fast pass, skips the drug lookup entirely — same
+        // two-phase shape as the OCR path, just with a PrescriptionRecord
+        // source instead of raw OCR words (see Engine/EngineClient.cs
+        // VerifyAsync(PrescriptionRecord, ...)).
+        var fastResult = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: true);
+
+        if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
+
+        if (!string.IsNullOrEmpty(fastResult.Error))
+        {
+            StatusMessage = fastResult.Error;
+            return;
+        }
+
+        PopulateRows(fastResult);
+        UpdateSummary(fastResult.Summary);
+        StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}. Drug lookup running…";
+
+        // Phase 2: NOT awaited — see RefreshFromOcrAsync's identical note.
+        _ = RefreshDrugFieldAsync(source, entered, generation);
     }
 
     /// <summary>
@@ -566,6 +639,43 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
+        ApplyDrugResult(result, generation);
+    }
+
+    /// <summary>
+    /// UIA-mode counterpart to the OcrWord overload above — same
+    /// two-phase drug lookup, just re-running verify() with the
+    /// structured PrescriptionRecord source instead of raw OCR words
+    /// (see Engine/EngineClient.cs VerifyAsync(PrescriptionRecord, ...)).
+    /// Shares ApplyDrugResult with the OCR overload so the two phase-2
+    /// paths can never drift on how a VerifyResult becomes the updated
+    /// drug row.
+    /// </summary>
+    private async Task RefreshDrugFieldAsync(PrescriptionRecord source, PrescriptionRecord entered, int generation)
+    {
+        VerifyResult result;
+        try
+        {
+            result = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: false);
+        }
+        catch (Exception ex)
+        {
+            if (generation == _refreshGeneration) StatusMessage = $"Drug lookup failed: {ex.Message}";
+            return;
+        }
+
+        ApplyDrugResult(result, generation);
+    }
+
+    /// <summary>
+    /// Common Phase-2 apply logic for both RefreshDrugFieldAsync
+    /// overloads: replaces only the "drug" row (and its category rollup
+    /// + overall summary) from a freshly-resolved VerifyResult, dropping
+    /// the result entirely if a newer refresh has since superseded this
+    /// one (see _refreshGeneration doc).
+    /// </summary>
+    private void ApplyDrugResult(VerifyResult result, int generation)
+    {
         if (generation != _refreshGeneration) return; // a newer refresh superseded this one — drop the stale result
 
         if (!string.IsNullOrEmpty(result.Error))

@@ -1,8 +1,22 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace RxVerifyOverlay.Models;
+
+/// <summary>
+/// Which source-reading path RefreshAsync uses (see
+/// ViewModels/OverlayViewModel.cs RefreshAsync). Ocr is the default —
+/// screen-capture + local OCR of the Escript tab, no tab switch. Uia
+/// reads the Escript tab's structured UIA tree directly (the original
+/// "Verify" behavior, pre-VerifyOCR).
+/// </summary>
+public enum VerificationMethod
+{
+    Ocr,
+    Uia
+}
 
 /// <summary>
 /// The two paths every workstation setup needs, persisted locally so
@@ -13,6 +27,16 @@ namespace RxVerifyOverlay.Models;
 /// </summary>
 public sealed class OverlaySettings
 {
+    /// <summary>
+    /// Which source-reading path to use — see VerificationMethod doc.
+    /// Serialized as a STRING (e.g. "Ocr"/"Uia") rather than a raw int so
+    /// settings.json stays human-readable, and an old settings file
+    /// written before this field existed deserializes with the default
+    /// (Ocr) rather than failing.
+    /// </summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public VerificationMethod Method { get; set; } = VerificationMethod.Ocr;
+
     /// <summary>
     /// Full path to rx-verify's compiled CLI entrypoint, e.g.
     /// "C:\Users\will\claude\rx-verify\dist\cli.js". See rx-verify's

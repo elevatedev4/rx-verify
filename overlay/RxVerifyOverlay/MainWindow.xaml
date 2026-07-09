@@ -88,6 +88,7 @@
     <Grid Margin="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" /> <!-- Title -->
+            <RowDefinition Height="Auto" /> <!-- Verification method toggle (OCR default / Escript tab direct read) -->
             <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
             <RowDefinition Height="Auto" /> <!-- W-T11 item 6: e-script notes, red text, only when present -->
             <RowDefinition Height="Auto" /> <!-- VerifyOCR: OCR status line + raw-text expander -->
@@ -109,12 +110,32 @@
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4" VerticalAlignment="Center">
             <TextBlock Text="Rx Verify" Foreground="White" FontSize="16" FontWeight="Bold" />
             <Border Background="#FF2E7D32" CornerRadius="3" Padding="5,1" Margin="6,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="VerifyOCR" Foreground="White" FontSize="10" FontWeight="Bold" />
+                <TextBlock x:Name="MethodBadgeText" Text="OCR" Foreground="White" FontSize="10" FontWeight="Bold" />
             </Border>
         </StackPanel>
 
         <!--
-            Row 1: compact grouped table — 4 categories (Patient /
+            Row 1: runtime source-method toggle (main task: combine
+            "Verify" (UIA/Escript-tab read) and "VerifyOCR" (screen-OCR
+            read) into one app where the pharmacist picks at runtime).
+            OCR stays the default (see Models/OverlaySettings.cs
+            VerificationMethod). Switching immediately saves settings and
+            triggers a fresh RefreshAsync (see OnMethodChanged in
+            MainWindow.xaml.cs) so the change takes effect right away
+            instead of waiting for the next auto-watch tick. The active
+            method is also reflected in the badge above (MethodBadgeText).
+        -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="Source:" Foreground="#FF888888" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <RadioButton x:Name="MethodOcrRadioButton" GroupName="VerificationMethod" Content="OCR (default)"
+                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Margin="0,0,10,0"
+                         IsChecked="True" Checked="OnMethodChanged" />
+            <RadioButton x:Name="MethodUiaRadioButton" GroupName="VerificationMethod" Content="Escript tab (direct read)"
+                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Checked="OnMethodChanged" />
+        </StackPanel>
+
+        <!--
+            Row 2: compact grouped table — 4 categories (Patient /
             Prescriber / Rx / Sig, see Models/EngineModels.cs
             FieldCategories), each with a rolled-up status header
             (worst-status-wins: any Red field -> Red header, else any
@@ -138,7 +159,7 @@
             toolbar/status controls that used to live above it moved to
             the bottom bar below (W-T9 item 1).
         -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -355,7 +376,7 @@
             (the common case) shows nothing here at all — no empty red
             box.
         -->
-        <Border Grid.Row="2" Margin="0,4,0,0" Padding="0,0,0,4">
+        <Border Grid.Row="3" Margin="0,4,0,0" Padding="0,0,0,4">
             <Border.Style>
                 <Style TargetType="Border">
                     <Setter Property="Visibility" Value="Collapsed" />
@@ -386,7 +407,7 @@
             every read, for a permanent record — this is the live/
             in-the-moment view of the same data.
         -->
-        <StackPanel Grid.Row="3" Margin="0,0,0,4">
+        <StackPanel Grid.Row="4" Margin="0,0,0,4">
             <TextBlock Text="{Binding OcrStatusText}" Foreground="#FF9CCC65" FontSize="10" TextWrapping="Wrap" />
             <Expander Header="Raw OCR text (last read)" Foreground="#FFBBBBBB" FontSize="10" Margin="0,2,0,0">
                 <TextBox Text="{Binding LastOcrRawText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
@@ -406,7 +427,7 @@
             RefreshDrugFieldAsync) sits above the button row, both inside
             one bottom-anchored block.
         -->
-        <Border Grid.Row="4" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
+        <Border Grid.Row="5" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
             <StackPanel>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
                            TextWrapping="Wrap" Margin="0,0,0,4" />
@@ -429,7 +450,7 @@
         </Border>
 
         <!-- Row 5: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="5" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
+        <Expander Grid.Row="6" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">
