@@ -9,6 +9,9 @@
  *
  * Input (stdin): a single JSON object
  *   { "source": ScriptData, "entered": EnteredData }
+ * or (VerifyOCR v1 — see src/ocr/parseEscriptOcr.ts):
+ *   { "ocr": OcrWord[], "entered": EnteredData }
+ * ("source" is ignored if "ocr" is also present.)
  *
  * Output (stdout): a single JSON object, VerifyResult —
  *   { "verdicts": FieldVerdict[], "summary": VerifySummary }
@@ -34,13 +37,30 @@
 import { verify } from './engine/index.js';
 import { LocalNdcProvider, type RxNormProvider } from './drug/index.js';
 import type { ScriptData, EnteredData } from './types.js';
+import { parseEscriptOcr, type OcrWord } from './ocr/parseEscriptOcr.js';
 
 /** Never consulted when skipDrugLookup is true (verify() skips compareDrugs entirely in that mode) — exists only so a provider value is always available to pass, without paying LocalNdcProvider's dataset-load cost. */
 const NULL_PROVIDER: RxNormProvider = { getConcept: () => null };
 
 interface CliInput {
-  source: ScriptData;
+  /**
+   * Required unless `ocr` is present (see CliInput.ocr below and the
+   * validation in main()) — kept for backward-compat with the original
+   * UIA-tree-read version of the overlay, which always sends a fully
+   * structured `source` itself.
+   */
+  source?: ScriptData;
   entered: EnteredData;
+  /**
+   * VerifyOCR v1: raw, position-aware OCR words (word + on-screen
+   * bounding box) captured off the on-screen e-script pane — see
+   * src/ocr/parseEscriptOcr.ts. When present, `source` is DERIVED from
+   * this (via parseEscriptOcr) and any `source` value also sent is
+   * ignored; when absent, the existing `source`-based path is used
+   * unchanged (see overlay/RxVerifyOverlay/Uia/OcrFieldReader.cs, which
+   * now sends `ocr` instead of a pre-parsed `source`).
+   */
+  ocr?: OcrWord[];
   /**
    * See VerifyOptions.skipDrugLookup (src/engine/index.ts). When true,
    * this process never constructs LocalNdcProvider at all — that's the
@@ -78,18 +98,27 @@ async function main(): Promise<void> {
   if (
     typeof parsed !== 'object' ||
     parsed === null ||
-    !('source' in parsed) ||
-    !('entered' in parsed)
+    !('entered' in parsed) ||
+    !('source' in parsed || 'ocr' in parsed)
   ) {
-    throw new Error('Input JSON must be an object with "source" and "entered" keys.');
+    throw new Error('Input JSON must be an object with ("source" or "ocr") and "entered" keys.');
   }
 
-  const { source, entered, skipDrugLookup } = parsed as CliInput;
+  const { source, entered, ocr, skipDrugLookup } = parsed as CliInput;
+  // VerifyOCR v1: when structured OCR words are provided, parse them
+  // into the source record ourselves (see src/ocr/parseEscriptOcr.ts)
+  // instead of trusting a pre-parsed `source` — the whole point of this
+  // path is that OCR label/value association is safety-critical enough
+  // to live here, tested, rather than in the untestable C# OCR string
+  // parser it replaces. Any `source` also sent alongside `ocr` is
+  // ignored.
+  const resolvedSource = ocr ? parseEscriptOcr(ocr) : (source as ScriptData);
+
   // Only pay the LocalNdcProvider construction cost (dataset load +
   // gunzip) when a real drug lookup is actually going to happen — see
   // CliInput.skipDrugLookup doc above.
   const provider = skipDrugLookup ? NULL_PROVIDER : new LocalNdcProvider();
-  const result = verify(source, entered, provider, { skipDrugLookup });
+  const result = verify(resolvedSource, entered, provider, { skipDrugLookup });
 
   process.stdout.write(JSON.stringify(result));
 }

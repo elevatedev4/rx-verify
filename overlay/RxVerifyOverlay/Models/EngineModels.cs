@@ -84,6 +84,25 @@ public sealed class PrescriptionRecord
     public bool? Daw { get; set; }
 }
 
+/// <summary>
+/// One OCR-recognized word plus its on-screen bounding box (screen
+/// pixels, origin top-left). Mirrors rx-verify's src/ocr/parseEscriptOcr.ts
+/// OcrWord exactly (field-for-field, camelCase on the wire via
+/// EngineClient's JsonSerializerOptions) — that TS module is what
+/// actually turns a list of these into a PrescriptionRecord; this class
+/// only exists to round-trip the same shape through JSON. See
+/// Ocr/WindowsMediaOcrEngine.cs for how these are produced from
+/// Windows.Media.Ocr's own OcrWord/BoundingRect.
+/// </summary>
+public sealed class OcrWord
+{
+    public string Text { get; set; } = "";
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double W { get; set; }
+    public double H { get; set; }
+}
+
 /// <summary>Request body sent to verify-cli on stdin: { source, entered, skipDrugLookup }.</summary>
 public sealed class VerifyCliRequest
 {
@@ -100,6 +119,24 @@ public sealed class VerifyCliRequest
     /// render every other field immediately without waiting on the drug
     /// lookup — see ViewModels/OverlayViewModel.cs RefreshAsync.
     /// </summary>
+    public bool SkipDrugLookup { get; set; }
+}
+
+/// <summary>
+/// VerifyOCR v1 request body: { ocr, entered, skipDrugLookup } — sent
+/// instead of VerifyCliRequest whenever the SOURCE side came from OCR.
+/// No Source property at all: src/cli.ts derives source from Ocr itself
+/// (see src/ocr/parseEscriptOcr.ts) — parsing the label/value
+/// association from raw OCR words is safety-critical enough to live in
+/// the tested TS engine, not here. See Engine/EngineClient.cs
+/// VerifyAsync(IReadOnlyList&lt;OcrWord&gt;, ...).
+/// </summary>
+public sealed class VerifyOcrCliRequest
+{
+    public List<OcrWord> Ocr { get; set; } = new();
+    public PrescriptionRecord Entered { get; set; } = new();
+
+    /// <summary>Same meaning as VerifyCliRequest.SkipDrugLookup above.</summary>
     public bool SkipDrugLookup { get; set; }
 }
 

@@ -27,7 +27,7 @@ public class OverlaySettingsResolveDefaultCliPathTests
 
             // Mirrors the real layout: <repoRoot>/overlay/RxVerifyOverlay/bin/<cfg>/<tfm>/
             var deepDir = Directory.CreateDirectory(
-                Path.Combine(root.FullName, "overlay", "RxVerifyOverlay", "bin", "Debug", "net8.0-windows"));
+                Path.Combine(root.FullName, "overlay", "RxVerifyOverlay", "bin", "Debug", "net8.0-windows10.0.19041.0"));
 
             var resolved = OverlaySettings.ResolveDefaultCliPath(deepDir.FullName);
 
@@ -46,7 +46,7 @@ public class OverlaySettingsResolveDefaultCliPathTests
         try
         {
             var deepDir = Directory.CreateDirectory(
-                Path.Combine(root.FullName, "overlay", "RxVerifyOverlay", "bin", "Debug", "net8.0-windows"));
+                Path.Combine(root.FullName, "overlay", "RxVerifyOverlay", "bin", "Debug", "net8.0-windows10.0.19041.0"));
 
             var resolved = OverlaySettings.ResolveDefaultCliPath(deepDir.FullName);
 

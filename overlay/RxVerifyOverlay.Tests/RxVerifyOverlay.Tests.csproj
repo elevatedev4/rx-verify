@@ -2,20 +2,29 @@
 
   <PropertyGroup>
     <!--
-      Matches the main project's TFM (net8.0-windows) so the project
-      reference below resolves cleanly. Nothing in these tests actually
-      touches WPF or FlaUI/UIA — they exercise EscriptTreeParser only,
-      which is a pure, UIA-free class (see Parsing/EscriptNode.cs /
-      EscriptTreeParser.cs) — so this should also be runnable from a CI
-      agent that isn't Windows, as long as the net8.0-windows workload/
-      pack is available; if that turns out not to be the case, dropping
-      the "-windows" suffix here (and adding a matching net8.0 target to
-      the main project, or moving EscriptNode/EscriptTreeParser into a
-      separate plain-net8.0 class library) is the fix — not attempted
-      here since dotnet wasn't available in the sandbox this was written
-      in to verify either way.
+      MUST match the main project's TFM exactly (not just the "-windows"
+      suffix): NuGet's OS-versioned-TFM compatibility is directional — a
+      project targeting a LOWER-versioned platform TFM (net8.0-windows,
+      implicitly windows7.0) cannot reference one targeting a HIGHER
+      one (net8.0-windows10.0.19041.0), and fails restore with NU1201
+      "not compatible". VerifyOCR's main project bumped to
+      net8.0-windows10.0.19041.0 (see RxVerifyOverlay.csproj's header —
+      needed for the unpackaged WinRT Windows.Media.Ocr call), so this
+      Tests project has to follow it exactly, including the matching
+      TargetPlatformMinVersion, or `dotnet build`/`dotnet test` breaks
+      for the whole solution.
+
+      Nothing in these tests actually touches WPF/WinRT/FlaUI/UIA
+      directly — they exercise EscriptTreeParser and other pure
+      UIA/WinRT-free classes (see Parsing/EscriptNode.cs /
+      EscriptTreeParser.cs). OcrEscriptParser.cs (and its tests) was
+      RETIRED on the VerifyOCR v1 branch — OCR label/value parsing now
+      lives in rx-verify's TS engine (src/ocr/parseEscriptOcr.ts,
+      vitest-tested there instead). The ProjectReference below still
+      forces this TFM match regardless of what the tests themselves use.
     -->
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>

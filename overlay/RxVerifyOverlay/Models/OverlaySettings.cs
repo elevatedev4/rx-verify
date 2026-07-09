@@ -23,6 +23,30 @@ public sealed class OverlaySettings
     /// <summary>Path to node.exe, or just "node" if it's on PATH (the common case).</summary>
     public string NodeExecutable { get; set; } = "node";
 
+    /// <summary>
+    /// VerifyOCR capture-region override (see Ocr/EscriptImageCapture.cs
+    /// ResolveCaptureRegion). False (the default) means "auto": use the
+    /// center Escript pane's live on-screen bounds (AutomationId
+    /// cntTabControl), falling back to the whole PioneerRx window if that
+    /// can't be found. Set true and fill in the four fields below only if
+    /// auto-detection doesn't land on the right part of Will's screen —
+    /// exposed via MainWindow.xaml's "Engine settings" expander, same
+    /// place as the CLI/node paths.
+    /// </summary>
+    public bool UseExplicitCaptureRegion { get; set; }
+
+    /// <summary>Screen X of the top-left corner of the capture region, in pixels — only used when UseExplicitCaptureRegion is true.</summary>
+    public int CaptureRegionLeft { get; set; }
+
+    /// <summary>Screen Y of the top-left corner of the capture region, in pixels — only used when UseExplicitCaptureRegion is true.</summary>
+    public int CaptureRegionTop { get; set; }
+
+    /// <summary>Capture region width in pixels — only used when UseExplicitCaptureRegion is true.</summary>
+    public int CaptureRegionWidth { get; set; }
+
+    /// <summary>Capture region height in pixels — only used when UseExplicitCaptureRegion is true.</summary>
+    public int CaptureRegionHeight { get; set; }
+
     private static string SettingsFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "settings.json");
 

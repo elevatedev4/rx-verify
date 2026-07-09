@@ -82,6 +82,31 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
     expect(drugVerdict.enteredValue).toBe('Clindamycin Phosp 1% Lotion');
   }, 15000);
 
+  it('derives source from "ocr" words (VerifyOCR v1 path) when present, ignoring any "source" also sent', async () => {
+    // SYNTHETIC data only. One-label-per-line OCR words for a minimal
+    // record — proves cli.ts wires src/ocr/parseEscriptOcr.ts in ahead of
+    // verify(), and that a stray "source" alongside "ocr" is ignored.
+    const ocr = [
+      { text: 'Patient:', x: 0, y: 0, w: 80, h: 18 },
+      { text: 'Noise,', x: 90, y: 0, w: 80, h: 18 },
+      { text: 'Test', x: 180, y: 0, w: 80, h: 18 }
+    ];
+    const input = JSON.stringify({
+      source: { patientName: 'This should be ignored' },
+      ocr,
+      entered: { patientName: 'Noise, Test' },
+      skipDrugLookup: true
+    });
+
+    const { stdout, code } = await runCli(input);
+    const result = JSON.parse(stdout);
+
+    expect(code).toBe(0);
+    const nameVerdict = result.verdicts.find((v: any) => v.field === 'patientName');
+    expect(nameVerdict.status).toBe('green');
+    expect(nameVerdict.sourceValue).toBe('Noise, Test');
+  }, 15000);
+
   it('reports an error object + non-zero exit on invalid JSON', async () => {
     const { stdout, code } = await runCli('not json');
     const result = JSON.parse(stdout);

@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using RxVerifyOverlay.Engine;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.Uia;
 
 namespace RxVerifyOverlay.ViewModels;
@@ -212,9 +213,35 @@ public static class CategoryRollup
 public sealed class OverlayViewModel : INotifyPropertyChanged
 {
     private readonly EngineClient _engineClient;
+    private readonly OverlaySettings _settings;
+    private readonly OcrFieldReader _ocrFieldReader;
+    private readonly IOverlayVisibilityController? _overlayVisibilityController;
 
     /// <summary>The 3 categories, always in FieldCategories.Order — MainWindow.xaml binds directly to this.</summary>
     public ObservableCollection<CategoryViewModel> Categories { get; } = new();
+
+    /// <summary>
+    /// VerifyOCR headline diagnostic (branch brief item 3): "OCR: &lt;total&gt;ms
+    /// · &lt;chars&gt; chars" after every OCR source read, or an error
+    /// summary on failure — always visible in MainWindow.xaml so Will can
+    /// judge speed/quality on his real screen without digging into the
+    /// log file (Ocr/OcrLogger.cs has the same numbers plus the full raw
+    /// text, for a permanent record).
+    /// </summary>
+    private string _ocrStatusText = "OCR: not read yet.";
+    public string OcrStatusText
+    {
+        get => _ocrStatusText;
+        private set { _ocrStatusText = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Full raw OCR text from the most recent source read — bound to the "Raw OCR text" expander in MainWindow.xaml so Will can eyeball text quality live, not just in the log file.</summary>
+    private string _lastOcrRawText = "";
+    public string LastOcrRawText
+    {
+        get => _lastOcrRawText;
+        private set { _lastOcrRawText = value; OnPropertyChanged(); }
+    }
 
     /// <summary>
     /// E-script free-text notes (item 6, NCPDP Note element — see
@@ -261,9 +288,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private int _refreshGeneration;
 
-    public OverlayViewModel(EngineClient engineClient)
+    public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
     {
         _engineClient = engineClient;
+        _settings = settings;
+        _overlayVisibilityController = overlayVisibilityController;
+        _ocrFieldReader = ocrFieldReader ?? new OcrFieldReader();
 
         // Categories are created once, in fixed display order, and their
         // Rows are cleared/repopulated on every refresh below — never
@@ -315,13 +345,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         FieldReader reader;
         PrescriptionRecord entered;
-        PrescriptionRecord source;
         try
         {
+            // ENTERED side unchanged: still UIA/AutomationId via
+            // FieldReader (see Uia/FieldReader.cs ReadEntered).
             reader = new FieldReader(window);
             entered = reader.ReadEntered();
-            source = reader.ReadSource();
-            UpdateNotes(reader.SourceNotes);
         }
         catch (Exception ex)
         {
@@ -329,20 +358,51 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (!reader.IsStructuredSourceAvailable(source))
+        // SOURCE side (VerifyOCR): screen-region capture + local OCR,
+        // NO tab switch — replaces FieldReader.ReadSource()'s Escript-tab
+        // UIA-tree walk entirely. See Uia/OcrFieldReader.cs.
+        var ocrResult = await _ocrFieldReader.ReadSourceFromOcrAsync(window, _settings, _overlayVisibilityController);
+
+        if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting OCR
+
+        LastOcrRawText = ocrResult.RawText;
+        OcrStatusText = ocrResult.Error is not null
+            ? $"OCR: error — {ocrResult.Error}"
+            : $"OCR: {ocrResult.TotalMs}ms (capture {ocrResult.CaptureMs}ms + ocr {ocrResult.OcrMs}ms) · {ocrResult.CharCount} chars";
+
+        if (ocrResult.Error is not null)
         {
-            // Replaces the old (wrong) fax/scanned-image heuristic: the
-            // real gate is whether the Escript tab's UIA tree
-            // (ux10Dot6Escript) is present and parses to a patient+drug —
-            // see Uia/FieldReader.cs ReadSource/IsStructuredSourceAvailable.
-            StatusMessage = reader.SourceUnavailableReason ?? "Open the Escript tab to verify this e-script.";
+            StatusMessage = ocrResult.Error;
             ClearCategories();
             UpdateSummary(null);
             return;
         }
 
-        // Phase 1: fast pass, skips the drug lookup entirely.
-        var fastResult = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: true);
+        var ocrWords = ocrResult.Words;
+
+        // OCR path has no notes extraction (v0 or v1 — see
+        // src/ocr/parseEscriptOcr.ts's documented "notes" gap: no
+        // PrescriptionRecord.notes field exists to extract into) — always
+        // empty here, vs. the UIA path's SourceNotes.
+        UpdateNotes(Array.Empty<string>());
+
+        if (!OcrFieldReader.IsSourceUsable(ocrWords))
+        {
+            // v1: a cheap word-count pre-gate on the raw OCR output, NOT
+            // a check of a parsed record (parsing now happens inside the
+            // TS engine call below) — see Uia/OcrFieldReader.cs
+            // IsSourceUsable doc for why.
+            StatusMessage = "OCR didn't find enough text on the captured e-script image to attempt a comparison. " +
+                             "Check the capture region (Engine settings) and the raw OCR text below.";
+            ClearCategories();
+            UpdateSummary(null);
+            return;
+        }
+
+        // Phase 1: fast pass, skips the drug lookup entirely. Sends the
+        // raw OCR words straight to the engine (v1) — see
+        // Engine/EngineClient.cs VerifyAsync(IReadOnlyList&lt;OcrWord&gt;, ...).
+        var fastResult = await _engineClient.VerifyAsync(ocrWords, entered, skipDrugLookup: true);
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
 
@@ -361,7 +421,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // click handler) returns immediately. See RefreshDrugFieldAsync
         // for the staleness guard against a newer refresh superseding
         // this one before it resolves.
-        _ = RefreshDrugFieldAsync(source, entered, generation);
+        _ = RefreshDrugFieldAsync(ocrWords, entered, generation);
     }
 
     /// <summary>
@@ -493,12 +553,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// untouched, so the pharmacist never sees the rest of the panel
     /// flicker or reset while this runs.
     /// </summary>
-    private async Task RefreshDrugFieldAsync(PrescriptionRecord source, PrescriptionRecord entered, int generation)
+    private async Task RefreshDrugFieldAsync(IReadOnlyList<OcrWord> ocr, PrescriptionRecord entered, int generation)
     {
         VerifyResult result;
         try
         {
-            result = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: false);
+            result = await _engineClient.VerifyAsync(ocr, entered, skipDrugLookup: false);
         }
         catch (Exception ex)
         {
