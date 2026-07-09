@@ -154,6 +154,32 @@ function trimColumnGap(words: OcrWord[]): OcrWord[] {
   return words;
 }
 
+/**
+ * Splits an (already x-sorted) line into column-groups wherever the
+ * horizontal gap between consecutive words exceeds MAX_VALUE_WORD_GAP_PX —
+ * same threshold/reasoning as trimColumnGap, but returns ALL segments
+ * (not just the first). Used by Pass B to pair a single physical VALUE row
+ * against MULTIPLE labels that shared one physical LABEL-ONLY row (see the
+ * labelRowIds grouping in the main parse loop) — the real PioneerRx block
+ * layout collapses "Quantity" + "Refills" (or similar label pairs) onto
+ * one row in BOTH the labels block and the values block, so their values
+ * land in the same on-screen row too, separated only by column position.
+ */
+function splitLineByColumns(line: OcrWord[]): OcrWord[][] {
+  const segments: OcrWord[][] = [];
+  let start = 0;
+  for (let i = 1; i < line.length; i++) {
+    const prev = line[i - 1] as OcrWord;
+    const cur = line[i] as OcrWord;
+    if (cur.x - (prev.x + prev.w) > MAX_VALUE_WORD_GAP_PX) {
+      segments.push(line.slice(start, i));
+      start = i;
+    }
+  }
+  segments.push(line.slice(start));
+  return segments;
+}
+
 /** Chrome/toolbar tokens actually observed (see branch brief) — used both as a defensive secondary filter (drop chrome LINES) and, via trimValueNoise, to truncate chrome words that bleed onto the END of a value already assigned to a NOISE_TRIM_KEYS field. Normalized (lowercase, alnum only). */
 const CHROME_TOKENS = new Set([
   'dispense',
@@ -649,44 +675,99 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // ---- Pass A: inline "Label: value" / "Label value" on the same row ----
     const raw: Partial<Record<LabelKey, string>> = {};
     const labelOrder: LabelKey[] = [];
+    // Parallel to labelOrder: the id of the ORIGINAL physical row each
+    // pushed label came from (see rowIdCounter below). Two labels that
+    // shared one physical row (label-only, no inline values between them —
+    // e.g. "Quantity   Refills", or "NDC   Medication" / "Note
+    // Substitutions" on the real PioneerRx block layout) get the SAME
+    // rowId even though they're processed as separate loop iterations via
+    // the pendingLines re-queue below. Pass B uses this to know when
+    // several missing labels must be paired against ONE shared leftover
+    // value row (split by column) instead of one leftover row each.
+    const labelRowIds: number[] = [];
     const leftoverLines: OcrWord[][] = [];
 
     // Queue instead of a plain for-of: a single physical OCR row can carry
-    // MORE THAN ONE label:value pair (observed on the live capture —
-    // Quantity's label+value on the left, Refills' label+value further
-    // right, all grouped into one row by Y proximity). When a second real
-    // label is found partway through the first label's value, the tail is
-    // re-queued as its own line so the loop processes it as an
-    // independent label:value pair on its next iteration.
-    const pendingLines: OcrWord[][] = [...lines];
+    // MORE THAN ONE label (observed on the live capture — Quantity's
+    // label+value on the left, Refills' label+value further right, all
+    // grouped into one row by Y proximity; or, on the pure labels-block
+    // layout, two labels with NO value text between them at all). When a
+    // second real label is found — either partway through the first
+    // label's value, or immediately at the start of the remainder — the
+    // tail is re-queued (carrying the SAME rowId) so the loop processes it
+    // as an independent label on its next iteration.
+    let rowIdCounter = 0;
+    const pendingLines: { words: OcrWord[]; rowId: number }[] = lines.map((l) => ({
+      words: l,
+      rowId: rowIdCounter++
+    }));
     while (pendingLines.length > 0) {
-      const line = pendingLines.shift() as OcrWord[];
+      const { words: line, rowId } = pendingLines.shift() as { words: OcrWord[]; rowId: number };
       const match = findLabelAtLineStart(line);
       if (!match) {
         leftoverLines.push(line);
         continue;
       }
       labelOrder.push(match.label.key);
+      labelRowIds.push(rowId);
       const remainderWordsRaw = stripLeadingColon(line.slice(match.consumed));
 
       let splitIdx = -1;
-      for (let i = 1; i < remainderWordsRaw.length; i++) {
-        const embedded = findLabelAt(remainderWordsRaw, i);
-        // Deliberately narrow: only split on an embedded 'refills' label
-        // (the one confirmed real-layout collision — Quantity/Refills
-        // sharing a row). A broader "any embedded label splits the row"
-        // rule risks false splits on legitimate multi-word values
-        // elsewhere and is out of scope for this fix.
-        if (embedded && !embedded.label.ignore && embedded.label.key === 'refills' && match.label.key !== 'refills') {
-          splitIdx = i;
-          break;
+      const remainderStartsWithLabel = remainderWordsRaw.length > 0 ? findLabelAt(remainderWordsRaw, 0) : null;
+      // Require an EXACT (not fuzzy) match against the canonical label text
+      // here — this decides "is the remainder actually a value, or is it
+      // really the START of the NEXT label", and the fuzzy tolerance used
+      // everywhere else is too permissive for that call: e.g. real value
+      // text "not allowed" fuzzy-matches the 'note' label ("not" is 1 edit
+      // from "note", well under its threshold), which would wrongly treat
+      // an ordinary Substitutions value line as a label-only row. A plain
+      // label word (no inline value) reliably matches EXACTLY, since it's
+      // literally the label's own on-screen text with no OCR mangling
+      // simulated in these fixtures' geometry-only distinction; requiring
+      // an exact match keeps this generalization from misfiring on value
+      // text that merely resembles a label.
+      const remainderStartsWithExactLabel =
+        remainderStartsWithLabel &&
+        !remainderStartsWithLabel.label.ignore &&
+        normalize(wordsToText(remainderWordsRaw.slice(0, remainderStartsWithLabel.consumed))) ===
+          remainderStartsWithLabel.label.canonical;
+      if (remainderStartsWithExactLabel) {
+        // General case (branch brief): a label-only physical row can carry
+        // MORE THAN ONE recognized label with NO value text between them
+        // at all (e.g. "Quantity   Refills", "NDC   Medication", "Note
+        // Substitutions"). The remainder starts immediately with the NEXT
+        // label, so none of it is this label's value — re-queue the whole
+        // remainder (same rowId) so it's matched as its own label next,
+        // leaving BOTH labels correctly "missing" for Pass B's positional
+        // pairing instead of the first label swallowing the second
+        // label's text as a bogus value.
+        splitIdx = 0;
+      } else {
+        for (let i = 1; i < remainderWordsRaw.length; i++) {
+          const embedded = findLabelAt(remainderWordsRaw, i);
+          // Deliberately narrow (kept from the original 831cefc fix): only
+          // split on an embedded 'refills' label when real VALUE text
+          // precedes it on the row (Quantity value + Refills label+value
+          // packed on one row). A broader "any embedded label splits the
+          // row" rule here risks false splits on legitimate multi-word
+          // values elsewhere. The label-ONLY-row case (no value text at
+          // all before the next label) is handled generally above.
+          if (
+            embedded &&
+            !embedded.label.ignore &&
+            embedded.label.key === 'refills' &&
+            match.label.key !== 'refills'
+          ) {
+            splitIdx = i;
+            break;
+          }
         }
       }
 
       let remainderWords = remainderWordsRaw;
       if (splitIdx !== -1) {
         remainderWords = remainderWordsRaw.slice(0, splitIdx);
-        pendingLines.unshift(remainderWordsRaw.slice(splitIdx));
+        pendingLines.unshift({ words: remainderWordsRaw.slice(splitIdx), rowId });
       }
 
       if (NOISE_TRIM_KEYS.has(match.label.key)) remainderWords = trimValueNoise(remainderWords);
@@ -700,17 +781,42 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // Any label that had no inline value (a label-only line) is matched
     // positionally, in encounter order, against the leftover (non-label)
     // lines — the shape produced when OCR flattens the pane into a block
-    // of labels followed by a block of values.
-    const missingLabels = labelOrder.filter((key) => raw[key] === undefined);
-    missingLabels.forEach((key, i) => {
-      const line = leftoverLines[i];
-      if (line) {
-        let words = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(line) : line;
-        if (COLUMN_TRIM_KEYS.has(key)) words = trimColumnGap(words);
-        const text = wordsToText(words);
-        if (text) raw[key] = text;
+    // of labels followed by a block of values. Consecutive missing labels
+    // that came from the SAME original physical label row (labelRowIds —
+    // see Pass A) are paired against a SINGLE shared leftover value row,
+    // split by column (splitLineByColumns), instead of one leftover row
+    // each — mirrors the real layout where the label block and value block
+    // collapse label pairs onto one row in lockstep.
+    const missingIdx: number[] = [];
+    for (let idx = 0; idx < labelOrder.length; idx++) {
+      if (raw[labelOrder[idx] as LabelKey] === undefined) missingIdx.push(idx);
+    }
+    let leftoverIdx = 0;
+    let mi = 0;
+    while (mi < missingIdx.length) {
+      let mj = mi;
+      while (
+        mj + 1 < missingIdx.length &&
+        labelRowIds[missingIdx[mj + 1] as number] === labelRowIds[missingIdx[mi] as number]
+      ) {
+        mj++;
       }
-    });
+      const groupKeys = missingIdx.slice(mi, mj + 1).map((idx) => labelOrder[idx] as LabelKey);
+      const line = leftoverLines[leftoverIdx];
+      if (line) {
+        const segments = groupKeys.length > 1 ? splitLineByColumns(line) : [line];
+        groupKeys.forEach((key, g) => {
+          const seg = segments[g];
+          if (!seg) return;
+          let words = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(seg) : seg;
+          if (COLUMN_TRIM_KEYS.has(key)) words = trimColumnGap(words);
+          const text = wordsToText(words);
+          if (text) raw[key] = text;
+        });
+      }
+      leftoverIdx++;
+      mi = mj + 1;
+    }
 
     // ---- Pattern anchors: NPI / NDC, independent of any label ----
     // Per branch brief: NPI/NDC have no reliable label at all (or their

@@ -478,6 +478,61 @@ describe('parseEscriptOcr', () => {
     expect(record.sig).toBe('0.5 ML Subcutaneous weekly');
   });
 
+  it('(j) [live-tuning fixture 5] Quantity+Refills share one physical LABEL-ONLY row (no inline values at all) in the labels-block-then-values-block layout — positional Pass B pairing must not shift downstream fields', () => {
+    // SYNTHETIC — mirrors the real PioneerRx block layout where the
+    // LABELS column packs "Quantity" and "Refills" onto one physical row
+    // (label-only, no values between them — unlike fixture 4 above, which
+    // has inline values). Before this fix, Pass A's label-only row only
+    // ever recognized the FIRST label ('quantity') and swallowed the
+    // second label's own text ("Refills") as if it were quantity's value,
+    // so 'refills' never even entered labelOrder — Pass B's positional
+    // label-to-leftover-line pairing then shifted every field after
+    // quantity/refills (directions/note/substitutions) by one slot.
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['Address:']),
+      row(140, ['DOB']),
+      row(160, ['Prescriber']),
+      row(180, ['Location:']),
+      row(200, ['Phone']),
+      row(220, ['Written']),
+      row(240, ['NDC']),
+      row(260, ['Medication']),
+      [
+        { text: 'Quantity', x: 0, y: 280, w: 80, h: 18 } as OcrWord,
+        { text: 'Refills', x: 500, y: 280, w: 80, h: 18 }
+      ],
+      row(300, ['Directions:']),
+      row(320, ['Note']),
+      row(340, ['Substitutions'])
+    ];
+    const valueRows = [
+      row(360, ['Sample,', 'Pat', 'Q']),
+      row(380, ['123', 'SYNTH', 'ST', 'FAKETOWN,', 'KS', '660001111']),
+      row(400, ['01/02/1970']),
+      row(420, ['Demo,', 'Dana']),
+      row(440, ['456', 'MOCK', 'AVE', 'FAKETOWN,', 'KS', '660002222']),
+      row(460, ['(555)', '555-0100']),
+      row(480, ['07/01/2026']),
+      row(500, ['00000000011']),
+      row(520, ['Clindamycin', 'Lotion']),
+      [
+        { text: '30', x: 0, y: 540, w: 80, h: 18 } as OcrWord,
+        { text: '2', x: 500, y: 540, w: 80, h: 18 }
+      ],
+      row(560, ['TAKE', '1', 'TABLET', 'BY', 'MOUTH', 'DAILY']),
+      row(580, ['See', 'pharmacist']),
+      row(600, ['substitution', 'not', 'allowed'])
+    ];
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.quantity).toBe('30');
+    expect(record.refills).toBe('2');
+    expect(record.sig).toBe('TAKE 1 TABLET BY MOUTH DAILY');
+    expect(record.substitutionsNotAllowed).toBe(true);
+  });
+
   it('never throws on garbage/empty input and returns a blank record', () => {
     expect(parseEscriptOcr([])).toEqual({});
     expect(parseEscriptOcr(null)).toEqual({});
