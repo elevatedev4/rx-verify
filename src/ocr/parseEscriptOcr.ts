@@ -126,6 +126,34 @@ const LABELS: LabelDef[] = [
 /** Field keys whose inline/positional raw text is prone to absorbing a following recognized label or pharmacy-chrome token on the same OCR line (branch brief defect #3 — "Agent name"/"spr <SPI>"/"/ Mab" bleed). Trimmed via trimValueNoise before being stored. NOT applied to address/location — those get trailing bare-digit noise (a bled-in license number) stripped by parseAddressBlob's own targeted retry instead, since a generic trim there would also eat the address's own trailing ZIP digits. */
 const NOISE_TRIM_KEYS = new Set<LabelKey>(['patient', 'prescriber', 'phone']);
 
+/**
+ * Field keys whose value words additionally get trimmed at the first
+ * large horizontal gap (see trimColumnGap) — a live capture showed the
+ * Directions/sig row grouping in a stray token from an unrelated
+ * far-right column (e.g. a days-supply number sitting in the same X band
+ * as a different field's column) purely because it landed on the same Y
+ * band. That stray token isn't a recognized label or CHROME_TOKENS word,
+ * so trimValueNoise's label/chrome matching can't catch it — only its
+ * on-screen isolation (a big horizontal jump from the rest of the value)
+ * marks it as not belonging. Scoped to directions/sig only: sig is
+ * free-text prose without a numeric/format anchor to validate against, so
+ * a value-level "not part of this field" signal is otherwise unavailable.
+ */
+const COLUMN_TRIM_KEYS = new Set<LabelKey>(['directions']);
+
+/** Horizontal gap (px) beyond which two consecutive words on the same reconstructed line are treated as belonging to different on-screen columns, not the same value. Chosen well above normal within-value word spacing (the widest normal gap observed between real sig words on the live capture was ~105px) but well below the far-column jump actually observed (~309px). */
+const MAX_VALUE_WORD_GAP_PX = 150;
+
+/** Truncates a value's (already x-sorted) word list at the first point where the gap between consecutive words exceeds MAX_VALUE_WORD_GAP_PX — see COLUMN_TRIM_KEYS doc. Like trimValueNoise, never trims to nothing (starts scanning from the 2nd word). */
+function trimColumnGap(words: OcrWord[]): OcrWord[] {
+  for (let i = 1; i < words.length; i++) {
+    const prev = words[i - 1] as OcrWord;
+    const cur = words[i] as OcrWord;
+    if (cur.x - (prev.x + prev.w) > MAX_VALUE_WORD_GAP_PX) return words.slice(0, i);
+  }
+  return words;
+}
+
 /** Chrome/toolbar tokens actually observed (see branch brief) — used both as a defensive secondary filter (drop chrome LINES) and, via trimValueNoise, to truncate chrome words that bleed onto the END of a value already assigned to a NOISE_TRIM_KEYS field. Normalized (lowercase, alnum only). */
 const CHROME_TOKENS = new Set([
   'dispense',
@@ -605,15 +633,34 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     lines = lines.slice(firstLabelIdx);
 
     // Defensive secondary chrome filter, in case a chrome-ish line
-    // somehow sits below the first label line.
-    lines = lines.filter((line) => !isChromeLine(line));
+    // somehow sits below the first label line. Never drop a line whose
+    // START is a recognized, non-ignore field label, though — that means
+    // it carries real field data (a live capture showed the Quantity
+    // label+value and an inline Refills label+value sharing one merged
+    // OCR row; "Refills"/"refills)" alone fuzzy-match 2 CHROME_TOKENS
+    // entries meant for the "Refilled 1 time" tab-strip, tripping the
+    // 2-hit rule below and silently dropping the Quantity value too).
+    lines = lines.filter((line) => {
+      const startMatch = findLabelAtLineStart(line);
+      if (startMatch && !startMatch.label.ignore) return true;
+      return !isChromeLine(line);
+    });
 
     // ---- Pass A: inline "Label: value" / "Label value" on the same row ----
     const raw: Partial<Record<LabelKey, string>> = {};
     const labelOrder: LabelKey[] = [];
     const leftoverLines: OcrWord[][] = [];
 
-    for (const line of lines) {
+    // Queue instead of a plain for-of: a single physical OCR row can carry
+    // MORE THAN ONE label:value pair (observed on the live capture —
+    // Quantity's label+value on the left, Refills' label+value further
+    // right, all grouped into one row by Y proximity). When a second real
+    // label is found partway through the first label's value, the tail is
+    // re-queued as its own line so the loop processes it as an
+    // independent label:value pair on its next iteration.
+    const pendingLines: OcrWord[][] = [...lines];
+    while (pendingLines.length > 0) {
+      const line = pendingLines.shift() as OcrWord[];
       const match = findLabelAtLineStart(line);
       if (!match) {
         leftoverLines.push(line);
@@ -621,9 +668,30 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       }
       labelOrder.push(match.label.key);
       const remainderWordsRaw = stripLeadingColon(line.slice(match.consumed));
-      const remainderWords = NOISE_TRIM_KEYS.has(match.label.key)
-        ? trimValueNoise(remainderWordsRaw)
-        : remainderWordsRaw;
+
+      let splitIdx = -1;
+      for (let i = 1; i < remainderWordsRaw.length; i++) {
+        const embedded = findLabelAt(remainderWordsRaw, i);
+        // Deliberately narrow: only split on an embedded 'refills' label
+        // (the one confirmed real-layout collision — Quantity/Refills
+        // sharing a row). A broader "any embedded label splits the row"
+        // rule risks false splits on legitimate multi-word values
+        // elsewhere and is out of scope for this fix.
+        if (embedded && !embedded.label.ignore && embedded.label.key === 'refills' && match.label.key !== 'refills') {
+          splitIdx = i;
+          break;
+        }
+      }
+
+      let remainderWords = remainderWordsRaw;
+      if (splitIdx !== -1) {
+        remainderWords = remainderWordsRaw.slice(0, splitIdx);
+        pendingLines.unshift(remainderWordsRaw.slice(splitIdx));
+      }
+
+      if (NOISE_TRIM_KEYS.has(match.label.key)) remainderWords = trimValueNoise(remainderWords);
+      if (COLUMN_TRIM_KEYS.has(match.label.key)) remainderWords = trimColumnGap(remainderWords);
+
       const remainder = wordsToText(remainderWords);
       if (remainder) raw[match.label.key] = remainder;
     }
@@ -637,7 +705,8 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     missingLabels.forEach((key, i) => {
       const line = leftoverLines[i];
       if (line) {
-        const words = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(line) : line;
+        let words = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(line) : line;
+        if (COLUMN_TRIM_KEYS.has(key)) words = trimColumnGap(words);
         const text = wordsToText(words);
         if (text) raw[key] = text;
       }
@@ -705,7 +774,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     if (raw.address) record.patientAddress = parseAddressBlob(raw.address);
     if (written) record.dateWritten = written;
 
-    if (raw.directions) record.sig = raw.directions;
+    // "O." + a following digit is OCR splitting "0.X" (e.g. "0.5 ML") into
+    // two words around the period — repaired here (space removed, "O."->
+    // "0.") ONLY for this exact literal shape. Deliberately narrow: sig is
+    // free text, so no broader digit-repair (repairDigits) is applied to
+    // it — that's reserved for numeric/date fields where majority-digit
+    // heuristics are meaningful.
+    if (raw.directions) record.sig = raw.directions.replace(/\bO\.\s+(?=\d)/g, '0.');
     if (raw.note) {
       // NOTE: no `notes` field exists on PrescriptionRecord (types.ts) —
       // mirrors the same, already-documented gap in the retired C#

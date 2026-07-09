@@ -412,6 +412,72 @@ describe('parseEscriptOcr', () => {
     expect(repairDigits('CLINDAMYCIN')).toBe('CLINDAMYCIN');
   });
 
+  it('(i) [live-tuning fixture 4] Quantity+Refills share one physical OCR row (real on-screen shape from a live capture, PHI replaced) — both must resolve, not just the leading field', () => {
+    // SYNTHETIC — geometry (x/y/w/h) copied verbatim from a real owner
+    // capture; only the text content is fabricated. On this real screen,
+    // PioneerRx renders "Quantity <value>" and "Refills <value>" as TWO
+    // label:value pairs packed onto the SAME visual row (Quantity's label
+    // is far left, its value sits just right of it; Refills' label/value
+    // sit much further right on that same row). v1 grouped the whole row
+    // into one OcrWord[] line, and the "Refills" text collided with the
+    // CHROME_TOKENS 'refill'/'refilled' entries (added to filter the
+    // "Refilled 1 time" tab-strip) via isChromeLine's 2-fuzzy-hit rule —
+    // "Refills" and "refills)" alone supply 2 hits, so the ENTIRE row
+    // (including the real Quantity value) got dropped as chrome.
+    const patientRow = [
+      { text: 'Sample,', x: 120, y: 95, w: 96, h: 14 } as OcrWord,
+      { text: 'Q', x: 220, y: 95, w: 64, h: 12 }
+    ];
+    // Real coordinates from the live capture's Quantity/Refills row.
+    const quantityRefillsRow = [
+      { text: 'Quantity', x: 57, y: 358, w: 50, h: 13 } as OcrWord,
+      { text: '6.0000', x: 123, y: 358, w: 58, h: 11 },
+      { text: 'Refills', x: 593, y: 358, w: 37, h: 10 },
+      { text: '1', x: 639, y: 358, w: 6, h: 11 },
+      { text: '(additional', x: 650, y: 358, w: 77, h: 15 },
+      { text: 'refills)', x: 731, y: 358, w: 41, h: 15 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), patientRow, quantityRefillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.quantity).toBe('6.0000');
+    expect(record.refills).toBe('1');
+  });
+
+  it('(i) [live-tuning fixture 4] Directions/sig row picks up a stray far-column token — must be excluded, and the "O." + digit OCR split repairs to "0.5"', () => {
+    // SYNTHETIC — geometry copied verbatim from the same live capture;
+    // text fabricated. The split label "Di recti ons:" (real OCR
+    // word-splitting) sits on a row that ALSO groups in a stray token
+    // ("90", real days-supply value that lands in a different on-screen
+    // column far to the right — same X band as the Refills column above)
+    // because both rows merge into one OcrWord[] line by Y-proximity. Sig
+    // must stop before the far-right stray token, and "O. 5" (OCR
+    // splitting "0.5" into two words around the period) must repair to
+    // "0.5" with no space.
+    const directionsRow = [
+      { text: 'Di', x: 48, y: 381, w: 11, h: 11 } as OcrWord,
+      { text: 'recti', x: 61, y: 381, w: 23, h: 11 },
+      { text: 'ons:', x: 85, y: 384, w: 22, h: 8 },
+      { text: 'O.', x: 121, y: 381, w: 13, h: 12 },
+      { text: '5', x: 136, y: 381, w: 9, h: 12 },
+      { text: 'ML', x: 148, y: 381, w: 22, h: 12 },
+      { text: 'Subcutaneous', x: 174, y: 381, w: 103, h: 12 },
+      { text: 'weekly', x: 279, y: 381, w: 49, h: 15 },
+      // Stray bleed from a far-right column on the same visual row.
+      { text: '90', x: 637, y: 381, w: 16, h: 11 }
+    ];
+    const ocr = flatten([
+      TOOLBAR_ROW,
+      row(100, ['Patient']),
+      [{ text: 'Sample,', x: 120, y: 95, w: 96, h: 14 } as OcrWord, { text: 'Q', x: 220, y: 95, w: 64, h: 12 }],
+      row(533, ['Note']),
+      directionsRow
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.sig).toBe('0.5 ML Subcutaneous weekly');
+  });
+
   it('never throws on garbage/empty input and returns a blank record', () => {
     expect(parseEscriptOcr([])).toEqual({});
     expect(parseEscriptOcr(null)).toEqual({});
