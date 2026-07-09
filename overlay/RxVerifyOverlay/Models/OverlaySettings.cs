@@ -53,4 +53,44 @@ public sealed class OverlaySettings
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(SettingsFilePath, json);
     }
+
+    /// <summary>
+    /// Best-effort auto-detection of rx-verify's compiled CLI entrypoint
+    /// (dist/cli.js) so a fresh workstation with an empty/stale
+    /// EngineCliPath doesn't have to be configured by hand before first
+    /// use. The overlay is always built inside the repo, at
+    /// &lt;repoRoot&gt;/overlay/RxVerifyOverlay/bin/&lt;cfg&gt;/&lt;tfm&gt;/, so walking
+    /// up from AppContext.BaseDirectory and checking for dist/cli.js at
+    /// each level reliably finds &lt;repoRoot&gt;/dist/cli.js without any
+    /// hardcoded path depth. Pure (no WPF deps) so it's unit-testable;
+    /// startDir defaults to AppContext.BaseDirectory in real use and is
+    /// overridable in tests.
+    /// </summary>
+    public static string ResolveDefaultCliPath(string? startDir = null)
+    {
+        DirectoryInfo? dir;
+        try
+        {
+            dir = new DirectoryInfo(startDir ?? AppContext.BaseDirectory);
+        }
+        catch
+        {
+            return "";
+        }
+
+        // Guard against pathological loops (shouldn't happen with real
+        // filesystem parent chains, but cheap insurance) in addition to
+        // the natural termination when Parent becomes null at the root.
+        const int maxLevels = 64;
+        for (var i = 0; dir is not null && i < maxLevels; i++, dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "dist", "cli.js");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return "";
+    }
 }

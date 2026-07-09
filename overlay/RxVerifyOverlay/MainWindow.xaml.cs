@@ -52,6 +52,24 @@ public partial class MainWindow : Window
         Top = Math.Min(Math.Max(workArea.Top, top), maxTop);
 
         _settings = OverlaySettings.Load();
+
+        // Fresh workstation: no saved EngineCliPath (or a stale one from a
+        // moved/rebuilt repo) used to mean a hard "Engine CLI not found"
+        // error until the user manually located dist/cli.js via the
+        // Locate.../Save flow below. Since the overlay is always built
+        // inside this repo, we can auto-detect dist/cli.js by walking up
+        // from the app's own build output directory. Manual override via
+        // Locate.../Save (further down, and in the click handler) still
+        // takes precedence any time it's set and valid.
+        if (string.IsNullOrWhiteSpace(_settings.EngineCliPath) || !File.Exists(_settings.EngineCliPath))
+        {
+            var resolved = OverlaySettings.ResolveDefaultCliPath();
+            if (!string.IsNullOrWhiteSpace(resolved))
+            {
+                _settings.EngineCliPath = resolved;
+            }
+        }
+
         _engineClient = new EngineClient(_settings.EngineCliPath, _settings.NodeExecutable);
         _viewModel = new OverlayViewModel(_engineClient);
         DataContext = _viewModel;
