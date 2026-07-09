@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseEscriptOcr, type OcrWord } from '../src/ocr/parseEscriptOcr.js';
+import { parseEscriptOcr, repairDigits, type OcrWord } from '../src/ocr/parseEscriptOcr.js';
 
 /**
  * SYNTHETIC DATA ONLY — every name/DOB/NPI/NDC/address/phone below is
@@ -351,6 +351,65 @@ describe('parseEscriptOcr', () => {
     expect(record.dateWritten).toBe('07/02/2026');
     expect(record.drug?.ndc).toBe('82619-0105-01');
     expect(record.drug?.name).toBe('AMOXICILLIN 500MG');
+  });
+
+  it('(h) [live-tuning fixture 3] recognizes "Refills Authorized" as a label variant instead of leaving "Authorized" behind as the value', () => {
+    const rows = [
+      row(100, ['Patient:', 'Test,', 'Case']),
+      // Real on-screen label per owner report — plain "refills" alone is
+      // 10+ edits away under the fuzzy threshold, so this needs its own
+      // canonical variant (see LABELS) plus the longer-match tie-break.
+      row(120, ['Refills', 'Authorized:', '2'])
+    ];
+    const ocr = flatten([TOOLBAR_ROW, ...rows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Test, Case');
+    expect(record.refills).toBe('2');
+  });
+
+  it('(h) refills value "l" (OCR letter-for-digit) repairs to "1"', () => {
+    const rows = [row(100, ['Patient:', 'Test,', 'Case']), row(120, ['Refills:', 'l'])];
+    const ocr = flatten([TOOLBAR_ROW, ...rows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('1');
+  });
+
+  it('(h) written date "O7/02/2026" (letter O for digit 0) repairs to "07/02/2026"', () => {
+    const rows = [row(100, ['Patient:', 'Test,', 'Case']), row(120, ['Written:', 'O7/02/2026'])];
+    const ocr = flatten([TOOLBAR_ROW, ...rows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.dateWritten).toBe('07/02/2026');
+  });
+
+  it('(h) written date "07-02-2026" (dash separators) normalizes to "07/02/2026"', () => {
+    const rows = [row(100, ['Patient:', 'Test,', 'Case']), row(120, ['Written:', '07-02-2026'])];
+    const ocr = flatten([TOOLBAR_ROW, ...rows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.dateWritten).toBe('07/02/2026');
+  });
+
+  it('(h) quantity "5O.0000 Unspecified" (letter O for digit 0) repairs to "50.0000"', () => {
+    const rows = [
+      row(100, ['Patient:', 'Test,', 'Case']),
+      row(120, ['Quantity:', '5O.0000', 'Unspecified'])
+    ];
+    const ocr = flatten([TOOLBAR_ROW, ...rows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.quantity).toBe('50.0000');
+    expect(record.quantityUnit).toBeUndefined();
+  });
+
+  it('(h) repairDigits does NOT alter a clearly alphabetic token (never applied to names/drug text)', () => {
+    // "LOTION"/"CLINDAMYCIN" both contain letters that are lookalikes for
+    // digits (O, I) but also contain letters outside the lookalike set
+    // (L, T, N, C, D, M, Y) — repairDigits must leave real words alone.
+    expect(repairDigits('LOTION')).toBe('LOTION');
+    expect(repairDigits('CLINDAMYCIN')).toBe('CLINDAMYCIN');
   });
 
   it('never throws on garbage/empty input and returns a blank record', () => {

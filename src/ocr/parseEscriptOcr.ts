@@ -108,6 +108,14 @@ const LABELS: LabelDef[] = [
   { key: 'quantity', canonical: 'quantity', maxWords: 3 },
   { key: 'directions', canonical: 'directions', maxWords: 3 },
   { key: 'refills', canonical: 'refills', maxWords: 2 },
+  // Screen label variants actually observed (branch brief): "Refills
+  // Authorized" / "Refills Remaining" are 10+ edits from plain "refills"
+  // under the fuzzy threshold, so they need their own canonical entries
+  // to match at all — otherwise only the leading "Refills" word matches,
+  // leaving "Authorized"/"Remaining" behind as bogus "value" text that
+  // shadows the real value.
+  { key: 'refills', canonical: 'refillsauthorized', maxWords: 2 },
+  { key: 'refills', canonical: 'refillsremaining', maxWords: 2 },
   { key: 'ds2', canonical: 'ds', maxWords: 1, ignore: true },
   { key: 'note', canonical: 'note', maxWords: 3 },
   { key: 'substitutions', canonical: 'substitutions', maxWords: 3 },
@@ -268,7 +276,13 @@ function findLabelAtLineStart(line: OcrWord[]): LabelMatch | null {
       const dist = levenshtein(candidate, label.canonical);
       if (dist > fuzzyThreshold(label.canonical.length)) continue;
       const ratio = dist / label.canonical.length;
-      if (!best || ratio < best.ratio) {
+      // On an equal-quality fuzzy match, prefer the match that consumes
+      // MORE of the line — e.g. "Refills Authorized" is an exact (ratio
+      // 0) match for both the 1-word "refills" canonical and the 2-word
+      // "refillsauthorized" canonical; consuming both words is correct
+      // (the whole thing is the label), not leaving "Authorized" behind
+      // to be mistaken for the value.
+      if (!best || ratio < best.ratio || (ratio === best.ratio && consumed > best.consumed)) {
         best = { label, consumed, ratio };
       }
     }
@@ -399,23 +413,95 @@ function parseAddressBlob(raw: string): Address {
   };
 }
 
+/** OCR letter-for-digit lookalikes, keyed by the mangled character actually observed (branch brief: Quantity/Refills/Written-date extraction consistently fails because a digit gets OCR'd as its lookalike letter, e.g. "1" -> "l", "0" -> "O"). */
+const DIGIT_REPAIR_MAP: Record<string, string> = { O: '0', o: '0', l: '1', I: '1', S: '5', B: '8' };
+
+/**
+ * Best-effort OCR letter->digit repair for a token expected to be
+ * numeric/date-shaped. Deliberately conservative and meant to be called
+ * ONLY from numeric/date value-parsing call sites (parseQuantity,
+ * parseRefills, repairMangledDate) — never on patient/prescriber names
+ * or addresses, where a bare "O" or "l" is very likely real text:
+ *
+ *  - Any letter in the token OUTSIDE the lookalike set above (e.g. the
+ *    "T"/"N" in "LOTION") means it's real text, not a mangled number —
+ *    the whole token is returned untouched.
+ *  - Even within the lookalike set, repair only fires when the token is
+ *    already majority-digit, OR is short enough (<=2 alnum chars) that a
+ *    majority-digit test can't be meaningful on its own (e.g. a lone "l"
+ *    OCR'd for "1", with nothing else in the token to compare against).
+ */
+export function repairDigits(raw: string): string {
+  let digitCount = 0;
+  let mappableCount = 0;
+  let otherLetterCount = 0;
+  for (const ch of raw) {
+    if (/[0-9]/.test(ch)) digitCount++;
+    else if (ch in DIGIT_REPAIR_MAP) mappableCount++;
+    else if (/[a-zA-Z]/.test(ch)) otherLetterCount++;
+  }
+  if (otherLetterCount > 0 || mappableCount === 0) return raw;
+  const total = digitCount + mappableCount;
+  if (digitCount < mappableCount && total > 2) return raw;
+
+  let out = '';
+  for (const ch of raw) out += DIGIT_REPAIR_MAP[ch] ?? ch;
+  return out;
+}
+
 /** Unit tokens that mean "no real unit" and should fold to undefined rather than being stored (branch brief: "quantityUnit fold Unspecified/Unit/EA/each -> undefined"). Normalized (lowercase, alnum only). */
 const QUANTITY_UNIT_FOLD = new Set(['unspecified', 'unit', 'ea', 'each']);
 
-/** "50.0000 Unspecified" -> {quantity: "50.0000"} (unit folded away); "20 EA" -> {quantity: "20"} (EA folds too); "60 TABLET" -> {quantity: "60", quantityUnit: "TABLET"}. Mirrors the C# OcrEscriptParser.ApplyQuantity that this module supersedes, extended per branch brief to fold PioneerRx's non-units. */
+/**
+ * "50.0000 Unspecified" -> {quantity: "50.0000"} (unit folded away); "20
+ * EA" -> {quantity: "20"} (EA folds too); "60 TABLET" -> {quantity: "60",
+ * quantityUnit: "TABLET"}. Mirrors the C# OcrEscriptParser.ApplyQuantity
+ * that this module supersedes, extended per branch brief to fold
+ * PioneerRx's non-units.
+ *
+ * The leading token is repaired for OCR letter-digit mangling ("5O.0000"
+ * -> "50.0000") before being validated as a number (int or decimal); if
+ * it still isn't numeric after repair, the following tokens are scanned
+ * in order for the first one that is, so a mangled/non-numeric first
+ * token doesn't blank the whole field when a real quantity value is
+ * right there on the same line.
+ */
+const QUANTITY_NUMBER_RE = /^\d+(\.\d+)?$/;
+
 function parseQuantity(raw: string): { quantity?: string; quantityUnit?: string } {
   const trimmed = raw.trim();
   if (!trimmed) return {};
   const parts = trimmed.split(/\s+/);
-  const quantity = parts[0];
-  const unitRaw = parts.slice(1).join(' ').trim();
+
+  let quantity: string | undefined;
+  let unitStart = 1;
+  for (let i = 0; i < parts.length; i++) {
+    const repaired = repairDigits(parts[i] as string);
+    if (QUANTITY_NUMBER_RE.test(repaired)) {
+      quantity = repaired;
+      unitStart = i + 1;
+      break;
+    }
+  }
+  if (!quantity) return {};
+
+  const unitRaw = parts.slice(unitStart).join(' ').trim();
   const quantityUnit = unitRaw && !QUANTITY_UNIT_FOLD.has(normalize(unitRaw)) ? unitRaw : undefined;
   return { quantity, quantityUnit };
 }
 
-/** "1 (additional refills)" -> "1". Only the leading integer is trusted; any trailing descriptive text is dropped. Returns undefined if the value doesn't start with a number. */
+/**
+ * "1 (additional refills)" -> "1". Only the leading integer is trusted;
+ * any trailing descriptive text is dropped. The leading token is
+ * repaired for OCR letter-digit mangling first (e.g. "l" OCR'd for "1"),
+ * then validated as digits. Returns undefined if the (repaired) value
+ * doesn't start with a number.
+ */
 function parseRefills(raw: string): string | undefined {
-  const m = /^(\d+)/.exec(raw.trim());
+  const trimmed = raw.trim();
+  const firstToken = trimmed.split(/\s+/)[0] ?? '';
+  const repaired = repairDigits(firstToken);
+  const m = /^(\d+)/.exec(repaired);
   return m ? m[1] : undefined;
 }
 
@@ -455,17 +541,40 @@ function findNdcToken(words: OcrWord[], exclude: Set<string>): string | null {
 }
 
 /**
- * Best-effort repair for a written/DOB date whose "/" between day and
- * year got OCR-dropped, merging them into one run (branch brief defect
- * #2, e.g. "07/022026" should be "07/02/2026"): re-splits a trailing
- * 6-digit run into a 2-digit day + 4-digit year and re-inserts the "/".
- * Returns null (no repair attempted) for anything that doesn't match
- * this specific shape — never guesses beyond it.
+ * Best-effort repair for a mangled written/DOB date. Handles, in order:
+ *  1. OCR letter-for-digit mangling anywhere in the token ("O7/02/2026"
+ *     -> "07/02/2026") via repairDigits.
+ *  2. Dash/dot/space separators instead of "/" ("07-02-2026",
+ *     "07.02.2026", "07 02 2026") — normalized to slashes, but only when
+ *     the whole token is already digit-triple-shaped, so this never
+ *     touches unrelated text that happens to contain a dash.
+ *  3. "MM/DD/YYY Y" — a stray OCR space splitting the last year digit
+ *     off — collapsed back together.
+ *  4. "MM/DDYYYY" — the "/" between day and year got OCR-dropped
+ *     (branch brief defect #2, e.g. "07/022026" -> "07/02/2026").
+ *  5. "MMDD/YYYY" — the "/" between month and day got OCR-dropped.
+ * Returns null (no repair attempted/needed) if the token doesn't match
+ * any of the above and wasn't changed by digit/separator repair — never
+ * guesses beyond these specific shapes.
  */
 function repairMangledDate(raw: string): string | null {
-  const m = /^(\d{1,2})\/(\d{2})(\d{4})$/.exec(raw.trim());
-  if (!m) return null;
-  return `${m[1]}/${m[2]}/${m[3]}`;
+  const trimmed = raw.trim();
+  let candidate = repairDigits(trimmed);
+
+  if (/^\d{1,4}[\s.-]\d{1,2}[\s.-]\d{2,4}$/.test(candidate)) {
+    candidate = candidate.replace(/[\s.-]/g, '/');
+  }
+
+  let m = /^(\d{1,2})\/(\d{1,2})\/(\d{3})\s(\d)$/.exec(candidate);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}${m[4]}`;
+
+  m = /^(\d{1,2})\/(\d{2})(\d{4})$/.exec(candidate);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+
+  m = /^(\d{2})(\d{2})\/(\d{4})$/.exec(candidate);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+
+  return candidate !== trimmed ? candidate : null;
 }
 
 // ---------------------------------------------------------------------
