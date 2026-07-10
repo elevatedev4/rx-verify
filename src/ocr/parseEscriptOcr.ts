@@ -26,8 +26,35 @@
  * parseEscriptOcr's top-level try/catch. A parsing bug must degrade to
  * "field not found" (yellow, "not provided", in the engine), never crash
  * the overlay or produce a confidently-wrong value.
+ *
+ * GEOMETRY REMAP (this branch — see branch brief "remap everything"):
+ * earlier tuning rounds (2a9bf13, 831cefc, 8d2789e) each patched one
+ * symptom of the same root problem — Pass B's labels-block/values-block
+ * pairing matched the Nth still-missing label against the Nth leftover
+ * value line by ORDINAL POSITION IN A SHARED LIST, with no check that the
+ * two actually sit in the same on-screen column. That's fine for a single
+ * column of labels stacked above a single column of values (the owner's
+ * most common shape, and every pre-existing fixture below), but silently
+ * mispairs whenever two label sub-blocks render side by side (a
+ * two-column panel) or the value block's internal row order doesn't
+ * mirror the label block's — a wrong PATIENT/PRESCRIBER swap is far worse
+ * than either field going blank. Pass B below now:
+ *   1. x-clusters ALL recognized label occurrences into columns.
+ *   2. x-clusters the leftover (non-label) lines into columns.
+ *   3. Maps label-column rank -> value-column rank (leftmost to
+ *      leftmost, etc. — tolerates a constant column OFFSET between the
+ *      label block and the value block, only their ORDER must agree).
+ *   4. Pairs a missing label only against leftover lines in ITS mapped
+ *      column, in row order, via a per-column cursor — never against the
+ *      whole flat leftover-line list.
+ * Same-row multi-label groups (labelRowIds, e.g. "Quantity   Refills"
+ * sharing one physical label-only row) still split their single matched
+ * value row by column (splitLineByColumns), unchanged.
  */
 
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { Address, DrugDescriptor, Prescriber, PrescriptionRecord } from '../types.js';
 import { parseDate } from '../normalize/date.js';
 
@@ -126,25 +153,19 @@ const LABELS: LabelDef[] = [
 /** Field keys whose inline/positional raw text is prone to absorbing a following recognized label or pharmacy-chrome token on the same OCR line (branch brief defect #3 — "Agent name"/"spr <SPI>"/"/ Mab" bleed). Trimmed via trimValueNoise before being stored. NOT applied to address/location — those get trailing bare-digit noise (a bled-in license number) stripped by parseAddressBlob's own targeted retry instead, since a generic trim there would also eat the address's own trailing ZIP digits. */
 const NOISE_TRIM_KEYS = new Set<LabelKey>(['patient', 'prescriber', 'phone']);
 
-/**
- * Field keys whose value words additionally get trimmed at the first
- * large horizontal gap (see trimColumnGap) — a live capture showed the
- * Directions/sig row grouping in a stray token from an unrelated
- * far-right column (e.g. a days-supply number sitting in the same X band
- * as a different field's column) purely because it landed on the same Y
- * band. That stray token isn't a recognized label or CHROME_TOKENS word,
- * so trimValueNoise's label/chrome matching can't catch it — only its
- * on-screen isolation (a big horizontal jump from the rest of the value)
- * marks it as not belonging. Scoped to directions/sig only: sig is
- * free-text prose without a numeric/format anchor to validate against, so
- * a value-level "not part of this field" signal is otherwise unavailable.
- */
-const COLUMN_TRIM_KEYS = new Set<LabelKey>(['directions']);
-
-/** Horizontal gap (px) beyond which two consecutive words on the same reconstructed line are treated as belonging to different on-screen columns, not the same value. Chosen well above normal within-value word spacing (the widest normal gap observed between real sig words on the live capture was ~105px) but well below the far-column jump actually observed (~309px). */
+/** Horizontal gap (px) beyond which two consecutive words on the same reconstructed line are treated as belonging to different on-screen columns, not the same value. Chosen well above normal within-value word spacing (the widest normal gap observed between real sig words on the live capture was ~105px) but well below the far-column jump actually observed (~309px). Reused (same threshold) as the column-CLUSTERING distance for Pass B — a column boundary and a "different column" word gap are the same underlying signal at two different granularities (word-level vs line-start-level). */
 const MAX_VALUE_WORD_GAP_PX = 150;
 
-/** Truncates a value's (already x-sorted) word list at the first point where the gap between consecutive words exceeds MAX_VALUE_WORD_GAP_PX — see COLUMN_TRIM_KEYS doc. Like trimValueNoise, never trims to nothing (starts scanning from the 2nd word). */
+/**
+ * Truncates a value's (already x-sorted) word list at the first point
+ * where the gap between consecutive words exceeds MAX_VALUE_WORD_GAP_PX.
+ * Like trimValueNoise, never trims to nothing (starts scanning from the
+ * 2nd word). Applied to EVERY field's resolved value (not just
+ * directions/sig, as in earlier tuning rounds) — branch brief root-cause
+ * #3: "row-grouping jitter merges far-right columns into values" is
+ * general to any field whose row happens to pick up a stray token from an
+ * unrelated far-right column, not just sig.
+ */
 function trimColumnGap(words: OcrWord[]): OcrWord[] {
   for (let i = 1; i < words.length; i++) {
     const prev = words[i - 1] as OcrWord;
@@ -178,6 +199,33 @@ function splitLineByColumns(line: OcrWord[]): OcrWord[][] {
   }
   segments.push(line.slice(start));
   return segments;
+}
+
+/**
+ * Assigns a column-cluster id (0 = leftmost) to each entry of `xs`, by
+ * sorting on x and starting a new cluster whenever the gap to the
+ * previous (x-sorted) entry exceeds `threshold`. Used by Pass B to group
+ * BOTH label occurrences and leftover value lines into on-screen columns
+ * — see class doc "GEOMETRY REMAP". Cluster ids are comparable across two
+ * separate calls (e.g. one for labels, one for values) in the sense that
+ * "cluster 0" always means "the leftmost cluster of ITS OWN input set" —
+ * mapping label-cluster rank to value-cluster rank (not raw id equality)
+ * is what actually pairs a label column to its value column; see
+ * mapLabelClusterToValueCluster below.
+ */
+function clusterByX(xs: number[], threshold: number): number[] {
+  const n = xs.length;
+  const clusterOf = new Array<number>(n);
+  const sortedIdx = xs.map((_, i) => i).sort((a, b) => (xs[a] as number) - (xs[b] as number));
+  let clusterId = -1;
+  let lastX = Number.NEGATIVE_INFINITY;
+  for (const i of sortedIdx) {
+    const x = xs[i] as number;
+    if (x - lastX > threshold) clusterId++;
+    clusterOf[i] = clusterId;
+    lastX = x;
+  }
+  return clusterOf;
 }
 
 /** Chrome/toolbar tokens actually observed (see branch brief) — used both as a defensive secondary filter (drop chrome LINES) and, via trimValueNoise, to truncate chrome words that bleed onto the END of a value already assigned to a NOISE_TRIM_KEYS field. Normalized (lowercase, alnum only). */
@@ -428,7 +476,11 @@ function isChromeLine(line: OcrWord[]): boolean {
  * reduced to its first 5 digits (see class doc / branch brief). Falls
  * back to treating the whole string as street-only if no trailing
  * "<state><zip>" shape is recognized — never throws, never guesses city
- * beyond the one trailing token before the state.
+ * beyond the one trailing token before the state. The trailing
+ * "<state><zip>" shape doubles as this field's format anchor (branch
+ * brief item 2, "ZIP/state for addresses") — an address blob that never
+ * matches it yields a street-only value rather than a guessed
+ * city/state/zip split.
  */
 const ADDRESS_RE = /^(.*?)[,\s]+([A-Za-z]{2})\s*(\d{5})(\d{4})?\s*$/;
 
@@ -574,10 +626,10 @@ function parseSubstitutionsNotAllowed(raw: string | undefined): boolean | undefi
 // ---------------------------------------------------------------------
 
 /** A bare (no punctuation) all-digit token of the given exact length, e.g. NPI=10. Deliberately requires the WHOLE word to be digits — a formatted phone number ("(555) 555-0100") keeps its punctuation in OCR text and will not collide with this. */
-function findDigitToken(words: OcrWord[], length: number, exclude: Set<string>): string | null {
+function findDigitToken(words: OcrWord[], length: number, exclude: Set<string>): OcrWord | null {
   for (const w of words) {
     const t = w.text.trim();
-    if (t.length === length && /^\d+$/.test(t) && !exclude.has(t)) return t;
+    if (t.length === length && /^\d+$/.test(t) && !exclude.has(t)) return w;
   }
   return null;
 }
@@ -585,13 +637,29 @@ function findDigitToken(words: OcrWord[], length: number, exclude: Set<string>):
 /** Real NDCs on the fixed e-script layout render DASHED (5-4-2 or similar, e.g. "00168-0203-60", "82619-0105-01") — v1 only looked for 11 bare digits and missed every one (branch brief defect #1). Matches either shape; the matched token (dashes included) is kept as-is per branch brief ("fine to keep the value as the matched token"). */
 const NDC_DASHED_RE = /^\d{4,5}-\d{3,4}-\d{1,2}$/;
 
-function findNdcToken(words: OcrWord[], exclude: Set<string>): string | null {
+function findNdcToken(words: OcrWord[], exclude: Set<string>): OcrWord | null {
   for (const w of words) {
     const t = w.text.trim();
     if (exclude.has(t)) continue;
-    if ((t.length === 11 && /^\d+$/.test(t)) || NDC_DASHED_RE.test(t)) return t;
+    if ((t.length === 11 && /^\d+$/.test(t)) || NDC_DASHED_RE.test(t)) return w;
   }
   return null;
+}
+
+/**
+ * Phone-number shape anchor (branch brief item 2). Deliberately lenient —
+ * this validates "looks phone-shaped enough to trust", not "is a
+ * perfectly OCR'd US phone number": a live capture can mangle the
+ * leading "(" away entirely (e.g. "(555)" -> "085)"), and that's still a
+ * real, usable phone value, just imperfectly read. What it rejects is a
+ * value that isn't phone-shaped AT ALL (stray label/address text that
+ * slipped past geometry pairing) — per the NO-GUESS policy (item 3),
+ * that's worse to keep than to blank.
+ */
+const PHONE_RE = /^\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$/;
+
+function isPhoneShaped(raw: string): boolean {
+  return PHONE_RE.test(raw.trim());
 }
 
 /**
@@ -632,6 +700,88 @@ function repairMangledDate(raw: string): string | null {
 }
 
 // ---------------------------------------------------------------------
+// Diagnostics (branch brief item 4) — a compact, machine-readable
+// per-field summary of HOW each field resolved (or why it didn't),
+// appended to the same daily log file mechanism the overlay's OcrLogger
+// (overlay/RxVerifyOverlay/Ocr/OcrLogger.cs) already writes to
+// (%TEMP%\VerifyOCR\ocr-<yyyyMMdd>.log on Windows / the OS temp dir's
+// VerifyOCR subfolder elsewhere) — same directory/filename convention,
+// so a read's raw-word dump (logged by the C# overlay before invoking
+// this CLI) and this parse's field-resolution summary (logged here,
+// right after) land in the same file for the next debugging pass. Never
+// allowed to affect parsing or throw — see appendOcrDiagnosticsLog.
+// ---------------------------------------------------------------------
+
+export interface FieldDiagnostic {
+  /** PrescriptionRecord-shaped field name, e.g. "patientName", "prescriber.npi". */
+  field: string;
+  status: 'resolved' | 'miss';
+  /** How the value was found. Absent when status is 'miss'. */
+  strategy?: 'inline-row' | 'block-column' | 'pattern-anchor' | 'pattern-anchor-fallback';
+  label?: { text: string; x: number; y: number };
+  value?: { text: string; x: number; y: number };
+  /** Machine-readable miss reason. Absent when status is 'resolved'. */
+  reason?: string;
+}
+
+/** Caps a value's logged text so a long sig/address doesn't blow up a "few lines per field" diagnostics block. */
+function truncateForLog(text: string, max = 60): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function formatDiagnosticLine(d: FieldDiagnostic): string {
+  if (d.status === 'miss') {
+    return `  ${d.field}: MISS(${d.reason ?? 'unresolved'})`;
+  }
+  const labelPart = d.label
+    ? `label "${truncateForLog(d.label.text, 24)}"@(${Math.round(d.label.x)},${Math.round(d.label.y)})`
+    : 'label (none — pattern anchor)';
+  const valuePart = d.value
+    ? `value "${truncateForLog(d.value.text)}"@(${Math.round(d.value.x)},${Math.round(d.value.y)})`
+    : 'value (unknown position)';
+  return `  ${d.field}: ${labelPart} -> ${valuePart} [${d.strategy ?? 'unknown'}]`;
+}
+
+/** Builds the full per-parse diagnostics block text (pure function — no I/O — so it's independently unit-testable without touching the filesystem). */
+export function buildDiagnosticsBlock(entries: FieldDiagnostic[]): string {
+  const lines = [
+    `[${new Date().toISOString()}] parseEscriptOcr field resolution (${entries.length} fields)`,
+    ...entries.map(formatDiagnosticLine)
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+const DIAGNOSTICS_LOG_DIR = path.join(tmpdir(), 'VerifyOCR');
+
+function diagnosticsLogFilePath(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return path.join(DIAGNOSTICS_LOG_DIR, `ocr-${y}${m}${d}.log`);
+}
+
+/**
+ * Best-effort append of one parse's field-resolution diagnostics to the
+ * shared daily log — see class doc above. NEVER throws (mirrors
+ * OcrLogger.cs's own best-effort guarantee: a locked/unwritable log file
+ * must never take down a live verification pass) and is skipped entirely
+ * under the test runner (VITEST_WORKER_ID is set by vitest) so running
+ * the suite doesn't scribble PHI-shaped synthetic fixtures onto the
+ * developer's real OS temp dir on every run — buildDiagnosticsBlock
+ * above is exported and unit-tested directly instead.
+ */
+function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
+  if (process.env.VITEST_WORKER_ID) return;
+  try {
+    mkdirSync(DIAGNOSTICS_LOG_DIR, { recursive: true });
+    appendFileSync(diagnosticsLogFilePath(), buildDiagnosticsBlock(entries));
+  } catch {
+    // Best-effort diagnostic logging only — see class doc.
+  }
+}
+
+// ---------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------
 
@@ -643,6 +793,7 @@ function repairMangledDate(raw: string): string | null {
  */
 export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): PrescriptionRecord {
   const record: PrescriptionRecord = {};
+  const diagnostics: FieldDiagnostic[] = [];
 
   try {
     if (!ocr || ocr.length === 0) return record;
@@ -675,6 +826,11 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // ---- Pass A: inline "Label: value" / "Label value" on the same row ----
     const raw: Partial<Record<LabelKey, string>> = {};
     const labelOrder: LabelKey[] = [];
+    // Parallel to labelOrder: the on-screen position of the label word(s)
+    // themselves (first consumed word's x/y) plus the label text actually
+    // matched — used only for diagnostics (item 4) and for x-clustering
+    // labels into columns in Pass B (item 1) below.
+    const labelPositions: { x: number; y: number; text: string }[] = [];
     // Parallel to labelOrder: the id of the ORIGINAL physical row each
     // pushed label came from (see rowIdCounter below). Two labels that
     // shared one physical row (label-only, no inline values between them —
@@ -686,6 +842,11 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // value row (split by column) instead of one leftover row each.
     const labelRowIds: number[] = [];
     const leftoverLines: OcrWord[][] = [];
+    // How each raw[key] was actually resolved — populated at every
+    // assignment site (Pass A inline, Pass B block-column) and consumed
+    // only by the diagnostics block at the end.
+    const resolutionMeta: Partial<Record<LabelKey, { strategy: FieldDiagnostic['strategy']; words: OcrWord[] }>> =
+      {};
 
     // Queue instead of a plain for-of: a single physical OCR row can carry
     // MORE THAN ONE label (observed on the live capture — Quantity's
@@ -710,6 +871,9 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       }
       labelOrder.push(match.label.key);
       labelRowIds.push(rowId);
+      const labelWords = line.slice(0, match.consumed);
+      const firstLabelWord = labelWords[0] as OcrWord;
+      labelPositions.push({ x: firstLabelWord.x, y: firstLabelWord.y, text: wordsToText(labelWords) });
       const remainderWordsRaw = stripLeadingColon(line.slice(match.consumed));
 
       let splitIdx = -1;
@@ -771,27 +935,64 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       }
 
       if (NOISE_TRIM_KEYS.has(match.label.key)) remainderWords = trimValueNoise(remainderWords);
-      if (COLUMN_TRIM_KEYS.has(match.label.key)) remainderWords = trimColumnGap(remainderWords);
+      // Bound EVERY field's inline value by the next on-screen column
+      // (branch brief item 2 — "bound the token span by neighboring
+      // labels' geometry so bleed can't append"), not just directions/sig.
+      remainderWords = trimColumnGap(remainderWords);
 
       const remainder = wordsToText(remainderWords);
-      if (remainder) raw[match.label.key] = remainder;
+      if (remainder) {
+        raw[match.label.key] = remainder;
+        resolutionMeta[match.label.key] = { strategy: 'inline-row', words: remainderWords };
+      }
     }
 
     // ---- Pass B: labels-block-then-values-block fallback ----
-    // Any label that had no inline value (a label-only line) is matched
-    // positionally, in encounter order, against the leftover (non-label)
-    // lines — the shape produced when OCR flattens the pane into a block
-    // of labels followed by a block of values. Consecutive missing labels
-    // that came from the SAME original physical label row (labelRowIds —
-    // see Pass A) are paired against a SINGLE shared leftover value row,
-    // split by column (splitLineByColumns), instead of one leftover row
-    // each — mirrors the real layout where the label block and value block
-    // collapse label pairs onto one row in lockstep.
+    // Any label that had no inline value (a label-only line) is resolved
+    // by GEOMETRY, not by ordinal position in a shared list — see class
+    // doc "GEOMETRY REMAP". Missing labels and leftover (non-label) lines
+    // are each x-clustered into on-screen columns; a label's column is
+    // mapped (by rank, leftmost-to-leftmost) to its corresponding value
+    // column, and within that pairing a label is matched to the value
+    // line directly below it in row order via a per-column cursor.
+    // Same-row multi-label groups (labelRowIds) still consume ONE shared
+    // leftover row, split by column (splitLineByColumns) — unchanged.
     const missingIdx: number[] = [];
     for (let idx = 0; idx < labelOrder.length; idx++) {
       if (raw[labelOrder[idx] as LabelKey] === undefined) missingIdx.push(idx);
     }
-    let leftoverIdx = 0;
+
+    const labelClusterOf = clusterByX(
+      labelPositions.map((p) => p.x),
+      MAX_VALUE_WORD_GAP_PX
+    );
+    const leftoverXs = leftoverLines.map((l) => (l[0] as OcrWord).x);
+    const valueClusterOf = clusterByX(leftoverXs, MAX_VALUE_WORD_GAP_PX);
+    const valueClusterCount = leftoverLines.length > 0 ? Math.max(...valueClusterOf) + 1 : 0;
+
+    // Leftover line indices grouped by value-column, each list kept in
+    // original (top-to-bottom) row order.
+    const leftoverIdxByCluster: number[][] = Array.from({ length: valueClusterCount }, () => []);
+    leftoverLines.forEach((_, i) => {
+      (leftoverIdxByCluster[valueClusterOf[i] as number] as number[]).push(i);
+    });
+    // Per-column cursor: the next not-yet-consumed leftover line in that
+    // value column. Consuming per-column (instead of one global pointer
+    // across the whole flat list) is what stops an unrelated column's
+    // lines from being handed to a label that has nothing to do with
+    // them — see the "extra far-right column" / "jumbled two-column"
+    // fixtures in the test suite.
+    const cursorByCluster: number[] = new Array(valueClusterCount).fill(0);
+
+    function mappedValueCluster(labelCluster: number): number | null {
+      if (valueClusterCount === 0) return null;
+      // Rank-mapped, not equal-x-mapped: tolerates the value block being
+      // a constant column OFFSET to the right/left of the label block
+      // (branch brief fixture: "value column offset from label column")
+      // — only the RELATIVE column order has to agree.
+      return Math.min(labelCluster, valueClusterCount - 1);
+    }
+
     let mi = 0;
     while (mi < missingIdx.length) {
       let mj = mi;
@@ -801,20 +1002,36 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       ) {
         mj++;
       }
-      const groupKeys = missingIdx.slice(mi, mj + 1).map((idx) => labelOrder[idx] as LabelKey);
-      const line = leftoverLines[leftoverIdx];
+      const groupIdxs = missingIdx.slice(mi, mj + 1);
+      const groupKeys = groupIdxs.map((idx) => labelOrder[idx] as LabelKey);
+      const firstIdx = groupIdxs[0] as number;
+      const labelCluster = labelClusterOf[firstIdx] as number;
+      const valueCluster = mappedValueCluster(labelCluster);
+
+      let line: OcrWord[] | undefined;
+      if (valueCluster !== null) {
+        const bucket = leftoverIdxByCluster[valueCluster] as number[];
+        const cursor = cursorByCluster[valueCluster] as number;
+        if (cursor < bucket.length) {
+          line = leftoverLines[bucket[cursor] as number];
+          cursorByCluster[valueCluster] = cursor + 1;
+        }
+      }
+
       if (line) {
         const segments = groupKeys.length > 1 ? splitLineByColumns(line) : [line];
         groupKeys.forEach((key, g) => {
           const seg = segments[g];
-          if (!seg) return;
-          let words = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(seg) : seg;
-          if (COLUMN_TRIM_KEYS.has(key)) words = trimColumnGap(words);
-          const text = wordsToText(words);
-          if (text) raw[key] = text;
+          if (!seg || seg.length === 0) return;
+          let segWords = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(seg) : seg;
+          segWords = trimColumnGap(segWords);
+          const text = wordsToText(segWords);
+          if (text) {
+            raw[key] = text;
+            resolutionMeta[key] = { strategy: 'block-column', words: segWords };
+          }
         });
       }
-      leftoverIdx++;
       mi = mj + 1;
     }
 
@@ -826,59 +1043,121 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // digits or the dashed forms actually observed on the live layout
     // (branch brief defect #1) — see findNdcToken.
     const usedDigitTokens = new Set<string>();
-    const npi = findDigitToken(lines.flat(), 10, usedDigitTokens);
-    if (npi) usedDigitTokens.add(npi);
-    const ndc = findNdcToken(lines.flat(), usedDigitTokens);
-    if (ndc) usedDigitTokens.add(ndc);
+    const npiWord = findDigitToken(lines.flat(), 10, usedDigitTokens);
+    if (npiWord) usedDigitTokens.add(npiWord.text.trim());
+    const ndcWord = findNdcToken(lines.flat(), usedDigitTokens);
+    if (ndcWord) usedDigitTokens.add(ndcWord.text.trim());
+    const npi = npiWord?.text.trim();
+    const ndc = ndcWord?.text.trim();
 
     // ---- Date validation/correction for dob & written ----
     // If the label-associated value for either date field doesn't
     // actually parse as a date, search the pool of leftover value lines
     // (not already used for something else) for one that does — corrects
     // the block-layout-shift case where a value landed one slot off.
-    const candidatePool = leftoverLines.map((l) => wordsToText(l)).filter(Boolean);
+    const candidatePool = leftoverLines.map((l) => ({ text: wordsToText(l), pos: l[0] as OcrWord })).filter(
+      (c) => c.text
+    );
     const claimedFromPool = new Set<string>();
     // Anything already assigned via Pass A/B that came from the pool is
     // implicitly "claimed" so date-fallback search won't re-borrow it.
     for (const key of Object.keys(raw) as LabelKey[]) {
       const v = raw[key];
-      if (v && candidatePool.includes(v)) claimedFromPool.add(v);
+      if (v && candidatePool.some((c) => c.text === v)) claimedFromPool.add(v);
     }
 
-    function resolveDateField(current: string | undefined): string | undefined {
+    function resolveDateField(
+      key: 'dob' | 'written'
+    ): { value: string | undefined; strategy: FieldDiagnostic['strategy']; pos?: OcrWord } {
+      const current = raw[key];
       if (current) {
-        if (parseDate(current)) return current;
+        const meta = resolutionMeta[key];
+        const pos = meta?.words[0];
+        if (parseDate(current)) return { value: current, strategy: meta?.strategy, pos };
         const repaired = repairMangledDate(current);
-        if (repaired && parseDate(repaired)) return repaired;
+        if (repaired && parseDate(repaired)) return { value: repaired, strategy: meta?.strategy, pos };
       }
       for (const candidate of candidatePool) {
-        if (claimedFromPool.has(candidate)) continue;
-        if (parseDate(candidate)) {
-          claimedFromPool.add(candidate);
-          return candidate;
+        if (claimedFromPool.has(candidate.text)) continue;
+        if (parseDate(candidate.text)) {
+          claimedFromPool.add(candidate.text);
+          return { value: candidate.text, strategy: 'pattern-anchor-fallback', pos: candidate.pos };
         }
-        const repaired = repairMangledDate(candidate);
+        const repaired = repairMangledDate(candidate.text);
         if (repaired && parseDate(repaired)) {
-          claimedFromPool.add(candidate);
-          return repaired;
+          claimedFromPool.add(candidate.text);
+          return { value: repaired, strategy: 'pattern-anchor-fallback', pos: candidate.pos };
         }
       }
       // No label-associated value parsed (or repaired) as a date, and no
       // unclaimed pool candidate does either — better to leave the field
       // unset (surfaces as "not provided" in the engine) than to trust a
       // value that doesn't look like a date at all (see branch brief's
-      // "never associate a misassigned value" pattern-validation goal).
-      return undefined;
+      // NO-GUESS policy, item 3).
+      return { value: undefined, strategy: undefined };
     }
 
-    const dob = resolveDateField(raw.dob);
-    const written = resolveDateField(raw.written);
+    const dobResolved = resolveDateField('dob');
+    const writtenResolved = resolveDateField('written');
+    const dob = dobResolved.value;
+    const written = writtenResolved.value;
+
+    // ---- Diagnostics helpers (item 4) ----
+    function labelDiag(key: LabelKey): FieldDiagnostic['label'] {
+      const p = labelPositions.find((_, i) => labelOrder[i] === key);
+      return p ? { text: p.text, x: p.x, y: p.y } : undefined;
+    }
+    function pushResolved(field: string, key: LabelKey, text: string, override?: FieldDiagnostic['strategy']) {
+      const meta = resolutionMeta[key];
+      const pos = meta?.words[0];
+      diagnostics.push({
+        field,
+        status: 'resolved',
+        strategy: override ?? meta?.strategy ?? 'pattern-anchor',
+        label: labelDiag(key),
+        value: pos ? { text, x: pos.x, y: pos.y } : { text, x: 0, y: 0 }
+      });
+    }
+    function pushMiss(field: string, key: LabelKey | null, reason: string) {
+      diagnostics.push({ field, status: 'miss', label: key ? labelDiag(key) : undefined, reason });
+    }
+    function pushPatternResolved(field: string, word: OcrWord | undefined, text: string) {
+      diagnostics.push({
+        field,
+        status: 'resolved',
+        strategy: 'pattern-anchor',
+        value: word ? { text, x: word.x, y: word.y } : { text, x: 0, y: 0 }
+      });
+    }
 
     // ---- Assemble the PrescriptionRecord ----
-    if (raw.patient) record.patientName = raw.patient;
-    if (dob) record.patientDOB = dob;
-    if (raw.address) record.patientAddress = parseAddressBlob(raw.address);
-    if (written) record.dateWritten = written;
+    if (raw.patient) {
+      record.patientName = raw.patient;
+      pushResolved('patientName', 'patient', raw.patient);
+    } else {
+      pushMiss('patientName', labelPositions.some((_, i) => labelOrder[i] === 'patient') ? 'patient' : null, 'label-not-found');
+    }
+
+    if (dob) {
+      record.patientDOB = dob;
+      pushResolved('patientDOB', 'dob', dob, dobResolved.strategy);
+    } else {
+      pushMiss('patientDOB', 'dob', raw.dob ? 'validation-failed:date-shape' : 'no-value-paired');
+    }
+
+    if (raw.address) {
+      record.patientAddress = parseAddressBlob(raw.address);
+      pushResolved('patientAddress', 'address', raw.address);
+    } else {
+      pushMiss('patientAddress', 'address', 'no-value-paired');
+    }
+
+    if (written) {
+      record.dateWritten = written;
+      pushResolved('dateWritten', 'written', written, writtenResolved.strategy);
+    } else {
+      pushMiss('dateWritten', 'written', raw.written ? 'validation-failed:date-shape' : 'no-value-paired');
+    }
 
     // "O." + a following digit is OCR splitting "0.X" (e.g. "0.5 ML") into
     // two words around the period — repaired here (space removed, "O."->
@@ -886,7 +1165,12 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // free text, so no broader digit-repair (repairDigits) is applied to
     // it — that's reserved for numeric/date fields where majority-digit
     // heuristics are meaningful.
-    if (raw.directions) record.sig = raw.directions.replace(/\bO\.\s+(?=\d)/g, '0.');
+    if (raw.directions) {
+      record.sig = raw.directions.replace(/\bO\.\s+(?=\d)/g, '0.');
+      pushResolved('sig', 'directions', record.sig);
+    } else {
+      pushMiss('sig', 'directions', 'no-value-paired');
+    }
     if (raw.note) {
       // NOTE: no `notes` field exists on PrescriptionRecord (types.ts) —
       // mirrors the same, already-documented gap in the retired C#
@@ -895,23 +1179,69 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       // branch report.
     }
     if (raw.substitutions !== undefined) {
-      record.substitutionsNotAllowed = parseSubstitutionsNotAllowed(raw.substitutions);
+      const subs = parseSubstitutionsNotAllowed(raw.substitutions);
+      if (subs !== undefined) {
+        record.substitutionsNotAllowed = subs;
+        pushResolved('substitutionsNotAllowed', 'substitutions', raw.substitutions);
+      } else {
+        pushMiss('substitutionsNotAllowed', 'substitutions', 'ambiguous-value');
+      }
+    } else {
+      pushMiss('substitutionsNotAllowed', 'substitutions', 'no-value-paired');
     }
     if (raw.quantity) {
       const q = parseQuantity(raw.quantity);
-      if (q.quantity) record.quantity = q.quantity;
-      if (q.quantityUnit) record.quantityUnit = q.quantityUnit;
+      if (q.quantity) {
+        record.quantity = q.quantity;
+        if (q.quantityUnit) record.quantityUnit = q.quantityUnit;
+        pushResolved('quantity', 'quantity', q.quantity);
+      } else {
+        pushMiss('quantity', 'quantity', 'validation-failed:not-numeric');
+      }
+    } else {
+      pushMiss('quantity', 'quantity', 'no-value-paired');
     }
     if (raw.refills) {
       const refills = parseRefills(raw.refills);
-      if (refills) record.refills = refills;
+      if (refills) {
+        record.refills = refills;
+        pushResolved('refills', 'refills', refills);
+      } else {
+        pushMiss('refills', 'refills', 'validation-failed:not-numeric');
+      }
+    } else {
+      pushMiss('refills', 'refills', 'no-value-paired');
     }
 
     const prescriber: Prescriber = {};
-    if (raw.prescriber) prescriber.name = raw.prescriber;
-    if (raw.phone) prescriber.phone = raw.phone;
-    if (raw.location) prescriber.address = parseAddressBlob(raw.location);
-    if (npi) prescriber.npi = npi;
+    if (raw.prescriber) {
+      prescriber.name = raw.prescriber;
+      pushResolved('prescriber.name', 'prescriber', raw.prescriber);
+    } else {
+      pushMiss('prescriber.name', 'prescriber', 'no-value-paired');
+    }
+    if (raw.phone) {
+      if (isPhoneShaped(raw.phone)) {
+        prescriber.phone = raw.phone;
+        pushResolved('prescriber.phone', 'phone', raw.phone);
+      } else {
+        pushMiss('prescriber.phone', 'phone', 'validation-failed:phone-shape');
+      }
+    } else {
+      pushMiss('prescriber.phone', 'phone', 'no-value-paired');
+    }
+    if (raw.location) {
+      prescriber.address = parseAddressBlob(raw.location);
+      pushResolved('prescriber.address', 'location', raw.location);
+    } else {
+      pushMiss('prescriber.address', 'location', 'no-value-paired');
+    }
+    if (npi) {
+      prescriber.npi = npi;
+      pushPatternResolved('prescriber.npi', npiWord ?? undefined, npi);
+    } else {
+      pushMiss('prescriber.npi', null, 'not-found-in-capture');
+    }
     const hasPrescriberData =
       prescriber.name !== undefined ||
       prescriber.phone !== undefined ||
@@ -920,10 +1250,22 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     if (hasPrescriberData) record.prescriber = prescriber;
 
     const drug: DrugDescriptor = {};
-    if (raw.medication) drug.name = raw.medication;
-    if (ndc) drug.ndc = ndc;
+    if (raw.medication) {
+      drug.name = raw.medication;
+      pushResolved('drug.name', 'medication', raw.medication);
+    } else {
+      pushMiss('drug.name', 'medication', 'no-value-paired');
+    }
+    if (ndc) {
+      drug.ndc = ndc;
+      pushPatternResolved('drug.ndc', ndcWord ?? undefined, ndc);
+    } else {
+      pushMiss('drug.ndc', null, 'not-found-in-capture');
+    }
     const hasDrugData = drug.name !== undefined || drug.ndc !== undefined;
     if (hasDrugData) record.drug = drug;
+
+    appendOcrDiagnosticsLog(diagnostics);
   } catch {
     // Never throw — a parsing bug degrades to "field not found", not a
     // crashed overlay refresh. See class doc.

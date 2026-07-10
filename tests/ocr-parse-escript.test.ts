@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { parseEscriptOcr, repairDigits, type OcrWord } from '../src/ocr/parseEscriptOcr.js';
+import {
+  parseEscriptOcr,
+  repairDigits,
+  buildDiagnosticsBlock,
+  type OcrWord,
+  type FieldDiagnostic
+} from '../src/ocr/parseEscriptOcr.js';
 
 /**
  * SYNTHETIC DATA ONLY — every name/DOB/NPI/NDC/address/phone below is
@@ -543,5 +549,234 @@ describe('parseEscriptOcr', () => {
         { text: '', x: 5, y: 0, w: 5, h: 5 }
       ])
     ).toEqual({});
+  });
+
+  // -----------------------------------------------------------------
+  // Geometry-remap fixtures (this branch — see class doc "GEOMETRY
+  // REMAP"). Fixtures (a)-(j) above encode the owner's real capture
+  // geometry and must keep passing UNCHANGED; these add layout variants
+  // the earlier ordinal (list-position) Pass B pairing couldn't handle
+  // correctly, per the branch brief.
+  // -----------------------------------------------------------------
+
+  it('(k) block layout scrolled/shifted vertically — a uniform Y offset does not affect label/value pairing', () => {
+    const Y_SHIFT = 1000;
+    const shift = (rows: OcrWord[][]) => rows.map((r) => r.map((w) => ({ ...w, y: w.y + Y_SHIFT })));
+    const labelRows = shift([
+      row(100, ['Patient']),
+      row(120, ['Address:']),
+      row(140, ['DOB']),
+      row(160, ['Prescriber']),
+      row(180, ['Location:']),
+      row(200, ['Phone']),
+      row(220, ['Written']),
+      row(240, ['NDC']),
+      row(260, ['Medication']),
+      row(280, ['Quantity']),
+      row(300, ['Directions:']),
+      row(320, ['Note']),
+      row(340, ['Substitutions'])
+    ]);
+    const valueRows = shift([
+      row(360, ['Sample,', 'Pat', 'Q']),
+      row(380, ['123', 'SYNTH', 'ST', 'FAKETOWN,', 'KS', '660001111']),
+      row(400, ['01/02/1970']),
+      row(420, ['Demo,', 'Dana']),
+      row(440, ['456', 'MOCK', 'AVE', 'FAKETOWN,', 'KS', '660002222']),
+      row(460, ['(555)', '555-0100']),
+      row(480, ['07/01/2026']),
+      row(500, ['00000000011']),
+      row(520, ['Clindamycin', 'Lotion']),
+      row(540, ['30']),
+      row(560, ['TAKE', '1', 'TABLET', 'BY', 'MOUTH', 'DAILY']),
+      row(580, ['See', 'pharmacist']),
+      row(600, ['substitution', 'not', 'allowed'])
+    ]);
+
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Sample, Pat Q');
+    expect(record.patientDOB).toBe('01/02/1970');
+    expect(record.prescriber?.name).toBe('Demo, Dana');
+    expect(record.dateWritten).toBe('07/01/2026');
+    expect(record.drug?.ndc).toBe('00000000011');
+    expect(record.drug?.name).toBe('Clindamycin Lotion');
+    expect(record.quantity).toBe('30');
+    expect(record.sig).toBe('TAKE 1 TABLET BY MOUTH DAILY');
+    expect(record.substitutionsNotAllowed).toBe(true);
+  });
+
+  it('(l) value column offset from label column — values render at a fixed X offset from their labels', () => {
+    const X_OFFSET = 250;
+    const offsetRow = (y: number, tokens: string[]): OcrWord[] =>
+      tokens.map((text, i) => ({ text, x: X_OFFSET + i * 90, y, w: 80, h: 18 }));
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['DOB']),
+      row(140, ['Prescriber']),
+      row(160, ['Written']),
+      row(180, ['Quantity'])
+    ];
+    const valueRows = [
+      offsetRow(220, ['Roe,', 'Jamie']),
+      offsetRow(240, ['05/06/1985']),
+      offsetRow(260, ['Alt,', 'Robin']),
+      offsetRow(280, ['07/01/2026']),
+      offsetRow(300, ['40'])
+    ];
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Roe, Jamie');
+    expect(record.patientDOB).toBe('05/06/1985');
+    expect(record.prescriber?.name).toBe('Alt, Robin');
+    expect(record.dateWritten).toBe('07/01/2026');
+    expect(record.quantity).toBe('40');
+  });
+
+  it('(m) partial capture — bottom fields absent yield clean MISSes, not values shifted up into the wrong field', () => {
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['DOB']),
+      row(140, ['Prescriber']),
+      row(160, ['Phone']),
+      row(180, ['Written']),
+      row(200, ['NDC']),
+      row(220, ['Medication']),
+      row(240, ['Quantity']),
+      row(260, ['Refills'])
+    ];
+    // Capture was scrolled/cut off — only the first two fields' values
+    // actually made it into the OCR read; everything below is blank on
+    // screen, not merely unlabeled.
+    const valueRows = [row(300, ['Gap,', 'Case']), row(320, ['01/02/1970'])];
+
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Gap, Case');
+    expect(record.patientDOB).toBe('01/02/1970');
+    expect(record.prescriber?.name).toBeUndefined();
+    expect(record.prescriber?.phone).toBeUndefined();
+    expect(record.dateWritten).toBeUndefined();
+    expect(record.drug?.ndc).toBeUndefined();
+    expect(record.drug?.name).toBeUndefined();
+    expect(record.quantity).toBeUndefined();
+    expect(record.refills).toBeUndefined();
+  });
+
+  it('(n) extra far-right column present on every value row — never absorbed into an unrelated field', () => {
+    // A far-right annotation column (e.g. an on-screen flag/checkbox
+    // readout that isn't any known field) rides along on every value
+    // row's Y band, well past normal within-value word spacing — general
+    // form of the row-grouping-jitter root cause (branch brief), no
+    // longer limited to the sig/directions field.
+    const FAR_X = 900;
+    const withFarColumn = (r: OcrWord[]): OcrWord[] => [
+      ...r,
+      { text: 'FLAG', x: FAR_X, y: (r[0] as OcrWord).y, w: 40, h: 18 }
+    ];
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['DOB']),
+      row(140, ['Prescriber']),
+      row(160, ['Written']),
+      row(180, ['Quantity'])
+    ];
+    const valueRows = [
+      withFarColumn(row(220, ['Roe,', 'Jamie'])),
+      withFarColumn(row(240, ['05/06/1985'])),
+      withFarColumn(row(260, ['Alt,', 'Robin'])),
+      withFarColumn(row(280, ['07/01/2026'])),
+      withFarColumn(row(300, ['40']))
+    ];
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Roe, Jamie');
+    expect(record.patientDOB).toBe('05/06/1985');
+    expect(record.prescriber?.name).toBe('Alt, Robin');
+    expect(record.dateWritten).toBe('07/01/2026');
+    expect(record.quantity).toBe('40');
+  });
+
+  it('(o) jumbled two-column label block — geometry-column pairing must not swap patient/prescriber', () => {
+    // Two side-by-side label sub-panels: Patient info in the left column
+    // (x=0), Prescriber in a separate right column (x=500) on its own
+    // physical row. Their VALUE rows do NOT land in the same relative
+    // top-to-bottom order as their labels — the right panel's value
+    // renders ABOVE the left panel's second value here, a real
+    // possibility when two side-by-side panels have different row
+    // heights/spacing. A naive "Nth missing label -> Nth leftover line in
+    // one shared list" (ordinal) pairing swaps patient and prescriber's
+    // names in this exact shape; column-bounded pairing must not.
+    const patientLabel: OcrWord[] = [{ text: 'Patient', x: 0, y: 100, w: 80, h: 18 }];
+    const prescriberLabel: OcrWord[] = [{ text: 'Prescriber', x: 500, y: 115, w: 100, h: 18 }];
+    const dobLabel = row(140, ['DOB']);
+
+    const prescriberValue: OcrWord[] = [
+      { text: 'Alt,', x: 500, y: 300, w: 60, h: 18 },
+      { text: 'Robin', x: 570, y: 300, w: 70, h: 18 }
+    ];
+    const patientValue: OcrWord[] = [
+      { text: 'Roe,', x: 0, y: 320, w: 60, h: 18 },
+      { text: 'Jamie', x: 70, y: 320, w: 70, h: 18 }
+    ];
+    const dobValue = row(340, ['05/06/1985']);
+
+    const ocr = flatten([
+      TOOLBAR_ROW,
+      patientLabel,
+      prescriberLabel,
+      dobLabel,
+      prescriberValue,
+      patientValue,
+      dobValue
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Roe, Jamie');
+    expect(record.prescriber?.name).toBe('Alt, Robin');
+    expect(record.patientDOB).toBe('05/06/1985');
+  });
+
+  describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
+    it('renders a resolved field with label/value position and strategy', () => {
+      const entries: FieldDiagnostic[] = [
+        {
+          field: 'patientName',
+          status: 'resolved',
+          strategy: 'block-column',
+          label: { text: 'Patient', x: 0, y: 100 },
+          value: { text: 'Roe, Jamie', x: 0, y: 320 }
+        }
+      ];
+      const block = buildDiagnosticsBlock(entries);
+
+      expect(block).toContain('patientName:');
+      expect(block).toContain('label "Patient"@(0,100)');
+      expect(block).toContain('value "Roe, Jamie"@(0,320)');
+      expect(block).toContain('[block-column]');
+    });
+
+    it('renders a MISS with its machine-readable reason and no fabricated value', () => {
+      const entries: FieldDiagnostic[] = [{ field: 'dateWritten', status: 'miss', reason: 'no-value-paired' }];
+      const block = buildDiagnosticsBlock(entries);
+
+      expect(block).toContain('dateWritten: MISS(no-value-paired)');
+    });
+
+    it('truncates long value text so the block stays compact (a few lines per field)', () => {
+      const longSig = 'A'.repeat(200);
+      const entries: FieldDiagnostic[] = [
+        { field: 'sig', status: 'resolved', strategy: 'inline-row', value: { text: longSig, x: 0, y: 0 } }
+      ];
+      const block = buildDiagnosticsBlock(entries);
+      const sigLine = block.split('\n').find((l) => l.includes('sig:'));
+
+      expect(sigLine).toBeDefined();
+      expect((sigLine as string).length).toBeLessThan(longSig.length);
+    });
   });
 });
