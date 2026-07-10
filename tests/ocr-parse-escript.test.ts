@@ -776,6 +776,57 @@ describe('parseEscriptOcr', () => {
     expect(record.quantity).toBe('40');
   });
 
+  it('(q) two-column layout, a label with NO value at all must not steal a later label\'s correctly column-matched value', () => {
+    // REGRESSION for a reviewer-found blocking bug reintroduced by the
+    // (p) fallback fix: labels are encountered Patient(x=0) ->
+    // Prescriber(x=500) -> Phone(x=500) -> DOB(x=0). Phone is genuinely
+    // ABSENT from the capture (no value anywhere), so its column-mapped
+    // primary attempt fails and it used to fall back INLINE, stealing
+    // the next not-yet-consumed leftover line — which was actually DOB's
+    // own correctly column-matched value, encountered later in the
+    // label list. A single-pass "primary-then-immediate-fallback" loop
+    // lets an earlier-starved label steal a later label's good match;
+    // the fix runs every label's PRIMARY column-matched attempt first,
+    // and only then lets any still-unresolved label fall back — so DOB
+    // must resolve its real value and Phone must end up a clean MISS,
+    // never a stolen "05/06/1985".
+    const patientLabel: OcrWord[] = [{ text: 'Patient', x: 0, y: 100, w: 80, h: 18 }];
+    const prescriberLabel: OcrWord[] = [{ text: 'Prescriber', x: 500, y: 115, w: 100, h: 18 }];
+    const phoneLabel: OcrWord[] = [{ text: 'Phone', x: 500, y: 130, w: 60, h: 18 }];
+    const dobLabel: OcrWord[] = [{ text: 'DOB', x: 0, y: 145, w: 60, h: 18 }];
+
+    const patientValue: OcrWord[] = [
+      { text: 'Roe,', x: 0, y: 300, w: 60, h: 18 },
+      { text: 'Jamie', x: 70, y: 300, w: 70, h: 18 }
+    ];
+    const prescriberValue: OcrWord[] = [
+      { text: 'Alt,', x: 500, y: 320, w: 60, h: 18 },
+      { text: 'Robin', x: 570, y: 320, w: 70, h: 18 }
+    ];
+    // Phone has NO corresponding value row anywhere in the capture.
+    const dobValue: OcrWord[] = [{ text: '05/06/1985', x: 0, y: 340, w: 90, h: 18 }];
+
+    const ocr = flatten([
+      TOOLBAR_ROW,
+      patientLabel,
+      prescriberLabel,
+      phoneLabel,
+      dobLabel,
+      patientValue,
+      prescriberValue,
+      dobValue
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Roe, Jamie');
+    expect(record.prescriber?.name).toBe('Alt, Robin');
+    // The real, unambiguous DOB must resolve — not be silently dropped.
+    expect(record.patientDOB).toBe('05/06/1985');
+    // Phone was genuinely absent — a clean MISS, not "05/06/1985" stolen
+    // from DOB and then rejected by isPhoneShaped.
+    expect(record.prescriber?.phone).toBeUndefined();
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [

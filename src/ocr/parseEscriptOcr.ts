@@ -1068,13 +1068,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     }
 
     /**
-     * REVIEW FIX (blocking finding): the column-mapped primary attempt
-     * above can starve a real single-column capture whose leftover
-     * lines happen to x-scatter into >1 cluster from ordinary bbox
-     * jitter, right-justified numerics, or inconsistent indentation —
-     * e.g. one label column (labelCluster always 0) but a Quantity value
-     * row that lands far enough right to form its own value-cluster;
-     * every missing label maps to value-cluster 0 only, so that
+     * REVIEW FIX (blocking finding, round 1): the column-mapped primary
+     * attempt above can starve a real single-column capture whose
+     * leftover lines happen to x-scatter into >1 cluster from ordinary
+     * bbox jitter, right-justified numerics, or inconsistent indentation
+     * — e.g. one label column (labelCluster always 0) but a Quantity
+     * value row that lands far enough right to form its own value-
+     * cluster; every missing label maps to value-cluster 0 only, so that
      * off-cluster row is never assigned even though nothing else wants
      * it either. Geometry pairing is meant to be STRICTLY ADDITIVE over
      * plain ordinal (next-leftover-line-in-row-order) pairing — it may
@@ -1094,41 +1094,75 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       return null;
     }
 
-    let mi = 0;
-    while (mi < missingIdx.length) {
-      let mj = mi;
-      while (
-        mj + 1 < missingIdx.length &&
-        labelRowIds[missingIdx[mj + 1] as number] === labelRowIds[missingIdx[mi] as number]
-      ) {
-        mj++;
-      }
-      const groupIdxs = missingIdx.slice(mi, mj + 1);
-      const groupKeys = groupIdxs.map((idx) => labelOrder[idx] as LabelKey);
-      const firstIdx = groupIdxs[0] as number;
-      const labelCluster = labelClusterOf[firstIdx] as number;
-      const valueCluster = mappedValueCluster(labelCluster);
+    function assignGroup(groupKeys: LabelKey[], lineIdx: number): void {
+      consumedLeftover.add(lineIdx);
+      const line = leftoverLines[lineIdx] as OcrWord[];
+      const segments = groupKeys.length > 1 ? splitLineByColumns(line) : [line];
+      groupKeys.forEach((key, g) => {
+        const seg = segments[g];
+        if (!seg || seg.length === 0) return;
+        let segWords = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(seg) : seg;
+        segWords = trimColumnGap(segWords);
+        const text = wordsToText(segWords);
+        if (text) {
+          raw[key] = text;
+          resolutionMeta[key] = { strategy: 'block-column', words: segWords };
+        }
+      });
+    }
 
-      let lineIdx: number | null = valueCluster !== null ? pickFromCluster(valueCluster) : null;
-      if (lineIdx === null) lineIdx = pickFallback();
-      if (lineIdx !== null) consumedLeftover.add(lineIdx);
-      const line: OcrWord[] | undefined = lineIdx !== null ? leftoverLines[lineIdx] : undefined;
-
-      if (line) {
-        const segments = groupKeys.length > 1 ? splitLineByColumns(line) : [line];
-        groupKeys.forEach((key, g) => {
-          const seg = segments[g];
-          if (!seg || seg.length === 0) return;
-          let segWords = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(seg) : seg;
-          segWords = trimColumnGap(segWords);
-          const text = wordsToText(segWords);
-          if (text) {
-            raw[key] = text;
-            resolutionMeta[key] = { strategy: 'block-column', words: segWords };
-          }
-        });
+    interface PendingGroup {
+      groupKeys: LabelKey[];
+      labelCluster: number;
+    }
+    const pendingGroups: PendingGroup[] = [];
+    {
+      let mi = 0;
+      while (mi < missingIdx.length) {
+        let mj = mi;
+        while (
+          mj + 1 < missingIdx.length &&
+          labelRowIds[missingIdx[mj + 1] as number] === labelRowIds[missingIdx[mi] as number]
+        ) {
+          mj++;
+        }
+        const groupIdxs = missingIdx.slice(mi, mj + 1);
+        const groupKeys = groupIdxs.map((idx) => labelOrder[idx] as LabelKey);
+        const firstIdx = groupIdxs[0] as number;
+        pendingGroups.push({ groupKeys, labelCluster: labelClusterOf[firstIdx] as number });
+        mi = mj + 1;
       }
-      mi = mj + 1;
+    }
+
+    /**
+     * REVIEW FIX (blocking finding, round 2): pickFallback used to fire
+     * INLINE, per group, in label-encounter order — so a label that
+     * happened to be encountered (and starved) BEFORE a later label's
+     * value even entered the leftover pool's "current" cursor position
+     * could steal that later label's still-untouched, correctly
+     * column-matched row (reviewer repro: Patient -> Prescriber -> Phone
+     * (absent) -> DOB, two-column layout; Phone's exhausted column
+     * triggered fallback and stole DOB's real, later, column-0 value
+     * before DOB ever got its own turn). Fixed by running this as TWO
+     * STRICT PASSES over every group: first give EVERY group its
+     * column-mapped primary attempt (so a label's own well-matched value
+     * is never up for grabs by an earlier-encountered, differently-
+     * columned label); only once every primary attempt has run does
+     * ANY group fall back to "next remaining leftover line, any column".
+     */
+    const unresolvedGroups: PendingGroup[] = [];
+    for (const group of pendingGroups) {
+      const valueCluster = mappedValueCluster(group.labelCluster);
+      const lineIdx = valueCluster !== null ? pickFromCluster(valueCluster) : null;
+      if (lineIdx !== null) {
+        assignGroup(group.groupKeys, lineIdx);
+      } else {
+        unresolvedGroups.push(group);
+      }
+    }
+    for (const group of unresolvedGroups) {
+      const lineIdx = pickFallback();
+      if (lineIdx !== null) assignGroup(group.groupKeys, lineIdx);
     }
 
     // ---- Pattern anchors: NPI / NDC, independent of any label ----
@@ -1154,12 +1188,39 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     const candidatePool = leftoverLines.map((l) => ({ text: wordsToText(l), pos: l[0] as OcrWord })).filter(
       (c) => c.text
     );
+    /**
+     * REVIEW FIX (blocking finding, round 2, "contamination path"): a
+     * field's raw text only actually consumed its pool row if that
+     * field's OWN validator (where it has one) accepts it — a value that
+     * gets rejected (e.g. failed isPhoneShaped) must fully release its
+     * row, not silently block a DIFFERENT field's legitimate pool
+     * fallback from ever claiming it. Reuses the exact same validators
+     * the assembly section below applies, so "claims the pool row" and
+     * "survives into the record" can never disagree. dob/written have no
+     * entry in FIELD_POOL_VALIDATORS (their own validation is date-shape,
+     * handled by resolveDateField itself below) so they pass through
+     * this gate unconditionally — but they're deliberately NOT skipped
+     * from the loop entirely: dob's own already-resolved raw text must
+     * still self-claim its pool row, or written's fallback search below
+     * would be free to re-borrow the exact same row dob just used (and
+     * vice versa).
+     */
+    const FIELD_POOL_VALIDATORS: Partial<Record<LabelKey, (v: string) => boolean>> = {
+      phone: isPhoneShaped,
+      quantity: (v) => Boolean(parseQuantity(v).quantity),
+      refills: (v) => Boolean(parseRefills(v)),
+      substitutions: (v) => parseSubstitutionsNotAllowed(v) !== undefined
+    };
     const claimedFromPool = new Set<string>();
-    // Anything already assigned via Pass A/B that came from the pool is
-    // implicitly "claimed" so date-fallback search won't re-borrow it.
+    // Anything already assigned via Pass A/B that came from the pool AND
+    // will actually survive its own field's validation is implicitly
+    // "claimed" so date-fallback search won't re-borrow it.
     for (const key of Object.keys(raw) as LabelKey[]) {
       const v = raw[key];
-      if (v && candidatePool.some((c) => c.text === v)) claimedFromPool.add(v);
+      if (!v) continue;
+      const validator = FIELD_POOL_VALIDATORS[key];
+      if (validator && !validator(v)) continue; // rejected — fully release the row.
+      if (candidatePool.some((c) => c.text === v)) claimedFromPool.add(v);
     }
 
     function resolveDateField(
