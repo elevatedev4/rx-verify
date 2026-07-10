@@ -741,6 +741,41 @@ describe('parseEscriptOcr', () => {
     expect(record.patientDOB).toBe('05/06/1985');
   });
 
+  it('(p) single label column, one leftover value row x-scattered from the rest — geometry pairing must not lose coverage vs. plain ordinal pairing', () => {
+    // REGRESSION for a reviewer-found blocking bug: ONE label column
+    // (Patient/DOB/Prescriber/Quantity, every label at x=100 — the
+    // owner's ordinary single-column panel) but the Quantity VALUE row
+    // lands offset at x=400 (right-justified numeric, inconsistent
+    // indentation, or plain bbox jitter past the column-clustering
+    // threshold — nothing to do with a real second column). Column-
+    // mapped Pass B alone maps every missing label to value-cluster 0
+    // only (there's only one label column) and starves the x=400 row —
+    // main's plain ordinal pairing resolved this fine. Geometry pairing
+    // must never resolve FEWER fields than ordinal did; it may only ever
+    // resolve MORE (or the same) — see the fallback in appendix
+    // "pickFallback" in parseEscriptOcr.ts.
+    const labelRows = [
+      row(100, ['Patient']),
+      row(120, ['DOB']),
+      row(140, ['Prescriber']),
+      row(160, ['Quantity'])
+    ].map((r) => r.map((w) => ({ ...w, x: w.x + 100 })));
+    const valueRows = [
+      row(200, ['Roe,', 'Jamie']).map((w) => ({ ...w, x: w.x + 100 })),
+      row(220, ['05/06/1985']).map((w) => ({ ...w, x: w.x + 100 })),
+      row(240, ['Alt,', 'Robin']).map((w) => ({ ...w, x: w.x + 100 })),
+      // Offset to x=400 — same row/field order, just x-scattered.
+      row(260, ['40']).map((w) => ({ ...w, x: w.x + 400 }))
+    ];
+    const ocr = flatten([TOOLBAR_ROW, ...labelRows, ...valueRows]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientName).toBe('Roe, Jamie');
+    expect(record.patientDOB).toBe('05/06/1985');
+    expect(record.prescriber?.name).toBe('Alt, Robin');
+    expect(record.quantity).toBe('40');
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [

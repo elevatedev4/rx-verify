@@ -52,7 +52,7 @@
  * value row by column (splitLineByColumns), unchanged.
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Address, DrugDescriptor, Prescriber, PrescriptionRecord } from '../types.js';
@@ -742,16 +742,33 @@ function formatDiagnosticLine(d: FieldDiagnostic): string {
   return `  ${d.field}: ${labelPart} -> ${valuePart} [${d.strategy ?? 'unknown'}]`;
 }
 
+/** The field-resolution lines only (no timestamp header) — used both to render the block body and, unchanged run-to-run for an identical resolution outcome, as the DE-DUP comparison key below (a fresh ISO timestamp on every call would otherwise never compare equal). */
+function diagnosticsContentKey(entries: FieldDiagnostic[]): string {
+  return entries.map(formatDiagnosticLine).join('\n');
+}
+
 /** Builds the full per-parse diagnostics block text (pure function — no I/O — so it's independently unit-testable without touching the filesystem). */
 export function buildDiagnosticsBlock(entries: FieldDiagnostic[]): string {
-  const lines = [
-    `[${new Date().toISOString()}] parseEscriptOcr field resolution (${entries.length} fields)`,
-    ...entries.map(formatDiagnosticLine)
-  ];
-  return `${lines.join('\n')}\n`;
+  const header = `[${new Date().toISOString()}] parseEscriptOcr field resolution (${entries.length} fields)`;
+  return `${header}\n${diagnosticsContentKey(entries)}\n`;
 }
 
 const DIAGNOSTICS_LOG_DIR = path.join(tmpdir(), 'VerifyOCR');
+
+/** Per-day log file size cap before rotation (truncation) kicks in — mirrors OcrLogger.cs's own MaxLogFileBytes (see its class doc "SIZE CAP"): a long shift with lots of distinct reads can't grow this diagnostics log without bound either. */
+const DIAGNOSTICS_MAX_LOG_BYTES = 5 * 1024 * 1024; // ~5 MB
+
+/**
+ * Raw text of the last successfully LOGGED diagnostics block's CONTENT
+ * (see diagnosticsContentKey — not the full block, so the timestamp
+ * doesn't defeat the comparison), mirroring OcrLogger.cs's own
+ * _lastLoggedRawText de-dup guard: the overlay re-reads the same
+ * on-screen Rx roughly once a second, and an unchanged field-resolution
+ * outcome isn't worth a new block. Module-scoped, so this only de-dupes
+ * WITHIN one running process — see appendOcrDiagnosticsLog doc for the
+ * one-parse-per-CLI-subprocess caveat.
+ */
+let lastLoggedDiagnosticsContent: string | undefined;
 
 function diagnosticsLogFilePath(): string {
   const now = new Date();
@@ -770,12 +787,47 @@ function diagnosticsLogFilePath(): string {
  * the suite doesn't scribble PHI-shaped synthetic fixtures onto the
  * developer's real OS temp dir on every run — buildDiagnosticsBlock
  * above is exported and unit-tested directly instead.
+ *
+ * Subject to the same two guards as OcrLogger.cs (overlay/RxVerifyOverlay/
+ * Ocr/OcrLogger.cs, class doc "BOUNDED PHI LOG"):
+ *  1. DE-DUP: a resolution outcome byte-identical to the last LOGGED one
+ *     is skipped entirely — see lastLoggedDiagnosticsContent above. (Note:
+ *     cli.ts is invoked as a fresh subprocess per call — see its header
+ *     doc — so this module-level guard only de-dupes consecutive parses
+ *     within one long-lived process, e.g. tests or a future in-process
+ *     host; it's a no-op, not a regression, for the current one-shot-CLI
+ *     usage, where the size cap below is what actually bounds growth.)
+ *  2. SIZE CAP: before any append, if today's file has already grown
+ *     past DIAGNOSTICS_MAX_LOG_BYTES, it's rotated (truncated to a short
+ *     marker line) first — same truncate-in-place approach as
+ *     OcrLogger.cs's RotateIfOversized, not a numbered rollover.
  */
 function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
   if (process.env.VITEST_WORKER_ID) return;
   try {
+    const contentKey = diagnosticsContentKey(entries);
+    if (contentKey === lastLoggedDiagnosticsContent) return;
+    lastLoggedDiagnosticsContent = contentKey;
+
     mkdirSync(DIAGNOSTICS_LOG_DIR, { recursive: true });
-    appendFileSync(diagnosticsLogFilePath(), buildDiagnosticsBlock(entries));
+    const filePath = diagnosticsLogFilePath();
+
+    let existingSize = 0;
+    try {
+      existingSize = statSync(filePath).size;
+    } catch {
+      existingSize = 0; // file doesn't exist yet — nothing to rotate.
+    }
+    if (existingSize > DIAGNOSTICS_MAX_LOG_BYTES) {
+      writeFileSync(
+        filePath,
+        `[${new Date().toISOString()}] --- log rotated: exceeded ${
+          DIAGNOSTICS_MAX_LOG_BYTES / (1024 * 1024)
+        } MB, earlier entries in this file truncated ---\n\n`
+      );
+    }
+
+    appendFileSync(filePath, buildDiagnosticsBlock(entries));
   } catch {
     // Best-effort diagnostic logging only — see class doc.
   }
@@ -993,6 +1045,55 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       return Math.min(labelCluster, valueClusterCount - 1);
     }
 
+    // Tracks every leftover-line index assigned to ANY field so far,
+    // across both the column-mapped primary attempt and the fallback
+    // below — a single leftover row can only ever be consumed once,
+    // regardless of which path consumed it.
+    const consumedLeftover = new Set<number>();
+
+    /** Primary attempt: next not-yet-consumed leftover line in THIS value column, in row order. */
+    function pickFromCluster(valueCluster: number): number | null {
+      const bucket = leftoverIdxByCluster[valueCluster] as number[];
+      let cursor = cursorByCluster[valueCluster] as number;
+      while (cursor < bucket.length) {
+        const idx = bucket[cursor] as number;
+        cursor++;
+        if (!consumedLeftover.has(idx)) {
+          cursorByCluster[valueCluster] = cursor;
+          return idx;
+        }
+      }
+      cursorByCluster[valueCluster] = cursor;
+      return null;
+    }
+
+    /**
+     * REVIEW FIX (blocking finding): the column-mapped primary attempt
+     * above can starve a real single-column capture whose leftover
+     * lines happen to x-scatter into >1 cluster from ordinary bbox
+     * jitter, right-justified numerics, or inconsistent indentation —
+     * e.g. one label column (labelCluster always 0) but a Quantity value
+     * row that lands far enough right to form its own value-cluster;
+     * every missing label maps to value-cluster 0 only, so that
+     * off-cluster row is never assigned even though nothing else wants
+     * it either. Geometry pairing is meant to be STRICTLY ADDITIVE over
+     * plain ordinal (next-leftover-line-in-row-order) pairing — it may
+     * resolve cases ordinal gets wrong (fixture (o)), but must never
+     * resolve FEWER fields than ordinal would have. So: whenever the
+     * column-mapped attempt finds nothing (its column has no more
+     * candidates, or the label has no mapped column at all), fall back
+     * to the next not-yet-consumed leftover line in plain top-to-bottom
+     * row order across ALL columns — exactly what main's ordinal Pass B
+     * always did. This only ever adds coverage: the column-mapped
+     * result is used as-is whenever it succeeds.
+     */
+    function pickFallback(): number | null {
+      for (let i = 0; i < leftoverLines.length; i++) {
+        if (!consumedLeftover.has(i)) return i;
+      }
+      return null;
+    }
+
     let mi = 0;
     while (mi < missingIdx.length) {
       let mj = mi;
@@ -1008,15 +1109,10 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       const labelCluster = labelClusterOf[firstIdx] as number;
       const valueCluster = mappedValueCluster(labelCluster);
 
-      let line: OcrWord[] | undefined;
-      if (valueCluster !== null) {
-        const bucket = leftoverIdxByCluster[valueCluster] as number[];
-        const cursor = cursorByCluster[valueCluster] as number;
-        if (cursor < bucket.length) {
-          line = leftoverLines[bucket[cursor] as number];
-          cursorByCluster[valueCluster] = cursor + 1;
-        }
-      }
+      let lineIdx: number | null = valueCluster !== null ? pickFromCluster(valueCluster) : null;
+      if (lineIdx === null) lineIdx = pickFallback();
+      if (lineIdx !== null) consumedLeftover.add(lineIdx);
+      const line: OcrWord[] | undefined = lineIdx !== null ? leftoverLines[lineIdx] : undefined;
 
       if (line) {
         const segments = groupKeys.length > 1 ? splitLineByColumns(line) : [line];
