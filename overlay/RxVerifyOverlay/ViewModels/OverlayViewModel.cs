@@ -736,7 +736,19 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}.";
     }
 
-    /// <summary>Clears every category's rows (leaving the 3 category shells in place) — used by every early-return branch of RefreshAsync.</summary>
+    /// <summary>
+    /// Clears every category's rows (leaving the 3 category shells in
+    /// place) — used by every early-return branch of RefreshAsync/
+    /// WatchAsync (window not found, screen disappeared, source
+    /// unusable). MUST also reset OcrStatusText/LastOcrRawText (in
+    /// addition to _lastOcrWords) — otherwise a previous Rx's raw OCR
+    /// text/PHI would keep sitting in those bound properties after the
+    /// PioneerRx window closes/changes, and BuildCurrentLogBlob would
+    /// still emit it into the "Copy logs" blob even though RxWindowTitle
+    /// and every row/category had already gone empty. This is the same
+    /// "current Rx only, never accumulated" scoping as everything else
+    /// BuildCurrentLogBlob reads.
+    /// </summary>
     private void ClearCategories()
     {
         foreach (var category in Categories)
@@ -748,6 +760,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         UpdateNotes(Array.Empty<string>());
         _lastOcrWords = Array.Empty<OcrWord>();
+        OcrStatusText = "OCR: not read yet.";
+        LastOcrRawText = "";
     }
 
     /// <summary>Replaces Notes' contents and recomputes HasNotes — shared by RefreshAsync's ReadSource call and every ClearCategories early-return.</summary>

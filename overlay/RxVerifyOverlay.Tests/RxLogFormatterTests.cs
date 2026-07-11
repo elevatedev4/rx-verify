@@ -20,7 +20,11 @@ public class RxLogFormatterTests
         IReadOnlyList<string>? notes = null,
         IReadOnlyList<OcrWord>? ocrWords = null,
         string? rawOcrText = "SYNTHETIC RAW OCR TEXT",
-        string? rxWindowTitle = "Edit Rx - 0000001 - PioneerRx")
+        string? rxWindowTitle = "Edit Rx - 0000001 - PioneerRx",
+        string? ocrStatusText = "OCR: 400ms (capture 100ms + ocr 300ms) · 512 chars",
+        int greenCount = 10,
+        int yellowCount = 2,
+        int redCount = 1)
     {
         return new RxLogSnapshot
         {
@@ -30,14 +34,14 @@ public class RxLogFormatterTests
             Method = "OCR",
             RxWindowTitle = rxWindowTitle,
             StatusMessage = "Last checked 3:04:05 AM.",
-            OcrStatusText = "OCR: 400ms (capture 100ms + ocr 300ms) · 512 chars",
+            OcrStatusText = ocrStatusText ?? "",
             RawOcrText = rawOcrText,
             OcrWords = ocrWords ?? Array.Empty<OcrWord>(),
             Categories = categories ?? Array.Empty<RxLogCategorySnapshot>(),
             Notes = notes ?? Array.Empty<string>(),
-            GreenCount = 10,
-            YellowCount = 2,
-            RedCount = 1
+            GreenCount = greenCount,
+            YellowCount = yellowCount,
+            RedCount = redCount
         };
     }
 
@@ -128,5 +132,73 @@ public class RxLogFormatterTests
         var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(rawOcrText: null));
 
         Assert.DoesNotContain("Raw OCR text:", blob);
+    }
+
+    [Fact]
+    public void NullRxWindowTitleOmitsRxWindowLine()
+    {
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(rxWindowTitle: null));
+
+        Assert.DoesNotContain("Rx window:", blob);
+    }
+
+    /// <summary>
+    /// Regression test for the reviewer-flagged blocker: OverlayViewModel.
+    /// ClearCategories (window not found / screen disappeared branches of
+    /// RefreshAsync/WatchAsync) used to clear Categories/Notes/_lastOcrWords
+    /// but NOT OcrStatusText/LastOcrRawText, so a previously-reviewed Rx's
+    /// raw OCR text/PHI would still be sitting in those bound properties —
+    /// and would still show up in a "Copy logs" blob — even after the
+    /// pharmacist closed that Rx and RxWindowTitle had already gone null.
+    /// This models the exact before/after ClearCategories state (see
+    /// OverlayViewModel.cs ClearCategories's fix: OcrStatusText reset to
+    /// "OCR: not read yet." and LastOcrRawText reset to "") and asserts
+    /// the "after" blob is fully scrubbed of the "before" Rx's OCR text.
+    /// </summary>
+    [Fact]
+    public void ClearedStateBlob_ContainsNoPreviousRxOcrTextOrStatus()
+    {
+        const string previousRxOcrText = "SYNTHETIC RX-A RAW OCR TEXT: Jane Synthtest, Amoxicillin 500mg";
+        const string previousRxOcrStatus = "OCR: 350ms (capture 90ms + ocr 260ms) · 480 chars";
+
+        var loadedCategories = new List<RxLogCategorySnapshot>
+        {
+            new("Patient", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("patientName", "Name", "Green", "Jane Synthtest", "Jane Synthtest", "", "")
+            })
+        };
+
+        // "Before": Rx A is loaded and its OCR read has populated the
+        // ViewModel's bound OCR properties — sanity-checks that the
+        // fixture actually contains what a real "previous Rx" would.
+        var beforeBlob = RxLogFormatter.BuildLogBlob(MakeSnapshot(
+            categories: loadedCategories,
+            rawOcrText: previousRxOcrText,
+            ocrStatusText: previousRxOcrStatus,
+            rxWindowTitle: "Edit Rx - 0000001 - PioneerRx"));
+
+        Assert.Contains(previousRxOcrText, beforeBlob);
+        Assert.Contains(previousRxOcrStatus, beforeBlob);
+
+        // "After": the PioneerRx window has closed/changed — RefreshAsync's
+        // "window not found" branch (or WatchAsync's "screen disappeared"
+        // branch) has run ClearCategories, which now resets EVERY piece of
+        // per-Rx state, not just Categories/Notes/_lastOcrWords.
+        var afterBlob = RxLogFormatter.BuildLogBlob(MakeSnapshot(
+            categories: Array.Empty<RxLogCategorySnapshot>(),
+            notes: Array.Empty<string>(),
+            ocrWords: Array.Empty<OcrWord>(),
+            rawOcrText: "",
+            ocrStatusText: "OCR: not read yet.",
+            rxWindowTitle: null,
+            greenCount: 0,
+            yellowCount: 0,
+            redCount: 0));
+
+        Assert.DoesNotContain(previousRxOcrText, afterBlob);
+        Assert.DoesNotContain(previousRxOcrStatus, afterBlob);
+        Assert.DoesNotContain("Jane Synthtest", afterBlob);
+        Assert.DoesNotContain("Rx window:", afterBlob);
     }
 }
