@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using RxVerifyOverlay.Diagnostics;
 using RxVerifyOverlay.Engine;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
@@ -288,6 +289,27 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private int _refreshGeneration;
 
+    /// <summary>
+    /// The PioneerRx window title (e.g. "Edit Rx - 1234567 - ...") as of
+    /// the last RefreshAsync attach, or null if no window was attached
+    /// (window not found / attach failed). Not bound to any UI element —
+    /// it only exists so BuildCurrentLogBlob can label the copied log with
+    /// which Rx it came from. Overwritten (not accumulated) on every
+    /// RefreshAsync, same "current Rx only" scoping as everything else
+    /// BuildCurrentLogBlob reads.
+    /// </summary>
+    private string? _lastRxWindowTitle;
+
+    /// <summary>
+    /// The structured OCR word+bounding-box list from the most recent OCR
+    /// source read (see RefreshFromOcrAsync) — same data OcrLogger writes
+    /// to the %TEMP% log file, kept here too so BuildCurrentLogBlob can
+    /// include it in the "Copy logs" blob without re-reading the screen.
+    /// Empty (not the previous Rx's words) whenever the method is Uia or
+    /// no OCR read has happened yet.
+    /// </summary>
+    private IReadOnlyList<OcrWord> _lastOcrWords = Array.Empty<OcrWord>();
+
     public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
     {
         _engineClient = engineClient;
@@ -337,11 +359,14 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         using var window = PioneerRxWindow.TryAttach();
         if (window is null)
         {
+            _lastRxWindowTitle = null;
             StatusMessage = "Waiting for a PioneerRx Pre-Check/Edit/New Rx window...";
             ClearCategories();
             UpdateSummary(null);
             return;
         }
+
+        try { _lastRxWindowTitle = window.WindowElement.Name; } catch { _lastRxWindowTitle = null; }
 
         FieldReader reader;
         PrescriptionRecord entered;
@@ -396,6 +421,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         }
 
         var ocrWords = ocrResult.Words;
+        _lastOcrWords = ocrWords;
 
         // OCR path has no notes extraction (v0 or v1 — see
         // src/ocr/parseEscriptOcr.ts's documented "notes" gap: no
@@ -449,6 +475,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // showing stale/misleading OCR timing text.
         OcrStatusText = "OCR off — reading Escript tab directly";
         LastOcrRawText = "";
+        _lastOcrWords = Array.Empty<OcrWord>();
 
         PrescriptionRecord source;
         try
@@ -709,7 +736,19 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}.";
     }
 
-    /// <summary>Clears every category's rows (leaving the 3 category shells in place) — used by every early-return branch of RefreshAsync.</summary>
+    /// <summary>
+    /// Clears every category's rows (leaving the 3 category shells in
+    /// place) — used by every early-return branch of RefreshAsync/
+    /// WatchAsync (window not found, screen disappeared, source
+    /// unusable). MUST also reset OcrStatusText/LastOcrRawText (in
+    /// addition to _lastOcrWords) — otherwise a previous Rx's raw OCR
+    /// text/PHI would keep sitting in those bound properties after the
+    /// PioneerRx window closes/changes, and BuildCurrentLogBlob would
+    /// still emit it into the "Copy logs" blob even though RxWindowTitle
+    /// and every row/category had already gone empty. This is the same
+    /// "current Rx only, never accumulated" scoping as everything else
+    /// BuildCurrentLogBlob reads.
+    /// </summary>
     private void ClearCategories()
     {
         foreach (var category in Categories)
@@ -720,6 +759,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         }
 
         UpdateNotes(Array.Empty<string>());
+        _lastOcrWords = Array.Empty<OcrWord>();
+        OcrStatusText = "OCR: not read yet.";
+        LastOcrRawText = "";
     }
 
     /// <summary>Replaces Notes' contents and recomputes HasNotes — shared by RefreshAsync's ReadSource call and every ClearCategories early-return.</summary>
@@ -747,6 +789,54 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         var walker = new UiaTreeWalker(window.WindowElement);
         return walker.DumpTree();
+    }
+
+    /// <summary>
+    /// "Copy logs" button (MainWindow.xaml/.cs OnCopyLogsClick): builds the
+    /// single text blob to put on the clipboard, entirely from whatever is
+    /// ALREADY bound to the overlay UI right now (Categories/Rows,
+    /// OcrStatusText/LastOcrRawText/_lastOcrWords, Notes, StatusMessage,
+    /// summary counts) plus the app version/commit and current method/Rx
+    /// window title. Nothing here is accumulated across calls or across
+    /// Rx's — every field read is the SAME state the compact table is
+    /// currently rendering, so the blob always reflects only the Rx
+    /// currently under review (see RxLogSnapshot doc). The actual text
+    /// formatting is a pure function (RxLogFormatter.BuildLogBlob) so it's
+    /// unit-testable without a live OverlayViewModel.
+    /// </summary>
+    public string BuildCurrentLogBlob()
+    {
+        var snapshot = new RxLogSnapshot
+        {
+            CapturedAt = DateTime.Now,
+            AppVersion = AppDiagnostics.GetAppVersion(),
+            CommitSha = AppDiagnostics.GetCommitSha(),
+            Method = _settings.Method == VerificationMethod.Uia ? "Escript tab (direct UIA read)" : "OCR",
+            RxWindowTitle = _lastRxWindowTitle,
+            StatusMessage = StatusMessage,
+            OcrStatusText = OcrStatusText,
+            RawOcrText = LastOcrRawText,
+            OcrWords = _lastOcrWords,
+            Categories = Categories
+                .Select(c => new RxLogCategorySnapshot(
+                    c.Name,
+                    c.StatusText,
+                    c.Rows.Select(r => new RxLogFieldSnapshot(
+                        r.FieldKey,
+                        r.DisplayName,
+                        r.Status.ToString(),
+                        r.SourceValue,
+                        r.EnteredValue,
+                        r.ReasonCode,
+                        r.Explanation)).ToList()))
+                .ToList(),
+            Notes = Notes.ToList(),
+            GreenCount = GreenCount,
+            YellowCount = YellowCount,
+            RedCount = RedCount
+        };
+
+        return RxLogFormatter.BuildLogBlob(snapshot);
     }
 
     private void UpdateSummary(VerifySummary? summary)

@@ -237,6 +237,70 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         Title = $"Rx Verify — {label}";
     }
 
+    /// <summary>
+    /// "Copy logs" — builds the current-Rx log blob (OverlayViewModel.
+    /// BuildCurrentLogBlob) and puts it straight on the clipboard, so Will
+    /// can paste it into a message in one click instead of digging through
+    /// %TEMP%\VerifyOCR\ocr-*.log. In-memory + clipboard only: nothing is
+    /// written to disk by this button, and the blob is rebuilt fresh from
+    /// whatever is currently on screen every time (see
+    /// BuildCurrentLogBlob's "current Rx only" doc) rather than
+    /// accumulating history.
+    /// </summary>
+    private void OnCopyLogsClick(object sender, RoutedEventArgs e)
+    {
+        string blob;
+        try
+        {
+            blob = _viewModel.BuildCurrentLogBlob();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Couldn't build the log: {ex.Message}", "Rx Verify",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (!TrySetClipboardText(blob))
+        {
+            MessageBox.Show(this,
+                "Couldn't copy to the clipboard (it may be locked by another app — try again in a moment).",
+                "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        MessageBox.Show(this, "Log copied to clipboard.", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// Clipboard.SetText occasionally throws COMException/"clipboard could
+    /// not be opened" when another process (clipboard manager, etc.) is
+    /// briefly holding it — a well-known WPF clipboard gotcha, not
+    /// specific to this app. A few short retries clears the vast majority
+    /// of those transient failures without the pharmacist ever noticing.
+    /// </summary>
+    private static bool TrySetClipboardText(string text)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                Clipboard.SetText(text);
+                return true;
+            }
+            catch (Exception) when (attempt < 2)
+            {
+                System.Threading.Thread.Sleep(50);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
     private void OnDumpTreeClick(object sender, RoutedEventArgs e)
     {
         var dump = _viewModel.DumpCurrentWindowTree();

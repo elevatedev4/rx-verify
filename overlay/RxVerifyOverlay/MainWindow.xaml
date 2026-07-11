@@ -433,6 +433,19 @@
                            TextWrapping="Wrap" Margin="0,0,0,4" />
                 <StackPanel Orientation="Horizontal">
                     <Button Content="Refresh" Margin="0,0,6,0" Click="OnRefreshClick" />
+                    <!--
+                        "Copy logs" — one-click clipboard copy of everything
+                        needed to debug the CURRENTLY-DISPLAYED Rx (raw OCR
+                        text + word geometry, parsed/mapped fields, match
+                        verdicts, warnings/errors, app version + commit) so
+                        Will can paste it straight into a message instead of
+                        digging through %TEMP%\VerifyOCR\ocr-*.log. See
+                        OverlayViewModel.BuildCurrentLogBlob /
+                        Diagnostics/RxLogFormatter.cs. In-memory + clipboard
+                        only — reflects only this Rx, nothing persisted or
+                        accumulated across scripts.
+                    -->
+                    <Button Content="Copy logs" Margin="0,0,6,0" Click="OnCopyLogsClick" />
                     <Button Content="Dump UIA Tree..." Margin="0,0,6,0" Click="OnDumpTreeClick" />
                     <!--
                         W-T11 item 3: DEFAULT ON — checked by construction
