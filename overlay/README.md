@@ -56,8 +56,11 @@ the `rx-verify` root to confirm.
    subprocess; this is the only thing the overlay needs beyond .NET)
 3. **Visual Studio 2022** (Community edition is fine) or the `dotnet`
    CLI — either works for building
-4. This repo checked out somewhere on the workstation (e.g.
-   `C:\Users\will\claude\rx-verify`)
+4. This repo checked out somewhere on the workstation — the one-click
+   workflow below (and `install-shortcut.ps1`) always uses
+   `%USERPROFILE%\rx-verify` as the canonical location; if you're
+   checking it out by hand instead, any path works, but keep this
+   README's own examples in mind if you deviate from the convention.
 
 ## Build steps
 

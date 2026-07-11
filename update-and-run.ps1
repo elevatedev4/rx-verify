@@ -93,6 +93,81 @@ function Set-CachedValue {
 }
 
 # ---------------------------------------------------------------------
+# Legacy-copy notice: the canonical checkout this workflow manages is
+# $env:USERPROFILE\rx-verify (per Will's explicit direction - the old
+# ...\claude\rx-verify checkout is his to delete whenever he's ready,
+# this script never deletes anything on its own). If that old copy is
+# still sitting around, say so, every run, so it doesn't linger
+# forgotten. Purely informational - never touches it.
+# ---------------------------------------------------------------------
+function Write-LegacyCopyNoticeIfPresent {
+    $legacyRepoPath = Join-Path $env:USERPROFILE 'claude\rx-verify'
+    $legacyGitDir = Join-Path $legacyRepoPath '.git'
+    if (Test-Path $legacyGitDir) {
+        Write-Step 'Note: legacy copy at ~\claude\rx-verify is no longer used - safe to delete.'
+    }
+}
+
+# ---------------------------------------------------------------------
+# Stale engine-path migration: the overlay persists an ABSOLUTE engine
+# CLI path (EngineCliPath) in %AppData%\RxVerifyOverlay\settings.json
+# (see overlay/RxVerifyOverlay/Models/OverlaySettings.cs). On a machine
+# that used to have the repo checked out under the old
+# ...\claude\rx-verify location, that saved path still points there -
+# so this launcher would happily update/build the NEW
+# $env:USERPROFILE\rx-verify checkout while the overlay keeps silently
+# running the STALE dist\cli.js from the old one. Rewrite just that one
+# key, only when: the settings file exists, EngineCliPath contains the
+# old '\claude\rx-verify\' segment, and the equivalent new path actually
+# exists (never point the overlay at a path that isn't there). Every
+# other key in the file is round-tripped untouched.
+# ---------------------------------------------------------------------
+function Update-StaleEngineSettingsPath {
+    param([string]$RepoPath)
+
+    if (-not $env:APPDATA) { return }
+    $settingsPath = Join-Path $env:APPDATA 'RxVerifyOverlay\settings.json'
+    if (-not (Test-Path $settingsPath)) { return }
+
+    $legacyMarker = '\claude\rx-verify\'
+
+    try {
+        $json = Get-Content -Path $settingsPath -Raw -ErrorAction Stop
+        $settingsObj = $json | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-Detail 'Could not read overlay settings.json to check for a stale engine path - leaving it alone.'
+        return
+    }
+
+    if ($null -eq $settingsObj) { return }
+    if (-not ($settingsObj.PSObject.Properties.Name -contains 'EngineCliPath')) { return }
+
+    $currentEnginePath = $settingsObj.EngineCliPath
+    if ([string]::IsNullOrWhiteSpace($currentEnginePath)) { return }
+
+    $markerIndex = $currentEnginePath.ToLowerInvariant().IndexOf($legacyMarker.ToLowerInvariant())
+    if ($markerIndex -lt 0) { return } # absent or already pointing somewhere else - leave it alone.
+
+    $remainder = $currentEnginePath.Substring($markerIndex + $legacyMarker.Length)
+    $newEnginePath = Join-Path $RepoPath $remainder
+
+    if ($newEnginePath -eq $currentEnginePath) { return }
+    if (-not (Test-Path $newEnginePath)) {
+        # The equivalent new-location file doesn't exist (yet) - don't
+        # point the overlay at something that isn't there.
+        return
+    }
+
+    $settingsObj.EngineCliPath = $newEnginePath
+    try {
+        ($settingsObj | ConvertTo-Json -Depth 5) | Set-Content -Path $settingsPath -Encoding UTF8
+        Write-Step "Updated overlay settings: engine path was pointing at the old \claude\rx-verify checkout - repointed to $newEnginePath"
+    } catch {
+        Write-Detail 'Could not update overlay settings.json automatically - update the engine CLI path by hand in the overlay Engine settings panel.'
+    }
+}
+
+# ---------------------------------------------------------------------
 # Step 0: make sure the repo exists at the canonical path.
 # ---------------------------------------------------------------------
 $gitDir = Join-Path $RepoPath '.git'
@@ -113,6 +188,8 @@ if (-not (Test-Path $gitDir)) {
 }
 
 Set-Location -Path $RepoPath
+
+Write-LegacyCopyNoticeIfPresent
 
 $CacheDir = Join-Path $RepoPath '.launcher-cache'
 if (-not (Test-Path $CacheDir)) {
@@ -250,6 +327,12 @@ if ($needOverlayBuild) {
 if (($overlayExePath -eq $null) -or (-not (Test-Path $overlayExePath))) {
     Stop-WithMessage 'Could not find RxVerifyOverlay.exe after building. Something is wrong with the overlay build output path.'
 }
+
+# dist\cli.js is guaranteed to exist at this point (either the engine
+# build above just succeeded, or $needEngineBuild was false specifically
+# because it already existed) - safe to check the overlay's saved engine
+# path against it now.
+Update-StaleEngineSettingsPath -RepoPath $RepoPath
 
 Write-Step 'Launching Rx Verify...'
 Start-Process -FilePath $overlayExePath -WorkingDirectory (Split-Path -Path $overlayExePath -Parent)
