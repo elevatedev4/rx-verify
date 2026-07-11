@@ -84,6 +84,13 @@ cd overlay\RxVerifyOverlay
 dotnet run
 ```
 
+**Day-to-day, use the one-click launcher instead** — `update-and-run.ps1`
+at the repo root (or the "Rx Verify" Desktop shortcut it installs) pulls,
+rebuilds only what changed, and launches the built exe directly; see
+`../README.md` "Rapid update/deploy workflow (Windows)". The manual
+`dotnet run` steps above are still the right tool when you're actively
+editing overlay code yourself and want a live debug session.
+
 On first launch:
 
 1. The window opens always-on-top in the top-left corner (drag it

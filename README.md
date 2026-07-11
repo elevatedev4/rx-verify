@@ -223,6 +223,55 @@ what's known-uncertain (the UIA label/geometry guesses), and the
 "Dump UIA Tree" debug workflow for validating/adjusting it on a real
 workstation.
 
+### Rapid update/deploy workflow (Windows) — one double-click
+
+Pulling, rebuilding, and relaunching by hand every time a change lands
+gets old fast. Two scripts at the repo root turn that into a single
+double-click:
+
+- **`update-and-run.ps1`** — pulls the latest code (`git pull
+  --ff-only` — never merges/rebases, so it can never clobber a local
+  edit), runs `npm install` only if `package-lock.json` changed since
+  the last successful install, runs `npm run build` (the TypeScript
+  engine) only if `src/` or the package/tsconfig files changed since
+  the last successful build, builds the overlay (`dotnet build`) only
+  if `overlay/` changed since the last successful build, then launches
+  the built `RxVerifyOverlay.exe`. Every "only if changed" check is a
+  cached hash under `.launcher-cache/` (gitignored, local to the
+  machine) — run it twice in a row with nothing changed and it does
+  zero npm/dotnet work, just relaunches the app in under a second.
+  If the repo isn't present yet at `%USERPROFILE%\rx-verify` (a new
+  machine, or the folder got wiped), it clones it there first.
+- **`install-shortcut.ps1`** — one-time setup. Makes sure the repo
+  exists at `%USERPROFILE%\rx-verify` (cloning it if this is the very
+  first run on this machine) and creates a Desktop shortcut named
+  **"Rx Verify"** that runs `update-and-run.ps1`. After this, updating
+  and relaunching the app is that one shortcut — no terminal needed.
+
+**Setup (once per machine):**
+
+```powershell
+# From a PowerShell prompt, wherever you currently have the repo checked
+# out (or even with no repo at all — it'll clone one):
+powershell -ExecutionPolicy Bypass -File install-shortcut.ps1
+```
+
+Then just double-click **"Rx Verify"** on the Desktop any time — before
+a shift, or whenever told a fix shipped. It prints one clear line up
+front (`Already up to date — launching...` or `Updating... building...
+launching...`), plus one indented detail line per step it actually ran.
+
+If `git pull` ever fails (diverged history, a stray local edit, no
+network), the script stops immediately, changes nothing, and tells you
+to copy the error and send it back — it will never try to stash,
+merge, or discard anything on its own.
+
+Both scripts are plain Windows PowerShell 5.1 (the version already on
+every Windows 10/11 box — no PS7 install needed) and are safe to
+re-run any time; nothing they do is destructive. Neither creates a
+scheduled task or a background service — they only run when you
+double-click the shortcut.
+
 Remaining suggested next steps:
 
 1. Validate/adjust `overlay/RxVerifyOverlay/Uia/FieldMap.cs` and
