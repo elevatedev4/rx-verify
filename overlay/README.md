@@ -57,12 +57,18 @@ the `rx-verify` root to confirm.
 3. **Visual Studio 2022** (Community edition is fine) or the `dotnet`
    CLI — either works for building
 4. This repo checked out somewhere on the workstation — the one-click
-   workflow below (and `install-shortcut.ps1`) always uses
-   `%USERPROFILE%\rx-verify` as the canonical location; if you're
-   checking it out by hand instead, any path works, but keep this
-   README's own examples in mind if you deviate from the convention.
+   workflow below (and `install-shortcut.ps1`) uses
+   `%USERPROFILE%\claude\rx-verify` as the canonical location; if you're
+   checking it out by hand instead, any path works — `update-and-run.ps1`
+   self-locates from wherever it lives, but keep this README's own
+   examples in mind if you deviate from the convention.
 
 ## Build steps
+
+**`dotnet build` only compiles — it does NOT launch the app.** If you
+run `dotnet build` and nothing happens, that's expected; you still need
+to run the built `.exe` (or `dotnet run`, or `update-and-run.ps1`) to
+actually launch it. See "Run steps" below.
 
 ```powershell
 # 1. Build the engine (from the rx-verify repo root, not this overlay folder)
@@ -82,17 +88,23 @@ and build from there (F6 / Ctrl+Shift+B).
 
 ## Run steps
 
+**Day-to-day, use the one-click launcher** — `update-and-run.ps1` at the
+repo root (or the "Rx Verify" Desktop shortcut it installs) pulls,
+always rebuilds fresh, and launches the built exe directly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
+```
+
+See `../README.md` "Rapid update/deploy workflow (Windows)" for the
+full bootstrap/setup commands. Manually running `dotnet run` is still
+the right tool when you're actively editing overlay code yourself and
+want a live debug session:
+
 ```powershell
 cd overlay\RxVerifyOverlay
 dotnet run
 ```
-
-**Day-to-day, use the one-click launcher instead** — `update-and-run.ps1`
-at the repo root (or the "Rx Verify" Desktop shortcut it installs) pulls,
-rebuilds only what changed, and launches the built exe directly; see
-`../README.md` "Rapid update/deploy workflow (Windows)". The manual
-`dotnet run` steps above are still the right tool when you're actively
-editing overlay code yourself and want a live debug session.
 
 On first launch:
 

@@ -225,41 +225,60 @@ workstation.
 
 ### Rapid update/deploy workflow (Windows) — one double-click
 
+**Important: `dotnet build` alone does NOT launch the app.** It only
+compiles. To actually run the overlay you must run the built `.exe` (or
+`dotnet run`) — or, easier, use `update-and-run.ps1` below, which builds
+*and* launches in one step.
+
 Pulling, rebuilding, and relaunching by hand every time a change lands
 gets old fast. Two scripts at the repo root turn that into a single
-double-click:
+double-click. Both are **self-locating** — they figure out the repo
+root from their own folder (`$PSScriptRoot`), so they work no matter
+where you've cloned the repo. The canonical location on a fresh PC is
+`%USERPROFILE%\claude\rx-verify`.
 
 - **`update-and-run.ps1`** — pulls the latest code (`git pull
   --ff-only` — never merges/rebases, so it can never clobber a local
   edit), runs `npm install` only if `package-lock.json` changed since
-  the last successful install, runs `npm run build` (the TypeScript
-  engine) only if `src/` or the package/tsconfig files changed since
-  the last successful build, builds the overlay (`dotnet build`) only
-  if `overlay/` changed since the last successful build, then launches
-  the built `RxVerifyOverlay.exe`. Every "only if changed" check is a
-  cached hash under `.launcher-cache/` (gitignored, local to the
-  machine) — run it twice in a row with nothing changed and it does
-  zero npm/dotnet work, just relaunches the app in under a second.
-  If the repo isn't present yet at `%USERPROFILE%\rx-verify` (a new
-  machine, or the folder got wiped), it clones it there first.
+  the last successful install, then **always** runs `npm run build`
+  (the TypeScript engine) and `dotnet build` (the overlay) fresh —
+  every single run, no staleness guesswork — and launches the built
+  `RxVerifyOverlay.exe`. Both builds are incremental under the hood
+  (a warm `dotnet build` is well under a second), so always rebuilding
+  costs nothing and guarantees you're never looking at a stale binary.
+  If any step fails (pull, either build, or the `.exe` not being
+  found), it prints exactly which step failed and the exact path it
+  looked for, then holds the window open with "Press Enter to close"
+  so you can read it.
 - **`install-shortcut.ps1`** — one-time setup. Makes sure the repo
-  exists at `%USERPROFILE%\rx-verify` (cloning it if this is the very
-  first run on this machine) and creates a Desktop shortcut named
-  **"Rx Verify"** that runs `update-and-run.ps1`. After this, updating
-  and relaunching the app is that one shortcut — no terminal needed.
+  exists at `%USERPROFILE%\claude\rx-verify` (cloning it, creating the
+  `claude` parent folder if needed, if this is the very first run on
+  this machine) and creates a Desktop shortcut named **"Rx Verify"**
+  that runs `update-and-run.ps1`. This is a convenience — the primary
+  flow is running `update-and-run.ps1` directly (see below).
 
-**Setup (once per machine):**
+**Fresh PC (bootstrap — clones to `\claude\rx-verify` then runs):**
 
 ```powershell
-# From a PowerShell prompt, wherever you currently have the repo checked
-# out (or even with no repo at all — it'll clone one):
+powershell -ExecutionPolicy Bypass -Command "if (!(Test-Path $env:USERPROFILE\claude\rx-verify)) { New-Item -ItemType Directory -Force -Path $env:USERPROFILE\claude | Out-Null; git clone https://github.com/elevatedev4/rx-verify.git $env:USERPROFILE\claude\rx-verify }; powershell -ExecutionPolicy Bypass -File $env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
+```
+
+(These paths never contain spaces, so the inner path arguments are deliberately unquoted — PowerShell double-quoted strings only treat `` `" `` or `""` as an escaped quote, not `\"`, so quoting them the "obvious" way here actually truncates the `-Command` string and breaks the whole line.)
+
+**Every run after (pull + fresh build + launch):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
+```
+
+**Optional one-time shortcut setup**, from inside an already-cloned repo:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File install-shortcut.ps1
 ```
 
-Then just double-click **"Rx Verify"** on the Desktop any time — before
-a shift, or whenever told a fix shipped. It prints one clear line up
-front (`Already up to date — launching...` or `Updating... building...
-launching...`), plus one indented detail line per step it actually ran.
+Then double-click **"Rx Verify"** on the Desktop any time — before a
+shift, or whenever told a fix shipped.
 
 If `git pull` ever fails (diverged history, a stray local edit, no
 network), the script stops immediately, changes nothing, and tells you
@@ -270,7 +289,7 @@ Both scripts are plain Windows PowerShell 5.1 (the version already on
 every Windows 10/11 box — no PS7 install needed) and are safe to
 re-run any time; nothing they do is destructive. Neither creates a
 scheduled task or a background service — they only run when you
-double-click the shortcut.
+double-click the shortcut or run them directly.
 
 Remaining suggested next steps:
 

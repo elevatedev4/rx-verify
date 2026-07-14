@@ -9,13 +9,14 @@
     PowerShell prompt). It:
 
       1. Makes sure the repo exists at the canonical path,
-         $env:USERPROFILE\rx-verify (clones it if this is a brand new
-         machine and it isn't there yet - same clone this script and
+         $env:USERPROFILE\claude\rx-verify (clones it, creating the
+         \claude parent folder if needed, if this is a brand new machine
+         and it isn't there yet - same clone this script and
          update-and-run.ps1 both use, so the "one true copy" this
          workflow manages always ends up in the same place).
       2. Creates (or overwrites - safe to re-run any time) a Desktop
          shortcut named "Rx Verify" that runs:
-           powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\rx-verify\update-and-run.ps1"
+           powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
 
     -ExecutionPolicy Bypass on the shortcut's own invocation only
     affects that one process - it does not change your machine's
@@ -27,7 +28,7 @@
 $ErrorActionPreference = 'Stop'
 
 $RepoUrl = 'https://github.com/elevatedev4/rx-verify.git'
-$RepoPath = Join-Path $env:USERPROFILE 'rx-verify'
+$RepoPath = Join-Path $env:USERPROFILE 'claude\rx-verify'
 $LauncherScriptPath = Join-Path $RepoPath 'update-and-run.ps1'
 
 function Write-Step {
@@ -88,5 +89,5 @@ $shortcut.IconLocation = $powershellExePath + ',0'
 $shortcut.Description = 'Update and launch Rx Verify'
 $shortcut.Save()
 
-Write-Step "Done. '$shortcutPath' now updates, builds (only what changed), and launches Rx Verify in one double-click."
+Write-Step "Done. '$shortcutPath' now updates, builds fresh, and launches Rx Verify in one double-click."
 Read-Host 'Press Enter to close this window'
