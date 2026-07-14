@@ -12,10 +12,14 @@
          the repo is at \claude\rx-verify, \rx-verify, or anywhere else,
          since if this script is running, the repo already exists around
          it.
-      2. git pull --ff-only - never merges, never rebases, never
-         discards anything. If this fails (diverged history, a
-         conflicting local edit, no network), the script stops with a
-         plain-English message and does NOT touch the working tree.
+      2. git fetch origin + git checkout -f -B main origin/main - forces
+         the local `main` branch to exactly match GitHub's `main`,
+         regardless of local drift (detached HEAD, wrong branch, a
+         missing local `main`, a dirty tree, or diverged local commits).
+         GitHub is the source of truth on these deploy-and-test
+         machines, so this intentionally discards local modifications.
+         If the fetch or checkout fails, the script stops with a
+         plain-English message naming which step failed.
       3. npm install - ONLY if package-lock.json changed since the last
          successful install (hash cached locally), or node_modules is
          missing (first run). This is the one step that's safe to skip
@@ -28,7 +32,7 @@
          nothing changed.
       6. Launches the freshly built overlay .exe.
 
-    Any failed step (git pull, npm install, npm run build, dotnet build,
+    Any failed step (git fetch/checkout, npm install, npm run build, dotnet build,
     or not finding the built .exe) prints exactly which step failed and
     the exact path/command involved, then holds the window open with
     "Press Enter to close" so the error is readable even when this was
@@ -113,16 +117,28 @@ if (-not (Test-Path $CacheDir)) {
 $LockfileHashPath = Join-Path $CacheDir 'lockfile.hash'
 
 # ---------------------------------------------------------------------
-# Step 1: pull. --ff-only guarantees this either fast-forwards cleanly
-# or fails loudly and changes NOTHING - no merge, no rebase, no stash,
-# nothing that could ever clobber a local edit.
+# Step 1: sync to origin/main. Rather than `git pull --ff-only` (which
+# can silently no-op and leave the working tree on stale code if the
+# local checkout has drifted off `main` - detached HEAD, a different
+# local branch, or diverged local commits), force the local `main`
+# branch to exactly match GitHub's `main` every run. GitHub is the
+# source of truth for these deploy-and-test machines; the app's own
+# settings live in %AppData% and build output is gitignored, so
+# discarding local modifications here is safe and intended.
 # ---------------------------------------------------------------------
-Write-Step 'Checking for updates...'
-$pullOutput = git pull --ff-only 2>&1
-$pullExitCode = $LASTEXITCODE
-$pullOutput | ForEach-Object { Write-Detail $_ }
-if ($pullExitCode -ne 0) {
-    Stop-WithMessage "git pull --ff-only failed in $RepoPath. This usually means there are local changes on this machine that conflict with the update, or the history has diverged."
+Write-Host "Syncing to latest from GitHub (origin/main)..." -ForegroundColor Cyan
+$fetchOutput = git fetch origin 2>&1
+$fetchExitCode = $LASTEXITCODE
+$fetchOutput | ForEach-Object { Write-Detail $_ }
+if ($fetchExitCode -ne 0) {
+    Stop-WithMessage "git fetch origin failed in $RepoPath. Check the network connection and try again."
+}
+
+$checkoutOutput = git checkout -f -B main origin/main 2>&1
+$checkoutExitCode = $LASTEXITCODE
+$checkoutOutput | ForEach-Object { Write-Detail $_ }
+if ($checkoutExitCode -ne 0) {
+    Stop-WithMessage "git checkout -f -B main origin/main failed in $RepoPath. The local checkout could not be synced to match GitHub's main branch."
 }
 
 # ---------------------------------------------------------------------
