@@ -260,8 +260,10 @@ where you've cloned the repo. The canonical location on a fresh PC is
 **Fresh PC (bootstrap — clones to `\claude\rx-verify` then runs):**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "if(!(Test-Path \"$env:USERPROFILE\claude\rx-verify\")){ New-Item -ItemType Directory -Force -Path \"$env:USERPROFILE\claude\" | Out-Null; git clone https://github.com/elevatedev4/rx-verify.git \"$env:USERPROFILE\claude\rx-verify\" }; powershell -ExecutionPolicy Bypass -File \"$env:USERPROFILE\claude\rx-verify\update-and-run.ps1\""
+powershell -ExecutionPolicy Bypass -Command "if (!(Test-Path $env:USERPROFILE\claude\rx-verify)) { New-Item -ItemType Directory -Force -Path $env:USERPROFILE\claude | Out-Null; git clone https://github.com/elevatedev4/rx-verify.git $env:USERPROFILE\claude\rx-verify }; powershell -ExecutionPolicy Bypass -File $env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
 ```
+
+(These paths never contain spaces, so the inner path arguments are deliberately unquoted — PowerShell double-quoted strings only treat `` `" `` or `""` as an escaped quote, not `\"`, so quoting them the "obvious" way here actually truncates the `-Command` string and breaks the whole line.)
 
 **Every run after (pull + fresh build + launch):**
 

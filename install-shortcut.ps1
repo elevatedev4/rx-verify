@@ -89,5 +89,5 @@ $shortcut.IconLocation = $powershellExePath + ',0'
 $shortcut.Description = 'Update and launch Rx Verify'
 $shortcut.Save()
 
-Write-Step "Done. '$shortcutPath' now updates, builds (only what changed), and launches Rx Verify in one double-click."
+Write-Step "Done. '$shortcutPath' now updates, builds fresh, and launches Rx Verify in one double-click."
 Read-Host 'Press Enter to close this window'
