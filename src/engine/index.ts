@@ -160,7 +160,7 @@ export function verify(
     entered.quantityUnit,
     enteredSigParsed
   );
-  const refillsResult = compareRefills(source.refills, entered.refills);
+  const refillsResult = compareRefills(source.refills, entered.refills, source.refillsFromTotalFills);
   const dawResult = compareDaw(source.substitutionsNotAllowed, entered.daw);
 
   const verdicts: FieldVerdict[] = [

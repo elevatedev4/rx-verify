@@ -87,6 +87,17 @@ export interface PrescriptionRecord {
   quantityUnit?: string;
   refills?: string | number;
   /**
+   * SOURCE-side only: true when `refills` above was read off a "Total
+   * fills: N" label (seen on responded refill-request e-scripts) rather
+   * than an ordinary "Refills"/"Refills Authorized"/"Refills Remaining"
+   * label. "Total fills" counts the initial fill PLUS refills, so the
+   * refill count that should be compared against what the technician
+   * entered is N-1, not the raw N stored in `refills` — see
+   * compareRefills (src/quantity/index.ts), which applies that -1 only
+   * when this flag is set. Never meaningfully set on the entered side.
+   */
+  refillsFromTotalFills?: boolean;
+  /**
    * SOURCE-side only: true when the e-script's MedicationPrescribed >
    * Substitutions indicator states the prescriber does NOT allow
    * substitution (NCPDP SCRIPT code 1, "Substitution Not Allowed by
