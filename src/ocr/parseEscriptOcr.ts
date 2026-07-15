@@ -961,18 +961,26 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       } else {
         for (let i = 1; i < remainderWordsRaw.length; i++) {
           const embedded = findLabelAt(remainderWordsRaw, i);
-          // Deliberately narrow (kept from the original 831cefc fix): only
-          // split on an embedded 'refills' label when real VALUE text
-          // precedes it on the row (Quantity value + Refills label+value
-          // packed on one row). A broader "any embedded label splits the
-          // row" rule here risks false splits on legitimate multi-word
-          // values elsewhere. The label-ONLY-row case (no value text at
-          // all before the next label) is handled generally above.
+          // Generalized (branch brief "OCR address extraction" — was
+          // narrowly restricted to the 'refills' key only, kept from the
+          // original 831cefc fix). A right-hand column's label always
+          // bounds the current field's value: e.g. patientAddress's
+          // "Address:" row also carries a separate "Phone" column further
+          // right on the SAME physical OCR row when the on-screen gap
+          // between them is under MAX_VALUE_WORD_GAP_PX (trimColumnGap
+          // alone doesn't catch that case). Requiring an EXACT (not fuzzy)
+          // canonical match here — same rigor as remainderStartsWithExactLabel
+          // above — is what keeps this generalization from misfiring on
+          // ordinary multi-word value text that merely resembles a label
+          // (e.g. "not allowed" fuzzy-matching 'note'): a real label's own
+          // on-screen text matches its canonical form exactly, with no OCR
+          // mangling simulated in these fixtures' geometry-only
+          // distinction.
           if (
             embedded &&
             !embedded.label.ignore &&
-            embedded.label.key === 'refills' &&
-            match.label.key !== 'refills'
+            embedded.label.key !== match.label.key &&
+            normalize(wordsToText(remainderWordsRaw.slice(i, i + embedded.consumed))) === embedded.label.canonical
           ) {
             splitIdx = i;
             break;
@@ -1163,6 +1171,59 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     for (const group of unresolvedGroups) {
       const lineIdx = pickFallback();
       if (lineIdx !== null) assignGroup(group.groupKeys, lineIdx);
+    }
+
+    // ---- Prescriber address wrapped 2nd line (branch brief "OCR address
+    // extraction", bug 2) ----
+    // groupLines splits rows on a Y gap beyond ~avgH*0.6, so a wrapped
+    // "city, state zip" continuation line rendered a row or two below the
+    // "Prescriber Location:" value (e.g. "4477 MOCKAVE PL" / "FAKEVILLE, KS
+    // 990047213") lands as its own leftover line, never consumed by Pass
+    // A/B. Deliberately SCOPED to the 'location' key only (not applied to
+    // patientAddress, which the real capture never wraps) and GEOMETRIC/
+    // PATTERN-based, not layout-hardcoded: bounded purely by (1) the
+    // location label's own row Y, (2) the next recognized label's row Y
+    // (whatever it happens to be — "Phone" here, but nothing about this
+    // logic assumes that literal label), (3) the continuation line sitting
+    // in the same left-x column as the location value, and (4) the
+    // continuation line's text itself looking like an address tail (a
+    // state abbreviation AND a 5- or 9-digit ZIP), not just any nearby
+    // line — a Note/Substitutions row two lines down must never be
+    // mistaken for an address continuation.
+    const ADDRESS_CONTINUATION_RE = /\b[A-Z]{2}\b/;
+    const ZIP_TAIL_RE = /\b\d{5}(\d{4})?\b/;
+    if (raw.location) {
+      const locationIdx = labelOrder.findIndex((k) => k === 'location');
+      const locationMeta = resolutionMeta.location;
+      if (locationIdx !== -1 && locationMeta) {
+        const locationRowY = (labelPositions[locationIdx] as { x: number; y: number; text: string }).y;
+        const valueX = (locationMeta.words[0] as OcrWord).x;
+        let nextLabelY = Number.POSITIVE_INFINITY;
+        for (const p of labelPositions) {
+          if (p.y > locationRowY + 1 && p.y < nextLabelY) nextLabelY = p.y;
+        }
+        let bestIdx = -1;
+        for (let i = 0; i < leftoverLines.length; i++) {
+          if (consumedLeftover.has(i)) continue;
+          const line = leftoverLines[i] as OcrWord[];
+          const first = line[0] as OcrWord;
+          if (first.y <= locationRowY + 1 || first.y >= nextLabelY) continue;
+          if (Math.abs(first.x - valueX) > MAX_VALUE_WORD_GAP_PX / 2) continue;
+          const text = wordsToText(line);
+          if (!ADDRESS_CONTINUATION_RE.test(text) || !ZIP_TAIL_RE.test(text)) continue;
+          bestIdx = i;
+          break;
+        }
+        if (bestIdx !== -1) {
+          consumedLeftover.add(bestIdx);
+          const continuationWords = leftoverLines[bestIdx] as OcrWord[];
+          raw.location = `${raw.location} ${wordsToText(continuationWords)}`;
+          resolutionMeta.location = {
+            strategy: locationMeta.strategy,
+            words: [...locationMeta.words, ...continuationWords]
+          };
+        }
+      }
     }
 
     // ---- Pattern anchors: NPI / NDC, independent of any label ----
