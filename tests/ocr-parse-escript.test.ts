@@ -903,6 +903,144 @@ describe('parseEscriptOcr', () => {
     expect(record.prescriber?.phone).toBe('(555) 555-4488');
   });
 
+  it('(t) [live-tuning fixture 8, real capture geometry] sig row also carries a bare right-column days-supply number ~90px away (under the generic 150px column-gap threshold, no "DS" label token present) — must be excluded from sig', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump (PHI replaced with fabricated prescriber/patient
+    // text). The real capture's directions/sig row (y=381) has all
+    // internal word gaps of 2-4px, then a lone days-supply value ("30")
+    // lands ~90px to the right with NO preceding "DS" label token to
+    // bound it via the embedded-label split — under
+    // MAX_VALUE_WORD_GAP_PX (150) so the generic trimColumnGap alone
+    // never catches it; the sig-specific tighter column-gap must.
+    const prescriberRow: OcrWord[] = [
+      { text: 'Prescriber', x: 48, y: 186, w: 58, h: 10 },
+      { text: 'Reyes,', x: 120, y: 186, w: 44, h: 15 },
+      { text: 'Priya', x: 168, y: 186, w: 58, h: 12 },
+      { text: 'Agent', x: 506, y: 186, w: 36, h: 13 },
+      { text: 'name', x: 544, y: 189, w: 35, h: 7 }
+    ];
+    const directionsRow: OcrWord[] = [
+      { text: 'Di', x: 48, y: 381, w: 11, h: 11 },
+      { text: 'recti', x: 61, y: 381, w: 23, h: 11 },
+      { text: 'ons:', x: 85, y: 384, w: 22, h: 8 },
+      { text: 'Apply', x: 121, y: 381, w: 42, h: 15 },
+      { text: 'to', x: 166, y: 382, w: 14, h: 11 },
+      { text: 'sca', x: 183, y: 384, w: 25, h: 9 },
+      { text: 'Ip', x: 210, y: 382, w: 13, h: 14 },
+      { text: 'Externally', x: 226, y: 381, w: 74, h: 15 },
+      { text: 'Twice', x: 302, y: 381, w: 45, h: 12 },
+      { text: 'a', x: 349, y: 384, w: 9, h: 9 },
+      { text: 'day', x: 361, y: 381, w: 26, h: 15 },
+      { text: 'when', x: 389, y: 382, w: 38, h: 11 },
+      { text: 'needed', x: 431, y: 381, w: 52, h: 12 },
+      { text: 'for', x: 486, y: 381, w: 20, h: 12 },
+      { text: 'flares', x: 508, y: 381, w: 39, h: 12 },
+      // Bare right-column days-supply value, ~90px gap, no "DS" label.
+      { text: '30', x: 637, y: 381, w: 16, h: 11 }
+    ];
+    const noteRow: OcrWord[] = [{ text: 'Note', x: 78, y: 533, w: 29, h: 10 }];
+
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow, directionsRow, noteRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.sig).toBe('Apply to sca Ip Externally Twice a day when needed for flares');
+    expect(record.sig).not.toContain('30');
+  });
+
+  it('(t2) sig row carries an explicit "DS" ignore-label immediately before the days-supply value — Change 2 (ignore-labels bound values) must stop sig there, even though sig is not a NOISE_TRIM_KEYS field', () => {
+    // Unlike (t) above (bare number, no label token — caught by the
+    // sig-specific column-gap trim), this row has an actual "DS" token
+    // recognized as the 'ds2' ignore-label. Sig is NOT in
+    // NOISE_TRIM_KEYS, so trimValueNoise/CHROME_TOKENS never runs on it
+    // — the embedded-label split fix (Change 2, ~line 981) is the ONLY
+    // mechanism that can bound sig here.
+    const directionsRow: OcrWord[] = [
+      { text: 'Directions:', x: 48, y: 381, w: 68, h: 11 },
+      { text: 'Apply', x: 121, y: 381, w: 42, h: 15 },
+      { text: 'topically', x: 166, y: 381, w: 50, h: 11 },
+      { text: 'daily', x: 219, y: 381, w: 30, h: 11 },
+      { text: 'DS', x: 500, y: 381, w: 16, h: 11 },
+      { text: '30', x: 520, y: 381, w: 16, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), directionsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.sig).toBe('Apply topically daily');
+    expect(record.sig).not.toContain('30');
+    expect(record.sig).not.toMatch(/ds/i);
+  });
+
+  it('(u) sig wraps onto 1-2 continuation rows below the directions row, joined in order, and stops at the next recognized label ("Note") without swallowing it', () => {
+    const directionsRow: OcrWord[] = [
+      { text: 'Directions:', x: 48, y: 381, w: 68, h: 11 },
+      { text: 'Apply', x: 121, y: 381, w: 42, h: 15 },
+      { text: 'to', x: 166, y: 382, w: 14, h: 11 },
+      { text: 'scalp', x: 183, y: 382, w: 30, h: 11 }
+    ];
+    // Wrapped continuation lines: same left-x column as the directions
+    // value (121), sitting below it, above the next label ("Note", y=533).
+    const continuation1: OcrWord[] = [
+      { text: 'twice', x: 121, y: 405, w: 34, h: 11 },
+      { text: 'daily', x: 158, y: 405, w: 30, h: 11 }
+    ];
+    const continuation2: OcrWord[] = [{ text: 'for', x: 121, y: 429, w: 20, h: 11 }, { text: 'flares', x: 144, y: 429, w: 39, h: 11 }];
+    const noteRow: OcrWord[] = [{ text: 'Note', x: 78, y: 533, w: 29, h: 10 }];
+
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), directionsRow, continuation1, continuation2, noteRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.sig).toBe('Apply to scalp twice daily for flares');
+    expect(record.sig).not.toMatch(/note/i);
+  });
+
+  it('(v) prescriber name over-run: "Prescriber:" row also carries a right-column "Agent name" ignore-label — must bound prescriberName so it does not bleed in', () => {
+    // SYNTHETIC — geometry copied verbatim from the real dump (PHI
+    // replaced with a fabricated name): the prescriber name value @
+    // (120,186)/(168,186), right-column "Agent" @ (506,186) "name" @
+    // (544,189). Before the fix, the
+    // 'agentName' ignore-label was excluded from the embedded-label
+    // split at line ~981, so it never bounded the prescriber value.
+    const prescriberRow: OcrWord[] = [
+      { text: 'Prescriber', x: 48, y: 186, w: 58, h: 10 },
+      { text: 'Reyes,', x: 120, y: 186, w: 44, h: 15 },
+      { text: 'Priya', x: 168, y: 186, w: 58, h: 12 },
+      { text: 'Agent', x: 506, y: 186, w: 36, h: 13 },
+      { text: 'name', x: 544, y: 189, w: 35, h: 7 }
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.prescriber?.name).toBe('Reyes, Priya');
+    expect(record.prescriber?.name).not.toMatch(/agent/i);
+    expect(record.prescriber?.name).not.toMatch(/name/i);
+  });
+
+  it('(w) Change 3: "Total fills" is recognized as a refills label variant, and marks refillsFromTotalFills so the effective count is N-1 at comparison time', () => {
+    const totalFillsRow: OcrWord[] = [
+      { text: 'Total', x: 593, y: 358, w: 34, h: 10 },
+      { text: 'fills', x: 630, y: 358, w: 24, h: 10 },
+      { text: '5', x: 660, y: 358, w: 6, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('5');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('(w) ordinary "Refills" label does NOT set refillsFromTotalFills', () => {
+    const refillsRow: OcrWord[] = [
+      { text: 'Refills', x: 593, y: 358, w: 37, h: 10 },
+      { text: '4', x: 639, y: 358, w: 6, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [

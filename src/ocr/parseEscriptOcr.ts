@@ -143,6 +143,12 @@ const LABELS: LabelDef[] = [
   // shadows the real value.
   { key: 'refills', canonical: 'refillsauthorized', maxWords: 2 },
   { key: 'refills', canonical: 'refillsremaining', maxWords: 2 },
+  // Source refills labeled "Total fills: N" (seen on responded
+  // refill-request e-scripts) count the INITIAL fill plus refills, so
+  // the refill count to compare against entered is N-1, not N — see
+  // refillsFromTotalFills on PrescriptionRecord (types.ts) and
+  // compareRefills (quantity/index.ts) for where that -1 is applied.
+  { key: 'refills', canonical: 'totalfills', maxWords: 2 },
   { key: 'ds2', canonical: 'ds', maxWords: 1, ignore: true },
   { key: 'note', canonical: 'note', maxWords: 3 },
   { key: 'substitutions', canonical: 'substitutions', maxWords: 3 },
@@ -171,6 +177,34 @@ function trimColumnGap(words: OcrWord[]): OcrWord[] {
     const prev = words[i - 1] as OcrWord;
     const cur = words[i] as OcrWord;
     if (cur.x - (prev.x + prev.w) > MAX_VALUE_WORD_GAP_PX) return words.slice(0, i);
+  }
+  return words;
+}
+
+/**
+ * Tighter, sig-specific column-gap threshold (px), applied ONLY to the
+ * directions/sig field on top of the generic trimColumnGap above. A real
+ * sig phrase's own internal word-to-word gaps are single-digit pixels
+ * (plain word spacing within one run of text — see the live-capture
+ * geometry in the fixture this branch was tuned against: "...for flares"
+ * has gaps of 2-4px throughout). A right-column bleed (e.g. a bare
+ * days-supply number landing to the right of the sig text with no
+ * preceding "DS" label token to bound it via the embedded-label split
+ * above) can land far closer than the generic MAX_VALUE_WORD_GAP_PX
+ * (150px) column threshold — the observed gap was ~90px — while still
+ * being obviously wider than any normal intra-sig word gap. Sig alone
+ * gets this tighter, dedicated boundary rather than lowering
+ * MAX_VALUE_WORD_GAP_PX globally (which is tuned against every other
+ * field's own column-jump geometry, e.g. the ~309px jump in a different
+ * fixture).
+ */
+const SIG_COLUMN_GAP_PX = 50;
+
+function trimSigColumnGap(words: OcrWord[]): OcrWord[] {
+  for (let i = 1; i < words.length; i++) {
+    const prev = words[i - 1] as OcrWord;
+    const cur = words[i] as OcrWord;
+    if (cur.x - (prev.x + prev.w) > SIG_COLUMN_GAP_PX) return words.slice(0, i);
   }
   return words;
 }
@@ -893,6 +927,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // several missing labels must be paired against ONE shared leftover
     // value row (split by column) instead of one leftover row each.
     const labelRowIds: number[] = [];
+    // Parallel to labelOrder: the specific canonical LABEL VARIANT that
+    // matched (e.g. 'refills' vs 'refillsauthorized' vs 'totalfills' —
+    // several distinct canonicals share the same LabelKey). Only consumed
+    // below to detect the 'totalfills' variant specifically (Change 3 —
+    // "Total fills: N" means N-1 refills), but kept general in case a
+    // future field needs the same per-variant distinction.
+    const labelCanonicals: string[] = [];
     const leftoverLines: OcrWord[][] = [];
     // How each raw[key] was actually resolved — populated at every
     // assignment site (Pass A inline, Pass B block-column) and consumed
@@ -923,6 +964,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       }
       labelOrder.push(match.label.key);
       labelRowIds.push(rowId);
+      labelCanonicals.push(match.label.canonical);
       const labelWords = line.slice(0, match.consumed);
       const firstLabelWord = labelWords[0] as OcrWord;
       labelPositions.push({ x: firstLabelWord.x, y: firstLabelWord.y, text: wordsToText(labelWords) });
@@ -976,9 +1018,17 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
           // on-screen text matches its canonical form exactly, with no OCR
           // mangling simulated in these fixtures' geometry-only
           // distinction.
+          // Deliberately NOT excluding ignore-labels here (unlike
+          // remainderStartsWithExactLabel above): the LABELS doc
+          // (~lines 111-112) says ignore labels are meant to "bound
+          // neighboring values", and a right-column ignore-label (e.g.
+          // "Agent name" sitting right of a prescriber-name row, or a
+          // bare "DS" right of a sig row) must still stop the current
+          // field's value from bleeding into it, even though (per
+          // `ignore`) it will never itself be emitted as a field — only
+          // its POSITION is used as a boundary here.
           if (
             embedded &&
-            !embedded.label.ignore &&
             embedded.label.key !== match.label.key &&
             normalize(wordsToText(remainderWordsRaw.slice(i, i + embedded.consumed))) === embedded.label.canonical
           ) {
@@ -999,11 +1049,79 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       // (branch brief item 2 — "bound the token span by neighboring
       // labels' geometry so bleed can't append"), not just directions/sig.
       remainderWords = trimColumnGap(remainderWords);
+      // Sig gets an ADDITIONAL, tighter column-stop on top of the generic
+      // one above — see trimSigColumnGap doc.
+      if (match.label.key === 'directions') remainderWords = trimSigColumnGap(remainderWords);
 
       const remainder = wordsToText(remainderWords);
       if (remainder) {
         raw[match.label.key] = remainder;
         resolutionMeta[match.label.key] = { strategy: 'inline-row', words: remainderWords };
+      }
+    }
+
+    // Tracks every leftover-line index consumed by ANY of the mechanisms
+    // below (sig continuation, Pass B geometry pairing, prescriber-address
+    // continuation) — a single leftover row can only ever be consumed
+    // once. Declared here (before Pass B) so the sig-continuation gather
+    // immediately below can reserve its rows BEFORE Pass B's own
+    // column-ranked pairing gets a chance to hand them to an unrelated
+    // label that happens to have no inline value of its own (e.g. a bare
+    // "Note" label-only row, which — like any other still-missing label —
+    // Pass B would otherwise try to fill from the nearest unconsumed
+    // leftover line, stealing a sig-wrap continuation row before this
+    // block ever sees it).
+    const consumedLeftover = new Set<number>();
+
+    // ---- Sig wrapped continuation lines (branch brief "sig multi-line") ----
+    // The sig/directions value can word-wrap onto additional physical OCR
+    // rows below its own row (groupLines splits on Y gap, so a wrapped
+    // continuation of the directions text lands as its own leftover line,
+    // never consumed by Pass A). Bounded by (1) the directions label's
+    // own row Y, (2) the Y of the NEXT recognized label row — whatever it
+    // happens to be ("Note" on the live capture, but nothing here assumes
+    // that literal label, so an unexpected field can't be swallowed), and
+    // (3) the continuation line sitting in the same left-x column as the
+    // directions value — a Note/Substitutions row (or anything else
+    // further down) can never be mistaken for a sig continuation, both
+    // because it falls outside the Y bound and because (being itself a
+    // recognized label) it was never a leftover line to begin with. Run
+    // BEFORE Pass B (see consumedLeftover doc above) so Pass B's
+    // column-ranked pairing can't steal a continuation row out from under
+    // a still-unresolved label like a bare "Note".
+    if (raw.directions) {
+      const directionsIdx = labelOrder.findIndex((k) => k === 'directions');
+      const directionsMeta = resolutionMeta.directions;
+      if (directionsIdx !== -1 && directionsMeta) {
+        const directionsRowY = (labelPositions[directionsIdx] as { x: number; y: number; text: string }).y;
+        const valueX = (directionsMeta.words[0] as OcrWord).x;
+        let nextLabelY = Number.POSITIVE_INFINITY;
+        for (const p of labelPositions) {
+          if (p.y > directionsRowY + 1 && p.y < nextLabelY) nextLabelY = p.y;
+        }
+        const continuationTexts: string[] = [];
+        const continuationWordsAll: OcrWord[] = [];
+        for (let i = 0; i < leftoverLines.length; i++) {
+          if (consumedLeftover.has(i)) continue;
+          const line = leftoverLines[i] as OcrWord[];
+          const first = line[0] as OcrWord;
+          if (first.y <= directionsRowY + 1 || first.y >= nextLabelY) continue;
+          if (Math.abs(first.x - valueX) > MAX_VALUE_WORD_GAP_PX / 2) continue;
+          consumedLeftover.add(i);
+          const trimmedLine = trimSigColumnGap(trimColumnGap(line));
+          const text = wordsToText(trimmedLine);
+          if (text) {
+            continuationTexts.push(text);
+            continuationWordsAll.push(...trimmedLine);
+          }
+        }
+        if (continuationTexts.length > 0) {
+          raw.directions = [raw.directions, ...continuationTexts].join(' ');
+          resolutionMeta.directions = {
+            strategy: directionsMeta.strategy,
+            words: [...directionsMeta.words, ...continuationWordsAll]
+          };
+        }
       }
     }
 
@@ -1053,11 +1171,10 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       return Math.min(labelCluster, valueClusterCount - 1);
     }
 
-    // Tracks every leftover-line index assigned to ANY field so far,
-    // across both the column-mapped primary attempt and the fallback
-    // below — a single leftover row can only ever be consumed once,
-    // regardless of which path consumed it.
-    const consumedLeftover = new Set<number>();
+    // consumedLeftover (tracking every leftover-line index consumed by
+    // ANY mechanism, including this pass's own column-mapped primary
+    // attempt and fallback below) is declared earlier, before the sig
+    // continuation gather — see its doc above.
 
     /** Primary attempt: next not-yet-consumed leftover line in THIS value column, in row order. */
     function pickFromCluster(valueCluster: number): number | null {
@@ -1111,6 +1228,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         if (!seg || seg.length === 0) return;
         let segWords = NOISE_TRIM_KEYS.has(key) ? trimValueNoise(seg) : seg;
         segWords = trimColumnGap(segWords);
+        if (key === 'directions') segWords = trimSigColumnGap(segWords);
         const text = wordsToText(segWords);
         if (text) {
           raw[key] = text;
@@ -1423,6 +1541,16 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       const refills = parseRefills(raw.refills);
       if (refills) {
         record.refills = refills;
+        // Change 3: "Total fills: N" (seen on responded refill-request
+        // e-scripts) counts the initial fill plus refills, so the
+        // refills value is compared as N-1 — see
+        // PrescriptionRecord.refillsFromTotalFills (types.ts) and
+        // compareRefills (quantity/index.ts). Only set when the label
+        // that actually resolved 'refills' was the 'totalfills' variant
+        // — the ordinary 'refills'/'refillsauthorized'/'refillsremaining'
+        // variants never subtract.
+        const refillsLabelIdx = labelOrder.findIndex((k, i) => k === 'refills' && labelCanonicals[i] === 'totalfills');
+        if (refillsLabelIdx !== -1) record.refillsFromTotalFills = true;
         pushResolved('refills', 'refills', refills);
       } else {
         pushMiss('refills', 'refills', 'validation-failed:not-numeric');

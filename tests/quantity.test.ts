@@ -104,6 +104,38 @@ describe('compareRefills', () => {
   it('is YELLOW not_provided when missing', () => {
     expect(compareRefills(undefined, 2).status).toBe('yellow');
   });
+
+  describe('sourceIsTotalFills (Change 3 — "Total fills: N" means N-1 refills)', () => {
+    it('GREEN: source "Total fills: 5", entered 4', () => {
+      const r = compareRefills(5, 4, true);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('GREEN: source "Total fills: 1", entered 0', () => {
+      const r = compareRefills(1, 0, true);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('GREEN (unchanged): plain "Refills: 4", entered 4 — no subtraction without the flag', () => {
+      const r = compareRefills(4, 4);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('RED: source "Total fills: 5", entered 5 — effective is 4, so 5 mismatches', () => {
+      const r = compareRefills(5, 5, true);
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('refills_mismatch');
+    });
+
+    it('explanation surfaces the derived effective count so the raw source number is not confusing on its own', () => {
+      const r = compareRefills(5, 4, true);
+      expect(r.explanation).toMatch(/total fills.*5/i);
+      expect(r.explanation).toMatch(/4/);
+    });
+  });
 });
 
 describe('comparePrescriberName', () => {

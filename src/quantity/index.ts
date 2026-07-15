@@ -200,9 +200,30 @@ export function compareQuantity(
   };
 }
 
+/**
+ * Compares source vs entered refill counts. `sourceIsTotalFills` (plumbed
+ * from parseEscriptOcr's PrescriptionRecord.refillsFromTotalFills — see
+ * types.ts) is set when the source value came from a "Total fills: N"
+ * label (seen on responded refill-request e-scripts) rather than an
+ * ordinary "Refills" label. "Total fills" counts the initial fill PLUS
+ * refills, so the comparable refill count is N-1, not the raw N — e.g.
+ * "Total fills: 5" means 4 refills remain, and should match an entered
+ * value of 4 (GREEN), not 5.
+ *
+ * MATCH-TIME (not parse-time) is deliberate: the raw source value (e.g.
+ * "5") is what actually appeared on-screen and is what sourceValue
+ * displays in the overlay (see engine/index.ts stringifyScalar) — parsing
+ * away the -1 before it ever reaches the record would make the on-screen
+ * "Total fills: 5" and a displayed source value of "4" disagree with no
+ * explanation in sight. Doing the subtraction here instead keeps the
+ * displayed source value as the true raw number while the explanation
+ * text below spells out the derived effective count, so the pharmacist
+ * sees exactly why a 5-vs-5 compares as a mismatch.
+ */
 export function compareRefills(
   sourceRaw: string | number | null | undefined,
-  enteredRaw: string | number | null | undefined
+  enteredRaw: string | number | null | undefined,
+  sourceIsTotalFills = false
 ): CompareResult {
   const srcEmpty = sourceRaw === null || sourceRaw === undefined || sourceRaw === '';
   const entEmpty = enteredRaw === null || enteredRaw === undefined || enteredRaw === '';
@@ -214,15 +235,30 @@ export function compareRefills(
     return { status: 'yellow', reasonCode: 'not_provided', explanation: 'No refill count was entered in PioneerRx to compare against the source.' };
   }
 
-  const a = toNumber(sourceRaw);
+  const sourceRawNum = toNumber(sourceRaw);
   const b = toNumber(enteredRaw);
-  if (a === null || b === null) {
+  if (sourceRawNum === null || b === null) {
     return { status: 'yellow', reasonCode: 'unparseable_quantity', explanation: `Could not parse refill count ("${sourceRaw}" / "${enteredRaw}") as a number.` };
   }
+
+  const a = sourceIsTotalFills ? sourceRawNum - 1 : sourceRawNum;
+
   if (a === b) {
-    return { status: 'green', reasonCode: 'exact_match', explanation: 'Refill count matches exactly.' };
+    return {
+      status: 'green',
+      reasonCode: 'exact_match',
+      explanation: sourceIsTotalFills
+        ? `Refill count matches exactly (source "Total fills: ${sourceRawNum}" = ${a} refill${a === 1 ? '' : 's'} after the initial fill).`
+        : 'Refill count matches exactly.'
+    };
   }
-  return { status: 'red', reasonCode: 'refills_mismatch', explanation: `Refill count differs: ${a} vs ${b}.` };
+  return {
+    status: 'red',
+    reasonCode: 'refills_mismatch',
+    explanation: sourceIsTotalFills
+      ? `Refill count differs: source "Total fills: ${sourceRawNum}" = ${a} refill${a === 1 ? '' : 's'} after the initial fill, vs entered ${b}.`
+      : `Refill count differs: ${a} vs ${b}.`
+  };
 }
 
 /**
