@@ -215,11 +215,11 @@ public static class FieldOrder
         "prescriberPhone",
         "prescriberAddress",
         "dateWritten",
-        "drug",
-        "sig",
         "quantity",
         "refills",
-        "daw"
+        "daw",
+        "drug",
+        "sig"
     };
 
     /// <summary>
@@ -249,8 +249,8 @@ public static class FieldOrder
 }
 
 /// <summary>
-/// Groups the 13 FieldOrder.Fields into the 4 categories the overlay's
-/// compact table displays (Patient / Prescriber / Rx / Sig), per Will's
+/// Groups the 13 FieldOrder.Fields into the 3 categories the overlay's
+/// compact table displays (Patient / Prescriber / Rx), per Will's
 /// spec: "Patient (name, DOB), Prescriber (name, NPI), Rx (drug,
 /// quantity, days supply, refills, written date — whatever applies)" —
 /// days supply has since been removed per the live-test feedback round,
@@ -262,31 +262,30 @@ public static class FieldOrder
 ///     under Patient here as the only sensible home for it rather than
 ///     silently dropped from the compact view. Flag to Will if he'd
 ///     rather it live elsewhere or be hidden.
-///   - "sig" (W-T9 item 6): pulled OUT of Rx into its OWN category,
-///     listed LAST in Order. Sig/directions matching is inherently
-///     fuzzy (wording/punctuation/abbreviation variance), so a yellow
-///     sig verdict should never drag the whole Rx category to red just
-///     because of phrasing differences. Since OverlayViewModel.
-///     PopulateRows rolls up each category from only its own Rows (see
-///     CategoryRollup.RollUp), giving sig its own category is sufficient
-///     on its own to exclude it from the Rx rollup — no separate
-///     "exclude this field" flag needed.
+///   - "sig": folded INTO Rx per the pharmacist owner's follow-up request
+///     (no longer its own top-level section). Within Rx, FieldOrder.Fields
+///     now puts drug and sig LAST (after dateWritten/quantity/refills/daw)
+///     since sig/directions (and drug) matching is inherently fuzzy
+///     (wording/punctuation/abbreviation variance) — they sit at the
+///     bottom of the Rx card rather than being pulled out of it. Note this
+///     means a yellow sig verdict CAN now drag the Rx category header to
+///     yellow/red via CategoryRollup.RollUp's worst-status-wins logic,
+///     same as any other Rx field.
 /// FieldOrder.Fields happens to already list all fields for one category
 /// contiguously (patientName, patientDOB, patientAddress, prescriberName,
-/// prescriberNpi, prescriberPhone, prescriberAddress, dateWritten, drug,
-/// sig, quantity, refills), so building each category's rows by filtering
-/// FieldOrder.Fields through this map preserves the pharmacist's required
-/// field order within each category.
+/// prescriberNpi, prescriberPhone, prescriberAddress, dateWritten,
+/// quantity, refills, daw, drug, sig), so building each category's rows
+/// by filtering FieldOrder.Fields through this map preserves the
+/// pharmacist's required field order within each category.
 /// </summary>
 public static class FieldCategories
 {
     public const string Patient = "Patient";
     public const string Prescriber = "Prescriber";
     public const string Rx = "Rx";
-    public const string Sig = "Sig";
 
-    /// <summary>Fixed category display order — Patient, then Prescriber, then Rx, then Sig LAST (see Sig doc above).</summary>
-    public static readonly IReadOnlyList<string> Order = new[] { Patient, Prescriber, Rx, Sig };
+    /// <summary>Fixed category display order — Patient, then Prescriber, then Rx (sig now lives inline at the bottom of Rx; see doc above).</summary>
+    public static readonly IReadOnlyList<string> Order = new[] { Patient, Prescriber, Rx };
 
     public static readonly IReadOnlyDictionary<string, string> CategoryByField = new Dictionary<string, string>
     {
@@ -299,7 +298,7 @@ public static class FieldCategories
         ["prescriberAddress"] = Prescriber,
         ["dateWritten"] = Rx,
         ["drug"] = Rx,
-        ["sig"] = Sig,
+        ["sig"] = Rx,
         ["quantity"] = Rx,
         ["refills"] = Rx,
         ["daw"] = Rx

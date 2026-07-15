@@ -66,16 +66,6 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "drug",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
-      "field": "sig",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
       "field": "quantity",
       "status": "yellow",
       "reasonCode": "not_provided"
@@ -87,6 +77,16 @@
     },
     {
       "field": "daw",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "yellow",
+      "reasonCode": "not_provided"
+    },
+    {
+      "field": "sig",
       "status": "yellow",
       "reasonCode": "not_provided"
     }

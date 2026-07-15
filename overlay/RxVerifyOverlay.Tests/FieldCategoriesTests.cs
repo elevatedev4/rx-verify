@@ -6,10 +6,10 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for the FieldCategories mapping (Models/EngineModels.cs)
-/// that groups the 13 FieldOrder.Fields into the overlay's 4 compact-
-/// table categories (Patient/Prescriber/Rx/Sig — sig split out of Rx and
-/// into its own last-listed category per W-T9 item 6). Pure data checks
-/// — no UIA, no engine call, no synthetic PHI needed.
+/// that groups the 13 FieldOrder.Fields into the overlay's 3 compact-
+/// table categories (Patient/Prescriber/Rx — sig now folded into Rx,
+/// listed last alongside drug, both being inherently fuzzy matches).
+/// Pure data checks — no UIA, no engine call, no synthetic PHI needed.
 /// </summary>
 public class FieldCategoriesTests
 {
@@ -43,28 +43,18 @@ public class FieldCategoriesTests
     }
 
     [Fact]
-    public void RxCategoryContainsDrugQuantityRefillsAndWrittenDateButNotSig()
+    public void RxCategoryContainsDrugQuantityRefillsWrittenDateDawAndSig()
     {
         // daysSupply intentionally absent -- removed entirely per Will's
         // live-test feedback (not in FieldOrder.Fields at all anymore).
-        // sig intentionally absent -- split into its own Sig category
-        // per W-T9 item 6, so sig's fuzzy match variance never drags the
-        // Rx category rollup to red (see FieldCategories.CategoryByField
-        // doc).
-        var rxFields = new[] { "dateWritten", "drug", "quantity", "refills" };
+        // sig is now folded INTO Rx (no longer its own category) per the
+        // pharmacist owner's follow-up request -- drug and sig sit last
+        // within Rx since both are inherently fuzzy matches.
+        var rxFields = new[] { "dateWritten", "quantity", "refills", "daw", "drug", "sig" };
         foreach (var field in rxFields)
         {
             Assert.Equal(FieldCategories.Rx, FieldCategories.CategoryByField[field]);
         }
-
-        Assert.NotEqual(FieldCategories.Rx, FieldCategories.CategoryByField["sig"]);
-    }
-
-    [Fact]
-    public void SigHasItsOwnCategoryAndIsListedLast()
-    {
-        Assert.Equal(FieldCategories.Sig, FieldCategories.CategoryByField["sig"]);
-        Assert.Equal(FieldCategories.Sig, FieldCategories.Order[^1]);
     }
 
     [Fact]
@@ -75,9 +65,9 @@ public class FieldCategoriesTests
     }
 
     [Fact]
-    public void CategoryOrderIsPatientThenPrescriberThenRxThenSig()
+    public void CategoryOrderIsPatientThenPrescriberThenRx()
     {
-        Assert.Equal(new[] { FieldCategories.Patient, FieldCategories.Prescriber, FieldCategories.Rx, FieldCategories.Sig }, FieldCategories.Order);
+        Assert.Equal(new[] { FieldCategories.Patient, FieldCategories.Prescriber, FieldCategories.Rx }, FieldCategories.Order);
     }
 
     [Fact]
