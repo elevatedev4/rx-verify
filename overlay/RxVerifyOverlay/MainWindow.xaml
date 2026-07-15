@@ -445,6 +445,18 @@
                         accumulated across scripts.
                     -->
                     <Button Content="Copy logs" Margin="0,0,6,0" Click="OnCopyLogsClick" />
+                    <!--
+                        "Copy logs (no HIPAA)" — same clipboard blob as
+                        "Copy logs", but with all patient identifiers
+                        (name, DOB, address — title, verdict rows, raw OCR
+                        text + word list) redacted, so a REAL prescription's
+                        log can be pasted for debugging without exposing
+                        PHI. Prescriber/drug/sig/qty/refills/dates and the
+                        OCR geometry are preserved. See
+                        OverlayViewModel.BuildCurrentLogBlob(redactPatient:
+                        true) / Diagnostics/RxLogFormatter.cs.
+                    -->
+                    <Button Content="Copy logs (no HIPAA)" Margin="0,0,6,0" Click="OnCopyLogsNoHipaaClick" />
                     <Button Content="Dump UIA Tree..." Margin="0,0,6,0" Click="OnDumpTreeClick" />
                     <!--
                         W-T11 item 3: DEFAULT ON — checked by construction

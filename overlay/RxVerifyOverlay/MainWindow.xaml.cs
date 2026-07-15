@@ -273,6 +273,39 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     }
 
     /// <summary>
+    /// "Copy logs (no HIPAA)" — mirrors OnCopyLogsClick above, but builds
+    /// the blob with BuildCurrentLogBlob(redactPatient: true), so patient
+    /// name/DOB/address are stripped from the title, verdict rows, and
+    /// raw OCR text/word list before it hits the clipboard. Lets Will
+    /// paste logs from a REAL prescription without exposing PHI. See
+    /// OverlayViewModel.BuildCurrentLogBlob / Diagnostics/RxLogFormatter.cs.
+    /// </summary>
+    private void OnCopyLogsNoHipaaClick(object sender, RoutedEventArgs e)
+    {
+        string blob;
+        try
+        {
+            blob = _viewModel.BuildCurrentLogBlob(redactPatient: true);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Couldn't build the log: {ex.Message}", "Rx Verify",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (!TrySetClipboardText(blob))
+        {
+            MessageBox.Show(this,
+                "Couldn't copy to the clipboard (it may be locked by another app — try again in a moment).",
+                "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        MessageBox.Show(this, "Log copied to clipboard (patient info redacted).", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
     /// Clipboard.SetText occasionally throws COMException/"clipboard could
     /// not be opened" when another process (clipboard manager, etc.) is
     /// briefly holding it — a well-known WPF clipboard gotcha, not

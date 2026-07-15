@@ -803,8 +803,13 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// currently under review (see RxLogSnapshot doc). The actual text
     /// formatting is a pure function (RxLogFormatter.BuildLogBlob) so it's
     /// unit-testable without a live OverlayViewModel.
+    ///
+    /// <paramref name="redactPatient"/> backs the "Copy logs (no HIPAA)"
+    /// button (MainWindow.xaml.cs OnCopyLogsNoHipaaClick): same blob, but
+    /// with patient identifiers stripped — see RxLogFormatter.BuildLogBlob's
+    /// doc for exactly what is/isn't redacted.
     /// </summary>
-    public string BuildCurrentLogBlob()
+    public string BuildCurrentLogBlob(bool redactPatient = false)
     {
         var snapshot = new RxLogSnapshot
         {
@@ -836,7 +841,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             RedCount = RedCount
         };
 
-        return RxLogFormatter.BuildLogBlob(snapshot);
+        return RxLogFormatter.BuildLogBlob(snapshot, redactPatient);
     }
 
     private void UpdateSummary(VerifySummary? summary)
