@@ -98,6 +98,24 @@ function Set-CachedValue {
     Set-Content -Path $Path -Value $Value -NoNewline
 }
 
+# Runs a native command, capturing merged stdout+stderr, WITHOUT letting
+# git/npm status text on stderr trip $ErrorActionPreference='Stop' into a
+# fake NativeCommandError. The command's exit code is the real signal;
+# callers check $LASTEXITCODE afterward. Returns the captured output lines;
+# sets the script-scope $script:NativeExitCode for the caller to read.
+function Invoke-NativeCapture {
+    param([Parameter(Mandatory)][scriptblock]$Command)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Command 2>&1
+        $script:NativeExitCode = $LASTEXITCODE
+        return $output
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
 # ---------------------------------------------------------------------
 # Sanity check: make sure this really looks like the rx-verify repo
 # before doing anything (protects against the script being copied
@@ -127,16 +145,16 @@ $LockfileHashPath = Join-Path $CacheDir 'lockfile.hash'
 # discarding local modifications here is safe and intended.
 # ---------------------------------------------------------------------
 Write-Host "Syncing to latest from GitHub (origin/main)..." -ForegroundColor Cyan
-$fetchOutput = git fetch origin 2>&1
-$fetchExitCode = $LASTEXITCODE
-$fetchOutput | ForEach-Object { Write-Detail $_ }
+$fetchOutput = Invoke-NativeCapture { git fetch origin }
+$fetchExitCode = $script:NativeExitCode
+$fetchOutput | ForEach-Object { Write-Detail "$_" }
 if ($fetchExitCode -ne 0) {
     Stop-WithMessage "git fetch origin failed in $RepoPath. Check the network connection and try again."
 }
 
-$checkoutOutput = git checkout -f -B main origin/main 2>&1
-$checkoutExitCode = $LASTEXITCODE
-$checkoutOutput | ForEach-Object { Write-Detail $_ }
+$checkoutOutput = Invoke-NativeCapture { git checkout -f -B main origin/main }
+$checkoutExitCode = $script:NativeExitCode
+$checkoutOutput | ForEach-Object { Write-Detail "$_" }
 if ($checkoutExitCode -ne 0) {
     Stop-WithMessage "git checkout -f -B main origin/main failed in $RepoPath. The local checkout could not be synced to match GitHub's main branch."
 }
