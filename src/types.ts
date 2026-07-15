@@ -41,11 +41,11 @@ export const FIELD_ORDER = [
   'prescriberPhone',
   'prescriberAddress',
   'dateWritten',
-  'drug',
-  'sig',
   'quantity',
   'refills',
-  'daw'
+  'daw',
+  'drug',
+  'sig'
 ] as const;
 
 export type FieldName = (typeof FIELD_ORDER)[number];

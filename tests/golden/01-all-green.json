@@ -100,16 +100,6 @@
       "reasonCode": "exact_match"
     },
     {
-      "field": "drug",
-      "status": "green",
-      "reasonCode": "exact_match"
-    },
-    {
-      "field": "sig",
-      "status": "green",
-      "reasonCode": "exact_match"
-    },
-    {
       "field": "quantity",
       "status": "green",
       "reasonCode": "exact_match"
@@ -123,6 +113,16 @@
       "field": "daw",
       "status": "yellow",
       "reasonCode": "not_provided"
+    },
+    {
+      "field": "drug",
+      "status": "green",
+      "reasonCode": "exact_match"
+    },
+    {
+      "field": "sig",
+      "status": "green",
+      "reasonCode": "exact_match"
     }
   ],
   "expectedSummary": {

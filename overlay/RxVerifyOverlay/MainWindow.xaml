@@ -135,8 +135,8 @@
         </StackPanel>
 
         <!--
-            Row 2: compact grouped table — 4 categories (Patient /
-            Prescriber / Rx / Sig, see Models/EngineModels.cs
+            Row 2: compact grouped table — 3 categories (Patient /
+            Prescriber / Rx, see Models/EngineModels.cs
             FieldCategories), each with a rolled-up status header
             (worst-status-wins: any Red field -> Red header, else any
             Yellow -> Yellow, else Green) and its field rows below in
@@ -145,10 +145,9 @@
             data-entry screen's order, never jump around by severity).
             Binds directly to OverlayViewModel.Categories (built/rolled-up
             every refresh in OverlayViewModel.RefreshAsync), which is
-            already in FieldCategories.Order — Patient, Prescriber, Rx,
-            then Sig LAST (W-T9 item 6: sig gets its own box, listed
-            last, and is excluded from the Rx rollup since it lives in
-            its own category with its own Rows/Status — see
+            already in FieldCategories.Order — Patient, Prescriber, Rx
+            (sig now lives inline at the bottom of Rx, along with drug,
+            since both are inherently fuzzy matches — see
             FieldCategories.CategoryByField doc). Reason code +
             explanation are NOT always-visible text (that's what made the
             old per-field-card layout tall) — they're a hover tooltip on

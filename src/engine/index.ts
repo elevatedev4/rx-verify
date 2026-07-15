@@ -213,18 +213,6 @@ export function verify(
       enteredValue: stringifyScalar(entered.dateWritten)
     },
     {
-      field: 'drug',
-      ...drugResult,
-      sourceValue: stringifyDrug(source.drug),
-      enteredValue: stringifyDrug(entered.drug)
-    },
-    {
-      field: 'sig',
-      ...sigResult,
-      sourceValue: stringifyScalar(source.sig),
-      enteredValue: stringifyScalar(entered.sig)
-    },
-    {
       field: 'quantity',
       ...quantityResult,
       sourceValue: stringifyScalar(source.quantity),
@@ -241,6 +229,18 @@ export function verify(
       ...dawResult,
       sourceValue: stringifySubstitutionIndicator(source.substitutionsNotAllowed),
       enteredValue: stringifyDaw(entered.daw)
+    },
+    {
+      field: 'drug',
+      ...drugResult,
+      sourceValue: stringifyDrug(source.drug),
+      enteredValue: stringifyDrug(entered.drug)
+    },
+    {
+      field: 'sig',
+      ...sigResult,
+      sourceValue: stringifyScalar(source.sig),
+      enteredValue: stringifyScalar(entered.sig)
     }
   ];
 
