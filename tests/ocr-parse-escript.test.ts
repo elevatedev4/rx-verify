@@ -827,6 +827,82 @@ describe('parseEscriptOcr', () => {
     expect(record.prescriber?.phone).toBeUndefined();
   });
 
+  it('(r) [live-tuning fixture 6, real capture] patientAddress on a row that ALSO carries a right-hand Phone column under the 150px column-gap threshold — Phone must not bleed in', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump (PHI replaced with fabricated street/city/zip/
+    // phone). The real capture merged the "Address:" label + street/
+    // city/state/zip value AND a separate right-hand "Phone" column onto
+    // ONE physical OCR row (address y=116, phone label y=118 — well
+    // within groupLines' y-tolerance). The gap between the ZIP word's
+    // right edge (x=363+87=450) and "Phone"'s left edge (x=533) is only
+    // ~83px — under MAX_VALUE_WORD_GAP_PX (150), so trimColumnGap alone
+    // never split it; the fix bounds the address value at the next
+    // recognized label's x on the same row instead.
+    const addressRow: OcrWord[] = [
+      { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+      { text: '9821', x: 121, y: 116, w: 30, h: 11 },
+      { text: 'MOCK', x: 156, y: 116, w: 44, h: 11 },
+      { text: 'WELLS', x: 204, y: 116, w: 47, h: 11 },
+      { text: 'CT', x: 255, y: 116, w: 18, h: 11 },
+      { text: 'FAKEVILLE', x: 281, y: 116, w: 78, h: 11 },
+      { text: 'KS990001234', x: 363, y: 116, w: 87, h: 11 },
+      { text: 'Phone', x: 533, y: 118, w: 40, h: 10 },
+      { text: '(555)', x: 582, y: 116, w: 31, h: 14 },
+      { text: '555-0199', x: 617, y: 116, w: 59, h: 11 }
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, addressRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.patientAddress).toEqual({
+      street: '9821 MOCK WELLS CT',
+      city: 'FAKEVILLE',
+      state: 'KS',
+      zip: '99000'
+    });
+  });
+
+  it('(s) [live-tuning fixture 7, real capture] prescriberAddress wraps onto a 2nd row (city/state/zip) below the "Prescriber Location:" label — both lines must join', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump (PHI replaced). The real capture's prescriber
+    // address label/value row (y=207) is followed ~20px below by a
+    // continuation row (y=227, same left-x column, "city, state zip")
+    // that groupLines correctly splits into its OWN line (gap > avgH*0.6)
+    // — Pass A only ever consumed the first line's remainder, so v1
+    // dropped the wrapped 2nd line entirely. The next real label ("Phone",
+    // y=247, inline label+value) bounds how far down the continuation
+    // search is allowed to look.
+    const locationRow: OcrWord[] = [
+      { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
+      { text: '4477', x: 120, y: 207, w: 35, h: 11 },
+      { text: 'MOCKAVE', x: 160, y: 207, w: 69, h: 11 },
+      { text: 'PL', x: 233, y: 207, w: 19, h: 11 }
+    ];
+    const continuationRow: OcrWord[] = [
+      { text: 'FAKEVILLE,', x: 120, y: 227, w: 81, h: 12 },
+      { text: 'KS', x: 206, y: 227, w: 18, h: 10 },
+      { text: '990047213', x: 227, y: 227, w: 70, h: 10 }
+    ];
+    const phoneRow: OcrWord[] = [
+      { text: 'Phone', x: 66, y: 247, w: 39, h: 10 },
+      { text: '(555)', x: 120, y: 247, w: 31, h: 14 },
+      { text: '555-4488', x: 155, y: 247, w: 58, h: 11 }
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, locationRow, continuationRow, phoneRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.prescriber?.address).toEqual({
+      street: '4477 MOCKAVE PL',
+      city: 'FAKEVILLE',
+      state: 'KS',
+      zip: '99004'
+    });
+    // The continuation row must be CONSUMED by the address, not left over
+    // to bleed into (or steal a slot from) the prescriber phone.
+    expect(record.prescriber?.phone).toBe('(555) 555-4488');
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [
