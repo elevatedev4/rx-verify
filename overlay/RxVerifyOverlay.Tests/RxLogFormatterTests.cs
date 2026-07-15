@@ -201,4 +201,169 @@ public class RxLogFormatterTests
         Assert.DoesNotContain("Jane Synthtest", afterBlob);
         Assert.DoesNotContain("Rx window:", afterBlob);
     }
+
+    // --- "Copy logs (no HIPAA)" (redactPatient: true) --------------------
+    // All values below are synthetic — no real patient/prescriber data.
+    // The synthetic patient surname ("Testerson") is deliberately reused in
+    // a prescriber-context OCR word/text below to exercise the "shared
+    // token" over-redaction case (test E).
+
+    [Fact]
+    public void RedactPatient_TitlePatientPortionIsRedactedButRxNumberAndDrugSurvive()
+    {
+        var categories = new List<RxLogCategorySnapshot>
+        {
+            new("Rx", "Verify", new List<RxLogFieldSnapshot>
+            {
+                new("drug", "Drug", "Green", "SYNTHETIC DRUG SOURCE", "Synthderm 2% Cream", "exact_match", "")
+            })
+        };
+
+        var blob = RxLogFormatter.BuildLogBlob(
+            MakeSnapshot(
+                categories: categories,
+                rxWindowTitle: "Edit Rx - 9999999 - Synthderm 2% Cream - Jane (She/Her) Testerson - F - DOB: 4/5/1990 - Phone: (555) 010-2000"),
+            redactPatient: true);
+
+        Assert.Contains("Rx window: Edit Rx - 9999999 - Synthderm 2% Cream - [patient redacted]", blob);
+        Assert.DoesNotContain("Testerson", blob);
+        Assert.DoesNotContain("4/5/1990", blob);
+        Assert.DoesNotContain("010-2000", blob);
+    }
+
+    [Fact]
+    public void RedactPatient_PatientFieldSourceAndEnteredAreRedactedButFieldNameStatusAndReasonSurvive()
+    {
+        var categories = new List<RxLogCategorySnapshot>
+        {
+            new("Patient", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("patientName", "Name", "Green", "Testerson, Jane", "Testerson, Jane", "exact_match", "Name matches exactly."),
+                new("patientDOB", "DOB", "Green", "04/05/1990", "4/5/1990", "exact_match", "Dates match exactly after normalization."),
+                new("patientAddress", "Address", "Yellow", "100 SYNTH LN SPRINGFIELD IL620991234", "100 Synth Ln Springfield, IL", "address_differs", "Address differs.")
+            })
+        };
+
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(categories: categories), redactPatient: true);
+
+        Assert.Contains("Name (patientName): Green", blob);
+        Assert.Contains("DOB (patientDOB): Green", blob);
+        Assert.Contains("Address (patientAddress): Yellow", blob);
+        Assert.Contains("reason=[exact_match] Name matches exactly.", blob);
+        Assert.Contains("reason=[address_differs] Address differs.", blob);
+        Assert.DoesNotContain("Testerson", blob);
+        Assert.DoesNotContain("04/05/1990", blob);
+        Assert.DoesNotContain("4/5/1990", blob);
+        Assert.DoesNotContain("SYNTH LN", blob);
+        Assert.DoesNotContain("Synth Ln", blob);
+    }
+
+    [Fact]
+    public void RedactPatient_ScrubsPatientTokensFromRawOcrTextAndWords()
+    {
+        var categories = new List<RxLogCategorySnapshot>
+        {
+            new("Patient", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("patientName", "Name", "Green", "Testerson, Jane", "Testerson, Jane", "", ""),
+                new("patientAddress", "Address", "Green", "100 SYNTH LN SPRINGFIELD IL620991234", "100 Synth Ln Springfield, IL", "", "")
+            })
+        };
+        var words = new List<OcrWord>
+        {
+            new() { Text = "Testerson,", X = 1, Y = 2, W = 3, H = 4 },
+            new() { Text = "Jane", X = 5, Y = 6, W = 7, H = 8 },
+            new() { Text = "IL620991234", X = 9, Y = 10, W = 11, H = 12 }
+        };
+
+        var blob = RxLogFormatter.BuildLogBlob(
+            MakeSnapshot(
+                categories: categories,
+                ocrWords: words,
+                rawOcrText: "Prescription for Testerson, Jane at 100 SYNTH LN SPRINGFIELD IL620991234 today"),
+            redactPatient: true);
+
+        Assert.DoesNotContain("Testerson", blob);
+        Assert.DoesNotContain("SYNTH LN", blob);
+        Assert.DoesNotContain("IL620991234", blob);
+        Assert.Contains("Prescription for", blob);
+        Assert.Contains("today", blob);
+    }
+
+    [Fact]
+    public void RedactPatient_PreservesPrescriberDrugSigQuantityRefillsDatesAndOcrGeometry()
+    {
+        var categories = new List<RxLogCategorySnapshot>
+        {
+            new("Patient", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("patientName", "Name", "Green", "Testerson, Jane", "Testerson, Jane", "", "")
+            }),
+            new("Prescriber", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("prescriberName", "Name", "Green", "Sample, Priya", "Sample, Priya, MD", "exact_match", ""),
+                new("prescriberNpi", "NPI", "Green", "1122334455", "1122334455", "exact_match", "")
+            }),
+            new("Rx", "Verify", new List<RxLogFieldSnapshot>
+            {
+                new("drug", "Drug", "Green", "SYNTHDERM 2 % CREAM", "Synthderm 2% Cream", "exact_match", ""),
+                new("dateWritten", "Date Written", "Green", "05/05/2026", "5/5/2026", "exact_match", ""),
+                new("quantity", "Quantity", "Green", "30", "30", "exact_match", ""),
+                new("refills", "Refills", "Green", "2", "2", "exact_match", "")
+            }),
+            new("Sig", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("sig", "Sig / Directions", "Green", "Apply twice daily", "Apply twice daily", "exact_match", "")
+            })
+        };
+        var words = new List<OcrWord>
+        {
+            new() { Text = "Sample,", X = 100, Y = 200, W = 30, H = 12 },
+            new() { Text = "Priya", X = 140, Y = 200, W = 30, H = 12 }
+        };
+
+        var blob = RxLogFormatter.BuildLogBlob(
+            MakeSnapshot(
+                categories: categories,
+                ocrWords: words,
+                rawOcrText: "Prescriber Sample, Priya Drug SYNTHDERM 2 % CREAM Qty 30 Refills 2 Written 05/05/2026"),
+            redactPatient: true);
+
+        Assert.Contains("Sample, Priya", blob);
+        Assert.Contains("1122334455", blob);
+        Assert.Contains("SYNTHDERM 2 % CREAM", blob);
+        Assert.Contains("Synthderm 2% Cream", blob);
+        Assert.Contains("Apply twice daily", blob);
+        Assert.Contains("30", blob);
+        Assert.Contains("05/05/2026", blob);
+        Assert.Contains("5/5/2026", blob);
+        Assert.Contains("\"Sample,\" @ (100, 200, 30, 12)", blob);
+        Assert.Contains("\"Priya\" @ (140, 200, 30, 12)", blob);
+    }
+
+    [Fact]
+    public void RedactPatient_TokenSharedWithPrescriberContextIsScrubbedEverywhere()
+    {
+        // "Testerson" is the patient's surname AND happens to also be the
+        // supervising prescriber's surname in this synthetic scenario —
+        // over-redaction is preferred, so it must be scrubbed everywhere,
+        // even where it appears in prescriber-only free text.
+        var categories = new List<RxLogCategorySnapshot>
+        {
+            new("Patient", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("patientName", "Name", "Green", "Testerson, Jane", "Testerson, Jane", "", "")
+            })
+        };
+
+        var blob = RxLogFormatter.BuildLogBlob(
+            MakeSnapshot(
+                categories: categories,
+                rawOcrText: "Supervising: Dr. Kyle Testerson, MD approved this refill"),
+            redactPatient: true);
+
+        Assert.DoesNotContain("Testerson", blob);
+        Assert.Contains("Supervising: Dr. Kyle", blob);
+        Assert.Contains("MD approved this refill", blob);
+    }
 }
