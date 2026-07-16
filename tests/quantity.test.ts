@@ -135,6 +135,18 @@ describe('compareRefills', () => {
       expect(r.explanation).toMatch(/total fills.*5/i);
       expect(r.explanation).toMatch(/4/);
     });
+
+    it('GREEN, clamped at 0: source "Total fills: 0", entered 0 — never goes to -1', () => {
+      const r = compareRefills(0, 0, true);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('RED, clamped at 0 (not -1): source "Total fills: 0", entered 1 does not somehow read as "closer" via a negative effective count', () => {
+      const r = compareRefills(0, 1, true);
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('refills_mismatch');
+    });
   });
 });
 

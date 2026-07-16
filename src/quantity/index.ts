@@ -241,7 +241,12 @@ export function compareRefills(
     return { status: 'yellow', reasonCode: 'unparseable_quantity', explanation: `Could not parse refill count ("${sourceRaw}" / "${enteredRaw}") as a number.` };
   }
 
-  const a = sourceIsTotalFills ? sourceRawNum - 1 : sourceRawNum;
+  // Clamped at 0: "Total fills: 0" is a malformed/edge-case OCR read (a
+  // real e-script never shows 0 total fills — there's always at least the
+  // initial fill), but the parser stores whatever digits it read without
+  // judgment, so this comparison must not manufacture a negative refill
+  // count (-1) out of it.
+  const a = sourceIsTotalFills ? Math.max(0, sourceRawNum - 1) : sourceRawNum;
 
   if (a === b) {
     return {

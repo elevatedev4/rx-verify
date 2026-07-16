@@ -934,6 +934,16 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // "Total fills: N" means N-1 refills), but kept general in case a
     // future field needs the same per-variant distinction.
     const labelCanonicals: string[] = [];
+    // The canonical label variant that actually produced the CURRENT
+    // raw.refills value (undefined until something has resolved it).
+    // raw.refills can be set/overwritten from either Pass A (inline) or
+    // Pass B (block-column) below; per the owner's "Total fills" rule, an
+    // explicit "Refills"/"Refills Authorized"/"Refills Remaining"
+    // occurrence must always win over a "Total fills" occurrence for
+    // BOTH the stored value and the refillsFromTotalFills flag --
+    // "prefer the explicit Refills value" if a script somehow shows
+    // both, not "whichever label happened to be encountered last".
+    let refillsResolvedCanonical: string | undefined;
     const leftoverLines: OcrWord[][] = [];
     // How each raw[key] was actually resolved — populated at every
     // assignment site (Pass A inline, Pass B block-column) and consumed
@@ -1055,8 +1065,22 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
 
       const remainder = wordsToText(remainderWords);
       if (remainder) {
-        raw[match.label.key] = remainder;
-        resolutionMeta[match.label.key] = { strategy: 'inline-row', words: remainderWords };
+        // 'refills' is special-cased: an explicit "Refills"-family
+        // canonical always wins over a "Total fills" canonical for this
+        // key, regardless of on-screen row order -- see
+        // refillsResolvedCanonical doc above. Every other key keeps the
+        // existing unconditional overwrite (last-encountered-row wins).
+        if (match.label.key === 'refills') {
+          const shouldAssign = raw.refills === undefined || match.label.canonical !== 'totalfills';
+          if (shouldAssign) {
+            raw.refills = remainder;
+            resolutionMeta.refills = { strategy: 'inline-row', words: remainderWords };
+            refillsResolvedCanonical = match.label.canonical;
+          }
+        } else {
+          raw[match.label.key] = remainder;
+          resolutionMeta[match.label.key] = { strategy: 'inline-row', words: remainderWords };
+        }
       }
     }
 
@@ -1219,7 +1243,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       return null;
     }
 
-    function assignGroup(groupKeys: LabelKey[], lineIdx: number): void {
+    function assignGroup(groupKeys: LabelKey[], lineIdx: number, groupIdxs: number[]): void {
       consumedLeftover.add(lineIdx);
       const line = leftoverLines[lineIdx] as OcrWord[];
       const segments = groupKeys.length > 1 ? splitLineByColumns(line) : [line];
@@ -1233,12 +1257,18 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         if (text) {
           raw[key] = text;
           resolutionMeta[key] = { strategy: 'block-column', words: segWords };
+          // Pass B only ever runs for a key still undefined at this point
+          // (missingIdx filters on that), so there is no explicit-vs-
+          // totalfills conflict to arbitrate here -- just record which
+          // canonical resolved it, mirroring the Pass A tracking above.
+          if (key === 'refills') refillsResolvedCanonical = labelCanonicals[groupIdxs[g] as number];
         }
       });
     }
 
     interface PendingGroup {
       groupKeys: LabelKey[];
+      groupIdxs: number[];
       labelCluster: number;
     }
     const pendingGroups: PendingGroup[] = [];
@@ -1255,7 +1285,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         const groupIdxs = missingIdx.slice(mi, mj + 1);
         const groupKeys = groupIdxs.map((idx) => labelOrder[idx] as LabelKey);
         const firstIdx = groupIdxs[0] as number;
-        pendingGroups.push({ groupKeys, labelCluster: labelClusterOf[firstIdx] as number });
+        pendingGroups.push({ groupKeys, groupIdxs, labelCluster: labelClusterOf[firstIdx] as number });
         mi = mj + 1;
       }
     }
@@ -1281,14 +1311,14 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       const valueCluster = mappedValueCluster(group.labelCluster);
       const lineIdx = valueCluster !== null ? pickFromCluster(valueCluster) : null;
       if (lineIdx !== null) {
-        assignGroup(group.groupKeys, lineIdx);
+        assignGroup(group.groupKeys, lineIdx, group.groupIdxs);
       } else {
         unresolvedGroups.push(group);
       }
     }
     for (const group of unresolvedGroups) {
       const lineIdx = pickFallback();
-      if (lineIdx !== null) assignGroup(group.groupKeys, lineIdx);
+      if (lineIdx !== null) assignGroup(group.groupKeys, lineIdx, group.groupIdxs);
     }
 
     // ---- Prescriber address wrapped 2nd line (branch brief "OCR address
@@ -1546,11 +1576,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         // refills value is compared as N-1 — see
         // PrescriptionRecord.refillsFromTotalFills (types.ts) and
         // compareRefills (quantity/index.ts). Only set when the label
-        // that actually resolved 'refills' was the 'totalfills' variant
-        // — the ordinary 'refills'/'refillsauthorized'/'refillsremaining'
-        // variants never subtract.
-        const refillsLabelIdx = labelOrder.findIndex((k, i) => k === 'refills' && labelCanonicals[i] === 'totalfills');
-        if (refillsLabelIdx !== -1) record.refillsFromTotalFills = true;
+        // variant that actually PRODUCED raw.refills (tracked via
+        // refillsResolvedCanonical, not just "any totalfills occurrence
+        // anywhere in the document") was 'totalfills' — an explicit
+        // 'refills'/'refillsauthorized'/'refillsremaining' occurrence
+        // always wins over a 'totalfills' one, so a script showing BOTH
+        // never double-counts (see refillsResolvedCanonical doc above).
+        if (refillsResolvedCanonical === 'totalfills') record.refillsFromTotalFills = true;
         pushResolved('refills', 'refills', refills);
       } else {
         pushMiss('refills', 'refills', 'validation-failed:not-numeric');

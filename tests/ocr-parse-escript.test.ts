@@ -1041,6 +1041,57 @@ describe('parseEscriptOcr', () => {
     expect(record.refillsFromTotalFills).toBeUndefined();
   });
 
+  it('(w) "Total fills" tolerates OCR word-splitting/extra spacing (e.g. "Total  Fills : 3")', () => {
+    const totalFillsRow: OcrWord[] = [
+      { text: 'Total', x: 593, y: 358, w: 34, h: 10 },
+      { text: 'Fills', x: 640, y: 358, w: 24, h: 10 },
+      { text: ':', x: 668, y: 358, w: 4, h: 10 },
+      { text: '3', x: 680, y: 358, w: 6, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    // Raw storage per compareRefills' MATCH-TIME doc: the parser stores
+    // the true on-screen number (3) and flags it as a Total-fills read;
+    // the -1 (yielding 2 effective refills) is applied at comparison time
+    // in compareRefills (src/quantity/index.ts), not here.
+    expect(record.refills).toBe('3');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('(w) "Total fills: 0" is stored as-is (raw, unclamped) — clamping to 0 happens at compareRefills match-time, not parse-time', () => {
+    const totalFillsRow: OcrWord[] = [
+      { text: 'Total', x: 593, y: 358, w: 34, h: 10 },
+      { text: 'fills', x: 630, y: 358, w: 24, h: 10 },
+      { text: '0', x: 660, y: 358, w: 6, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('0');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('(w) when a script shows BOTH an explicit "Refills" label and a "Total fills" label, the explicit Refills value/flag wins (no double-counting) — Total fills first, Refills second', () => {
+    const totalFillsRow = row(320, ['Total', 'fills:', '5']);
+    const refillsRow = row(360, ['Refills:', '4']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow, refillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+
+  it('(w) when a script shows BOTH labels in the opposite order, the explicit Refills value/flag still wins — Refills first, Total fills second', () => {
+    const refillsRow = row(320, ['Refills:', '4']);
+    const totalFillsRow = row(360, ['Total', 'fills:', '5']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow, totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [
