@@ -13,6 +13,14 @@ namespace RxVerifyOverlay;
 
 public partial class MainWindow : Window, IOverlayVisibilityController
 {
+    // How often the auto-watch timer ticks. Each tick is a cheap PioneerRx
+    // title read (~1ms), NOT an OCR pass — see the AUTO-WATCH comment on
+    // _autoRefreshTimer's construction below for why a short interval is
+    // safe. Lowered from 1000ms so an Rx-number change is caught in
+    // ~250ms worst case instead of ~1s, per Will's request to make the
+    // overlay feel more responsive when Pioneer switches Rx.
+    private const int AutoWatchIntervalMs = 250;
+
     private readonly OverlaySettings _settings;
     private EngineClient _engineClient;
     private OverlayViewModel _viewModel;
@@ -121,7 +129,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         CaptureRegionWidthTextBox.Text = _settings.CaptureRegionWidth.ToString();
         CaptureRegionHeightTextBox.Text = _settings.CaptureRegionHeight.ToString();
 
-        // AUTO-WATCH (W-T9 item 5): a 1s tick calling OverlayViewModel.
+        // AUTO-WATCH (W-T9 item 5): a fast tick calling OverlayViewModel.
         // WatchAsync, NOT a fixed "always do a full RefreshAsync every
         // 5s" timer like before. WatchAsync itself only does a cheap
         // PioneerRx title read on every tick and only runs the real
@@ -129,9 +137,10 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // presence or Rx number actually changed since the last tick —
         // see PioneerRxWindow.GetScreenSignature +
         // OverlayViewModel.WatchAsync for the full change-detection
-        // approach. A 1s tick is safe specifically because the common
-        // case (nothing changed) is nearly free.
-        _autoRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        // approach. A short tick (AutoWatchIntervalMs) is safe
+        // specifically because the common case (nothing changed) is
+        // nearly free.
+        _autoRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(AutoWatchIntervalMs) };
         _autoRefreshTimer.Tick += async (_, _) => await SafeWatchAsync();
 
         // W-T11 item 3: Auto-watch now starts CHECKED by default (see
