@@ -46,6 +46,12 @@
          done are kept, so it picks up where it left off.
       4. Clones the repo to the canonical path,
          $env:USERPROFILE\claude\rx-verify, if it isn't already there.
+         "Already there" is judged by update-and-run.ps1 existing inside
+         it, not just the folder existing - a folder with no
+         update-and-run.ps1 means a previous clone was interrupted, and
+         the script throws with the exact command to remove that broken
+         copy rather than silently retrying over it or deleting it
+         itself.
       5. Hands off to update-and-run.ps1 (pull + build + launch) via
          `powershell -ExecutionPolicy Bypass -File ...`, the same command
          the "every run after" workflow in README.md uses. Since fresh PCs
@@ -92,7 +98,7 @@ function Invoke-RxVerifyBootstrap {
     }
     Write-Detail 'winget found.'
 
-    Write-Host 'Windows may show a few Yes/No install prompts below - click Yes.' -ForegroundColor Yellow
+    Write-Host 'Windows may show a few Yes/No install prompts below - click Yes. It may also show a UAC "Do you want to allow this app to make changes to your device?" dialog - click Yes on that too.' -ForegroundColor Yellow
 
     $anyInstalled = $false
 
@@ -185,12 +191,24 @@ function Invoke-RxVerifyBootstrap {
     }
 
     # -------------------------------------------------------------
-    # Step 5: clone if missing.
+    # Step 5: clone if missing. "Already cloned" is judged by
+    # $LauncherScriptPath existing (a file only present after a
+    # completed checkout), NOT by the .git folder existing - git
+    # creates .git almost immediately, before the object transfer or
+    # checkout finishes, so a clone interrupted mid-transfer still
+    # leaves a .git folder behind. Trusting .git alone would make this
+    # script report "already cloned" forever on a broken copy and
+    # never recover. If $RepoPath exists but isn't a completed clone,
+    # that's a distinct, explicit failure below - this script still
+    # never deletes anything on its own (same covenant as
+    # update-and-run.ps1), so it tells Will exactly what to remove and
+    # how, rather than guessing.
     # -------------------------------------------------------------
     Write-Step "Checking for the repo at $RepoPath..."
-    $gitDir = Join-Path $RepoPath '.git'
-    if (Test-Path $gitDir) {
+    if (Test-Path $LauncherScriptPath) {
         Write-Detail 'Repo already cloned - skipping.'
+    } elseif (Test-Path $RepoPath) {
+        throw "A partial or broken copy of the repo already exists at $RepoPath - there's no update-and-run.ps1 inside it, which means a previous clone got interrupted before it finished. It holds no local work of yours, just an incomplete download, so it's safe to remove. Run this, then paste the bootstrap one-liner again:`n`n  Remove-Item -Recurse -Force `"$RepoPath`"`n"
     } else {
         if (-not (Test-Path $ClaudeDir)) {
             New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
@@ -219,5 +237,5 @@ try {
     Invoke-RxVerifyBootstrap
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red
-    Write-Host 'Copy the text above (including any error output) and send it to Will/dev. Nothing destructive has happened - any tools already installed and any partial clone are kept, so pasting the same bootstrap command again later will pick up where it left off.' -ForegroundColor Red
+    Write-Host 'Copy the text above (including any error output) and send it to Will/dev. Nothing destructive has happened - any tools already installed are kept, so pasting the same bootstrap command again later will pick up where it left off. If the error above was about a partial repo copy, run the exact command it gave you first, then paste the bootstrap command again.' -ForegroundColor Red
 }
