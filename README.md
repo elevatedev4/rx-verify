@@ -257,7 +257,29 @@ where you've cloned the repo. The canonical location on a fresh PC is
   that runs `update-and-run.ps1`. This is a convenience — the primary
   flow is running `update-and-run.ps1` directly (see below).
 
-**Fresh PC (bootstrap — clones to `\claude\rx-verify` then runs):**
+**Brand-new PC (nothing installed yet — no Git, no Node, no .NET):**
+
+`bootstrap-fresh.ps1` is a superset of the "Fresh PC" one-liner below, for a
+machine that doesn't even have Git yet. Paste this into PowerShell:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1 | iex
+```
+
+It checks for `winget` (Windows' built-in package manager, present on any
+current Windows 10/11 box — if missing, it says so and points you at the
+"App Installer" Store listing, then stops), installs Git, Node.js LTS (needs
+major version 20+), and the .NET 8 SDK via `winget` — skipping whichever ones
+are already present/new enough — clones the repo to
+`%USERPROFILE%\claude\rx-verify` if it isn't there yet, then hands off to
+`update-and-run.ps1` itself (pull + fresh build + launch). Windows may show a
+few Yes/No install prompts along the way — click Yes. It's safe to re-run any
+time: already-installed tools are skipped, and if a fresh install needs a new
+console before it's picked up on PATH, the script says so — just close
+PowerShell, reopen it, and paste the same line again; nothing already
+installed or cloned is lost.
+
+**Fresh PC (Git already installed — bootstrap just clones to `\claude\rx-verify` then runs):**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -Command "if (!(Test-Path $env:USERPROFILE\claude\rx-verify)) { New-Item -ItemType Directory -Force -Path $env:USERPROFILE\claude | Out-Null; git clone https://github.com/elevatedev4/rx-verify.git $env:USERPROFILE\claude\rx-verify }; powershell -ExecutionPolicy Bypass -File $env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
