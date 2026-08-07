@@ -163,9 +163,9 @@ const NOISE_TRIM_KEYS = new Set<LabelKey>(['patient', 'prescriber', 'phone']);
 /**
  * Field keys whose value is a PERSON'S NAME (branch brief defect #5,
  * live-test bug: verdict showed source prescriberName = "Order Nurnt*r:
- * 110922S2S"). Root cause: the page had a second, unrelated line that
+ * 770415Q8Q"). Root cause: the page had a second, unrelated line that
  * ALSO fuzzy-matches the 'prescriber' label — a mangled footer, "Prescr'
- * ber Order Nurnt*r: 110922S2S" (a garbled "Prescriber Order Number:"),
+ * ber Order Nurnt*r: 770415Q8Q" (a garbled "Prescriber Order Number:"),
  * sitting well below the real "Prescriber:" row. Every OTHER key in this
  * module keeps the documented "last-encountered-row wins" overwrite
  * semantics (see the refills doc above), and since lines are walked
@@ -193,8 +193,8 @@ const NAME_FIELDS = new Set<LabelKey>(['patient', 'prescriber']);
  * True if `text` is implausible as a person's name — see NAME_FIELDS
  * doc. Either tripwire alone disqualifies:
  *  - a run of 6+ consecutive digits (an order/ID number's own shape —
- *    the live-test decoy's "110922S2S" trips this via its embedded
- *    "110922" run);
+ *    the live-test decoy's "770415Q8Q" trips this via its embedded
+ *    "770415" run);
  *  - more than 40% of all (non-whitespace) characters are digits
  *    overall.
  * Deliberately conservative in the OTHER direction: a real name
@@ -808,7 +808,7 @@ function isPhoneShaped(raw: string): boolean {
  *  5. "MMDD/YYYY" — the "/" between month and day got OCR-dropped.
  *  6. "MM<sep>DD<sep>YYYY" where EITHER separator was OCR'd as a
  *     slash-lookalike character rather than dropped or read as "/"
- *     (live-test bug, e.g. "07/0711977" for "07/07/1977" — the day/year
+ *     (live-test bug, e.g. "04/0311985" for "04/03/1985" — the day/year
  *     "/" misread as "1"). Position-ANCHORED to the exact
  *     digit-sep-digit-sep-digit shape (2+1+2+1+4 chars) so a lookalike
  *     is only ever reinterpreted as a separator at those two fixed
