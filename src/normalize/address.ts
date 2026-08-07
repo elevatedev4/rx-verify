@@ -194,12 +194,41 @@ function streetBaseDiffers(a: string, b: string): boolean {
 /** Set of normalized (abbreviated) street-suffix tokens, e.g. "st", "ave", "rd". Used to split a trailing suffix token off the street CORE so a suffix present on only one side (or missing entirely) doesn't fail the comparison — see NormalizedStreet.suffix. */
 const SUFFIX_ABBREVIATIONS = new Set(Object.values(STREET_SUFFIXES));
 
+/** Set of normalized directional abbreviations ("n", "ne", ...). Used by isGarbageSuffixCandidate so a legitimate leading/trailing directional is never mistaken for OCR noise. */
+const DIRECTIONAL_ABBREVIATIONS = new Set(Object.values(DIRECTIONALS));
+
+/**
+ * True for a short (1-2 char), alphabetic token that ISN'T any known
+ * real address token (not a recognized street suffix, not a directional
+ * abbreviation). Used only for the narrow "garbage trailing token where
+ * a real suffix should be" case (live-test bug: source street suffix
+ * "Dr" OCR-misread as the single character "m") — see
+ * NormalizedStreet.trailingToken and compareAddresses' use of it. A
+ * token this short that ISN'T a recognized suffix/directional has no
+ * other plausible reading as real street-name text (real street-name
+ * words this short essentially don't occur), so treating it as noise
+ * carries negligible risk of masking an actually different street.
+ */
+function isGarbageSuffixCandidate(token: string): boolean {
+  return /^[a-z]{1,2}$/.test(token) && !SUFFIX_ABBREVIATIONS.has(token) && !DIRECTIONAL_ABBREVIATIONS.has(token);
+}
+
 interface NormalizedStreet {
   /** Street line with unit AND trailing suffix stripped out, tokens normalized. */
   base: string;
   /** Trailing street-type suffix (already normalized to its abbreviation, e.g. "st"), or null if the line didn't end in a recognized one. */
   suffix: string | null;
   unit: string | null;
+  /**
+   * The line's actual trailing token, but ONLY when `suffix` is null
+   * (nothing recognized there) — the candidate garbage token itself, for
+   * compareAddresses to evaluate via isGarbageSuffixCandidate against
+   * the OTHER side's suffix. Null whenever `suffix` is non-null, or the
+   * line is too short to have a distinct trailing token.
+   */
+  trailingToken: string | null;
+  /** `base` with its own trailing token ALSO removed — only set alongside `trailingToken` (i.e. only meaningful when `suffix` is null). Lets compareAddresses drop the trailing token as OCR noise without re-deriving it from `base` by string surgery. */
+  baseWithoutTrailingToken: string | null;
 }
 
 /** Split a raw street line into base + unit, and normalize tokens. */
@@ -241,13 +270,24 @@ function normalizeStreetLine(raw: string): NormalizedStreet {
   // is just an incomplete entry, not a different street.
   let suffix: string | null = null;
   let core = normalized;
+  let trailingToken: string | null = null;
+  let baseWithoutTrailingToken: string | null = null;
   const last = normalized[normalized.length - 1];
   if (normalized.length > 1 && last !== undefined && SUFFIX_ABBREVIATIONS.has(last)) {
     suffix = last;
     core = normalized.slice(0, -1);
+  } else if (normalized.length > 1 && last !== undefined) {
+    trailingToken = last;
+    baseWithoutTrailingToken = normalized.slice(0, -1).join(' ');
   }
 
-  return { base: core.join(' '), suffix, unit: unit ? unit.toLowerCase() : null };
+  return {
+    base: core.join(' '),
+    suffix,
+    unit: unit ? unit.toLowerCase() : null,
+    trailingToken,
+    baseWithoutTrailingToken
+  };
 }
 
 /**
@@ -318,7 +358,29 @@ function normalizeZip(raw: string): string {
  */
 function parseFreeformAddress(raw: string): { street: string; city: string | null; state: string | null; zip: string | null } {
   const trimmed = raw.trim();
-  const m = /^(.*?),\s*([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
+  // Prefer the literal-comma form first (unambiguous). Live-test bug:
+  // the entered freeform line sometimes omits the comma before the state
+  // entirely ("...Testville KS") — the source-side parser (ADDRESS_RE in
+  // src/ocr/parseEscriptOcr.ts) already tolerates a comma-OR-whitespace
+  // separator here, so a comma-less entered line fell through to the
+  // no-match branch below and dumped the whole remaining line (city AND
+  // state included) into `street` undifferentiated, misaligning the
+  // street-core token count against the source's cleanly split
+  // components. Falling back to a bare-whitespace separator closes that
+  // gap — BUT only when the candidate 2-letter "state" token isn't
+  // itself a recognized street-type suffix (SUFFIX_ABBREVIATIONS
+  // overlaps real state codes closely enough — "Ct" is both Court and
+  // Connecticut — that a comma-less, city-less street ending in its own
+  // suffix, e.g. "330 Sycamore St", would otherwise be misread as a
+  // city-less state). That narrower case is left exactly as before
+  // (whole line treated as street) rather than risk a wrong split.
+  let m = /^(.*?),\s*([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
+  if (!m) {
+    const loose = /^(.*?)\s+([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
+    if (loose && !SUFFIX_ABBREVIATIONS.has((loose[2] ?? '').toLowerCase())) {
+      m = loose;
+    }
+  }
   if (!m) {
     // No recognizable ", ST [ZIP]" tail at all — nothing to split out;
     // treat the whole line as street and leave city/state/zip unknown
@@ -512,9 +574,37 @@ export function compareAddresses(
   // confirmed nothing. sourceAbsentIsGap closes that the same way city's
   // already does: entered-blank stays tolerated (unchanged), but
   // source-blank-while-entered-states-one is now a genuine gap.
+  //
+  // BUG 2 (round 3, live-test): a GARBAGE trailing token where a real
+  // suffix should be — source street suffix "Dr" OCR-misread as the
+  // single character "m" — must not fail the match either, same
+  // rationale as a suffix missing outright. Only fires on the side that
+  // has NO recognized suffix at all (suffix === null) when its own
+  // trailing token is short/unrecognized/non-directional
+  // (isGarbageSuffixCandidate) AND the OTHER side DOES state a real,
+  // recognized suffix — i.e. exactly the shape of "one side's suffix got
+  // eaten by OCR", never a case where neither side has a real suffix
+  // (that's ordinary core-text comparison, unchanged) or both sides have
+  // one (handled, unchanged, by the differing-suffix check below).
+  const srcBaseForCompare =
+    srcStreet.suffix === null &&
+    entStreet.suffix !== null &&
+    srcStreet.trailingToken !== null &&
+    srcStreet.baseWithoutTrailingToken !== null &&
+    isGarbageSuffixCandidate(srcStreet.trailingToken)
+      ? srcStreet.baseWithoutTrailingToken
+      : srcStreet.base;
+  const entBaseForCompare =
+    entStreet.suffix === null &&
+    srcStreet.suffix !== null &&
+    entStreet.trailingToken !== null &&
+    entStreet.baseWithoutTrailingToken !== null &&
+    isGarbageSuffixCandidate(entStreet.trailingToken)
+      ? entStreet.baseWithoutTrailingToken
+      : entStreet.base;
   const streetDiffers =
-    sourceAbsentIsGap(srcStreet.base, entStreet.base) ||
-    (srcStreet.base !== '' && entStreet.base !== '' && streetBaseDiffers(srcStreet.base, entStreet.base)) ||
+    sourceAbsentIsGap(srcBaseForCompare, entBaseForCompare) ||
+    (srcBaseForCompare !== '' && entBaseForCompare !== '' && streetBaseDiffers(srcBaseForCompare, entBaseForCompare)) ||
     (srcStreet.suffix !== null && entStreet.suffix !== null && srcStreet.suffix !== entStreet.suffix);
   const cityDiffers = cityMissingOrDiffers(srcCity, entCity);
   const stateDiffers = componentDiffers(srcState, entState);

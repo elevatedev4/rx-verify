@@ -1093,6 +1093,65 @@ describe('parseEscriptOcr', () => {
     expect(record.refillsFromTotalFills).toBeUndefined();
   });
 
+  // Bug 3 (round 3, W-T-round3, msg id 386, "Refill Approved" layout):
+  // live report — refills showed (not provided) even though the page
+  // reads "Total Fills: 2 (including this fill)". Root cause confirmed
+  // against the real OCR word dump (labels/coordinates only reused per
+  // the branch's PHI rule — all values below are fabricated): on THIS
+  // layout OCR drops the "Total"/"Fills:" label text entirely — neither
+  // word appears anywhere in the capture — while the value tail "2
+  // (including this fill)" still lands intact, sharing the same visual
+  // row as the (correctly recognized) Quantity value. With no label text
+  // left to fuzzy-match against, every existing "Total fills" handling
+  // above (which all anchor on the label) has nothing to anchor to, so
+  // raw.refills is never set and the field falls through to
+  // "(not provided)". Fix must recognize the distinctive, unambiguous
+  // "N (including this fill)" tail as a Total-Fills read even with the
+  // label totally absent — same N-1 semantics as every other Total-fills
+  // read (Change 3).
+  describe('Bug 3: "Total Fills: N (including this fill)" with the label itself dropped by OCR entirely', () => {
+    it('recognizes the bare "N (including this fill)" tail as a Total-fills read when no "Total"/"Fills" label text exists anywhere on the page', () => {
+      // Mirrors the real capture's shape: the Quantity row also carries,
+      // further right on the SAME row, the refills value tail with no
+      // label of its own — "Total"/"Fills" never appear anywhere in this
+      // fixture, matching the real OCR output exactly.
+      const quantityRow = row(358, ['Quantity', '60.0000', 'Each', '2', '(including', 'this', 'fill)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), quantityRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('2');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('still finds the tail when it sits on its own row, away from Quantity', () => {
+      const valueRow = row(400, ['2', '(including', 'this', 'fill)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('2');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('an explicit "Refills" label elsewhere on the page still wins over the labelless "(including this fill)" tail (no double-counting)', () => {
+      const refillsRow = row(320, ['Refills:', '4']);
+      const totalFillsTailRow = row(358, ['2', '(including', 'this', 'fill)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow, totalFillsTailRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+
+    it('does NOT fire on an unrelated bare number followed by unrelated words — the anchor requires the exact "(including this fill)" tail', () => {
+      const noiseRow = row(400, ['2', 'tablets', 'daily', 'refill']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), noiseRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+  });
+
   it('(x) [live-tuning fixture 9, real capture] prescriberAddress continuation row also carries an unrelated right-column value (wrapped "Agent name" tail) on the SAME OCR row — must not bleed into the address', () => {
     // SYNTHETIC — coordinates copied verbatim from a real owner OCR
     // word-position dump (PHI replaced with fabricated street/city/zip/

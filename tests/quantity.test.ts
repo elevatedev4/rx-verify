@@ -246,6 +246,45 @@ describe('comparePrescriberPhone', () => {
   it('is YELLOW not_provided when either side is missing', () => {
     expect(comparePrescriberPhone(undefined, '5552001000').status).toBe('yellow');
   });
+
+  // Bug 1 (round 3, W-T-round3): OCR dropped/garbled the area code's
+  // leading digit ("(7" misread as "0") so the source phone's area-code
+  // digits are structurally impossible (a real NANP area code never
+  // starts with 0 or 1) while the local 7 digits still match exactly.
+  // That's OCR noise, not a genuinely different number — downgrade to a
+  // distinct, pharmacist-readable YELLOW reason instead of the generic
+  // "phone_differs" wording, so the UI can point straight at "go look
+  // closer, this is probably just an OCR misread" rather than "this
+  // could be a second legitimate clinic line".
+  it('is YELLOW phone_ocr_suspect when the local 7 digits match but one side\'s area code is structurally invalid (OCR-garbled)', () => {
+    const r = comparePrescriberPhone('085) 555-0142', '(785) 555-0142');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('phone_ocr_suspect');
+    expect(r.explanation).toMatch(/area code/i);
+  });
+
+  // Two fully valid, structurally normal 10-digit numbers whose ONLY
+  // difference is the area code (local 7 digits match) are NOT OCR noise
+  // — a real area-code-only difference like this is a much more
+  // suspicious pattern than "a clinic has more than one legit line"
+  // (that pattern usually differs in the local number too), so this
+  // stays RED rather than falling under the "phone alone is never RED"
+  // multi-line-clinic leniency.
+  it('is RED when two structurally valid 10-digit numbers have genuinely different area codes (same local number)', () => {
+    const r = comparePrescriberPhone('(913) 555-0142', '(785) 555-0142');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('phone_area_code_mismatch');
+  });
+
+  it('is still YELLOW (never RED) when the local 7 digits themselves differ, even with matching area codes', () => {
+    // Same as the existing "never RED on a differing phone number" case
+    // above (555-200-1000 vs 555-999-8888) — pinned again here
+    // explicitly alongside the new RED case so the boundary between them
+    // is obvious from reading the tests together.
+    const r = comparePrescriberPhone('(555) 200-1000', '(555) 999-8888');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('phone_differs');
+  });
 });
 
 describe('comparePrescriberAddress', () => {

@@ -336,14 +336,31 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
   tab: 'tablet', tabs: 'tablet', tablets: 'tablet',
   cap: 'capsule', caps: 'capsule', capsules: 'capsule',
   sol: 'solution', soln: 'solution',
-  susp: 'suspension'
+  susp: 'suspension',
+  // Bug 5 (round 3, W-T-round3): live report — entered "oint", source
+  // "ointment", not recognized as the same form. Deliberately excludes
+  // bare "cr" for cream ("crm" is unambiguous, added below) — "CR" is
+  // ALREADY a protected release-qualifier abbreviation elsewhere in this
+  // engine's philosophy (controlled-release, e.g. "Diltiazem CR" — see
+  // this function's own doc above), so folding it to "cream" too would
+  // risk conflating a release profile with a dosage form; per the branch
+  // brief's own "only fold unambiguous abbreviations" instruction, it's
+  // left out.
+  oint: 'ointment', ung: 'ointment',
+  crm: 'cream',
+  supp: 'suppository',
+  inj: 'injection',
+  lot: 'lotion',
+  gtt: 'drops'
 };
 
 /**
  * Normalize a free-text drug name/description for IDENTITY comparison:
- * case/punctuation/whitespace, common dosage-FORM abbreviations (TAB/
- * TABS -> tablet, CAP/CAPS -> capsule, SOL -> solution, SUSP ->
- * suspension), and number/unit spacing only — no pharmaceutical-
+ * case/punctuation/whitespace, common dosage-FORM abbreviations (see
+ * DOSAGE_FORM_WORDS — TAB/TABS -> tablet, CAP/CAPS -> capsule, SOL ->
+ * solution, SUSP -> suspension, OINT/UNG -> ointment, CRM -> cream,
+ * SUPP -> suppository, INJ -> injection, LOT -> lotion, GTT -> drops),
+ * and number/unit spacing only — no pharmaceutical-
  * equivalence reasoning (that would need real RxNorm data — see this
  * file's header). Deliberately conservative: this can only ever fail to
  * recognize a real match (e.g. "Phosp" vs "Phosphate" spelled out

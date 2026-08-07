@@ -413,4 +413,94 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('address_differs');
     });
   });
+
+  // Bug 2 (round 3, W-T-round3): live report — source street suffix read
+  // as "m" (OCR mangled "Dr"), landing address_differs even though the
+  // rest of the street (and the whole rest of the address) matched.
+  // normalizeStreetLine already treats a MISSING suffix as a non-
+  // mismatch (see "330 Sycamore" vs "330 Sycamore St" above); this
+  // extends that to a PRESENT-BUT-GARBAGE suffix token: a short (1-2
+  // char), unrecognized, non-directional trailing token on the side that
+  // has no real suffix, when the OTHER side states an actual recognized
+  // suffix, is dropped as OCR noise so the streets compare on their
+  // cores.
+  describe('garbage short suffix token where a real street suffix should be (live-test bug: "m" for "Dr")', () => {
+    it('is GREEN for "4930 Overland m" vs "4930 Overland Dr" (garbage 1-char suffix dropped as OCR noise)', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland m', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN for the live-test shape (house number + street name + garbled 1-char suffix + inline unit): "1811 Fictional m ste 102" vs "1811 Fictional Dr Ste 102"', () => {
+      const r = compareAddresses(
+        { street: '1811 Fictional m ste 102', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '1811 Fictional Dr Ste 102', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('SAFETY BOUND: a recognized-but-DIFFERENT suffix on both sides ("St" vs "Dr") still differs — never dropped as noise', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland St', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND: a garbage-shaped trailing token is only dropped when the OTHER side has a real recognized suffix — two garbage/absent suffixes still compare on the raw core', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland m', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4931 Overland', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
+  // Bug 4 (round 3, W-T-round3): live report — prescriber addresses
+  // otherwise identical, but the ENTERED (freeform, PioneerRx) side
+  // lacked a comma before the state ("...Testville KS", no comma) so
+  // parseFreeformAddress's ", ST [ZIP]" anchor never matched at all and
+  // the WHOLE remaining line (city+state included) fell into `street`
+  // undifferentiated — misaligning the street-core token count against
+  // the source's cleanly split components and landing address_differs,
+  // even though every component actually agreed. The source-side parser
+  // (ADDRESS_RE in parseEscriptOcr.ts) already tolerates a comma-OR-
+  // whitespace separator before the state; parseFreeformAddress required
+  // a literal comma — that asymmetry is the actual bug. A component
+  // absent on EITHER side (entered's freeform line omitting the ZIP
+  // entirely, the pattern actually named in the report) was already a
+  // non-disagreement via componentDiffers; the real gap was upstream, in
+  // recognizing the state/city split at all when there's no comma.
+  describe('freeform entered line with no comma before the state (live-test bug: real component match landing address_differs)', () => {
+    it('is GREEN when the entered freeform line has no comma before the state and omits the ZIP entirely', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr Testville KS' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('is GREEN (pinned regression) for the comma-present shape from the branch brief: entered line missing only the ZIP', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr Testville, KS 66049' },
+        { street: '4930 Overland Dr Testville, KS' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('SAFETY BOUND: a no-comma entered line with a genuinely DIFFERENT state still differs', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr Testville MO' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
 });
