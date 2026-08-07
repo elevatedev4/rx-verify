@@ -1102,7 +1102,7 @@ describe('parseEscriptOcr', () => {
     // ~340px, well past the generic 150px column-gap threshold. Before
     // this fix, the continuation-line lookup read the row's RAW
     // (untrimmed) word list, so the whole merged string —
-    // "Testville, KS 66049 Jon Heeb" — was appended straight into
+    // "Testville, KS 66049 Alex Turner" — was appended straight into
     // prescriberAddress.
     const locationRow: OcrWord[] = [
       { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
@@ -1116,8 +1116,8 @@ describe('parseEscriptOcr', () => {
       { text: '66049', x: 209, y: 227, w: 38, h: 10 },
       // Unrelated right-column bleed — wrapped tail of a prescriber
       // "Agent name" value, ~340px away, on the SAME physical row.
-      { text: 'Jon', x: 590, y: 227, w: 30, h: 11 },
-      { text: 'Heeb', x: 618, y: 227, w: 40, h: 11 }
+      { text: 'Alex', x: 590, y: 227, w: 30, h: 11 },
+      { text: 'Turner', x: 618, y: 227, w: 40, h: 11 }
     ];
     const phoneRow: OcrWord[] = [
       { text: 'Phone', x: 66, y: 247, w: 39, h: 10 },
