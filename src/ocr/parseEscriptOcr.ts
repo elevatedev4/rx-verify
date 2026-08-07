@@ -527,7 +527,7 @@ function findLabelAtLineStart(line: OcrWord[]): LabelMatch | null {
 
     for (const label of LABELS) {
       if (consumed > label.maxWords) continue;
-      // See PATIENT_LABEL_MAX_X/MAX_Y doc: a 'patient' candidate outside
+      // See PATIENT_LABEL_MAX_X doc: a 'patient' candidate outside
       // the label column/top-of-page region is never a valid label
       // anchor, regardless of how well its text matches lexically.
       if (label.key === 'patient' && !isPlausiblePatientLabelWord(line[0])) continue;
@@ -560,7 +560,7 @@ function findLabelAt(words: OcrWord[], start: number): LabelMatch | null {
 
     for (const label of LABELS) {
       if (consumed > label.maxWords) continue;
-      // See PATIENT_LABEL_MAX_X/MAX_Y doc.
+      // See PATIENT_LABEL_MAX_X doc.
       if (label.key === 'patient' && !isPlausiblePatientLabelWord(words[start])) continue;
       const dist = levenshtein(candidate, label.canonical);
       if (dist > fuzzyThreshold(label.canonical.length)) continue;
