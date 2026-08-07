@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.UIA3;
@@ -43,6 +45,14 @@ public sealed class PioneerRxWindow : IDisposable
         catch { return Rectangle.Empty; }
     }
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
     /// <summary>
     /// Attempts to find a top-level window whose title starts with one
     /// of FieldMap.TargetWindowTitlePrefixes. Returns null (does not
@@ -50,28 +60,33 @@ public sealed class PioneerRxWindow : IDisposable
     /// for PioneerRx..." rather than crash, since the pharmacist may be
     /// on an unrelated screen at any given moment.
     ///
-    /// FLAGGED, NOT FIXED — POSSIBLE MISSED (not just delayed)
-    /// TRANSITION: if MORE THAN ONE target-prefixed window is open at
-    /// once (e.g. an older "Pre-Check Rx" window Will hasn't closed yet,
-    /// behind a newly-opened one for a different Rx), this always
-    /// returns the FIRST one FindAllChildren() happens to enumerate.
-    /// UIA's top-level enumeration order is NOT documented as
-    /// z-order/foreground-first, so that could keep being the SAME
-    /// (stale, backgrounded) window on every call — meaning
-    /// GetScreenSignature (below) would never observe the new window's
-    /// title at all, not merely late. This is a plausible root cause for
-    /// a report of an auto-watch transition being missed for tens of
-    /// seconds (as opposed to the ~250ms/poll-interval delay that's
-    /// otherwise expected). SUGGESTED FIX (not applied here — this repo
-    /// has no way to `dotnet build` this Windows-only WPF project to
-    /// verify a change compiles, so a fix risking the whole build wasn't
-    /// made blind): among all target-prefixed matches, prefer whichever
-    /// one is the current OS foreground window (P/Invoke
-    /// GetForegroundWindow, compared against each candidate's
-    /// window.Properties.NativeWindowHandle), falling back to today's
-    /// first-match behavior only when none of the matches are
-    /// foreground. Needs a real build+run to confirm the FlaUI property
-    /// name/shape before shipping.
+    /// DISAMBIGUATING MULTIPLE MATCHES (latency fix — field report of an
+    /// auto-watch transition missed for ~55s, not just delayed): if MORE
+    /// THAN ONE target-prefixed window is open at once (e.g. an older
+    /// "Pre-Check Rx" window Will hasn't closed yet, alongside a
+    /// newly-opened one for a different Rx), UIA's FindAllChildren
+    /// enumeration order is NOT documented as z-order/foreground-first —
+    /// picking the first match could keep returning the SAME stale
+    /// window forever, meaning GetScreenSignature (below) would never
+    /// observe the new window's title at all. So when there's more than
+    /// one candidate:
+    ///   1. Prefer whichever candidate IS the current OS foreground
+    ///      window (GetForegroundWindow, compared by native HWND) — the
+    ///      common case: Will just switched to/opened the new screen.
+    ///   2. Otherwise (e.g. PioneerRx itself is behind some other app,
+    ///      so none of the candidates are foreground), prefer whichever
+    ///      candidate is highest in Z-order among top-level windows —
+    ///      EnumWindows enumerates top-level windows top-to-bottom in
+    ///      Z-order (long-standing, widely-relied-on Win32 behavior,
+    ///      even though not a formal MSDN contract), so the first
+    ///      candidate HWND it reports is the most-recently-active one.
+    ///   3. If neither native call yields a usable HWND for any
+    ///      candidate (e.g. NativeWindowHandle unavailable through this
+    ///      accessibility API in some edge case), fall back to the
+    ///      original first-FindAllChildren-match behavior rather than
+    ///      returning null — a possibly-stale match beats none.
+    /// With a single candidate, none of this runs — same fast path as
+    /// before.
     /// </summary>
     public static PioneerRxWindow? TryAttach()
     {
@@ -81,6 +96,7 @@ public sealed class PioneerRxWindow : IDisposable
             var desktop = automation.GetDesktop();
             var allTopLevel = desktop.FindAllChildren();
 
+            var candidates = new List<AutomationElement>();
             foreach (var window in allTopLevel)
             {
                 string? name;
@@ -93,17 +109,79 @@ public sealed class PioneerRxWindow : IDisposable
                 {
                     if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                     {
-                        return new PioneerRxWindow(automation, window, application: null);
+                        candidates.Add(window);
+                        break;
                     }
                 }
             }
 
-            return null;
+            if (candidates.Count == 0) return null;
+            if (candidates.Count == 1) return new PioneerRxWindow(automation, candidates[0], application: null);
+
+            var best = PickBestCandidate(candidates) ?? candidates[0];
+            return new PioneerRxWindow(automation, best, application: null);
         }
         catch
         {
             automation.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Implements TryAttach's disambiguation doc (foreground match, then
+    /// Z-order-topmost match) across MORE THAN ONE target-prefixed
+    /// candidate. Returns null if no candidate has a usable native HWND
+    /// at all, in which case TryAttach falls back to enumeration order.
+    /// </summary>
+    private static AutomationElement? PickBestCandidate(List<AutomationElement> candidates)
+    {
+        var handles = new Dictionary<IntPtr, AutomationElement>();
+        foreach (var candidate in candidates)
+        {
+            var handle = SafeNativeHandle(candidate);
+            if (handle != IntPtr.Zero && !handles.ContainsKey(handle))
+            {
+                handles[handle] = candidate;
+            }
+        }
+
+        if (handles.Count == 0) return null;
+
+        var foreground = GetForegroundWindow();
+        if (foreground != IntPtr.Zero && handles.TryGetValue(foreground, out var foregroundMatch))
+        {
+            return foregroundMatch;
+        }
+
+        // No candidate is foreground (e.g. PioneerRx is behind some
+        // other app) — walk top-level windows in Z-order and take the
+        // first one that's also one of our candidates, i.e. the
+        // most-recently-active target window.
+        AutomationElement? topmost = null;
+        EnumWindows((hWnd, _) =>
+        {
+            if (handles.TryGetValue(hWnd, out var match))
+            {
+                topmost = match;
+                return false; // stop enumerating, we found the topmost candidate
+            }
+            return true; // keep going
+        }, IntPtr.Zero);
+
+        return topmost;
+    }
+
+    private static IntPtr SafeNativeHandle(AutomationElement element)
+    {
+        try
+        {
+            var handle = element.FrameworkAutomationElement.NativeWindowHandle;
+            return handle ?? IntPtr.Zero;
+        }
+        catch
+        {
+            return IntPtr.Zero;
         }
     }
 
