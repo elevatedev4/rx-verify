@@ -156,14 +156,23 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('address_differs');
     });
 
-    it('is NOT a hard mismatch when unit/apt is missing on one side only (downgraded to unit_differs, not address_differs)', () => {
+    // UPDATED (round 3, Bug 7 — Will, verbatim: "If prescriber address is
+    // missing Suite number I think we shouldn't bother marking that as
+    // different"): this used to assert 'yellow'/'unit_differs' here — a
+    // unit missing on one side only used to be downgraded from
+    // address_differs to unit_differs, but was still a visible flag. Per
+    // Bug 7, a unit stated on only ONE side is no longer treated as a
+    // disagreement at all now that everything else matches; see the
+    // "unit present on one side only" describe block below for the full
+    // behavior (including the still-flagged "unit differs on both
+    // sides" case).
+    it('is NOT flagged at all when unit/apt is missing on one side only (everything else matches)', () => {
       const r = compareAddresses(
         { street: '123 Main St', unit: 'Apt 4', city: 'Testville', state: 'KS', zip: '99999' },
         { street: '123 Main St Testville, KS 99999' } // no unit stated at all
       );
-      expect(r.status).toBe('yellow');
-      expect(r.reasonCode).toBe('unit_differs');
-      expect(r.status).not.toBe('red');
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
     });
   });
 
@@ -411,6 +420,238 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).not.toBe('exact_match_partial_source');
       expect(r.status).toBe('yellow');
       expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
+  // Bug 2 (round 3, W-T-round3): live report — source street suffix read
+  // as "m" (OCR mangled "Dr"), landing address_differs even though the
+  // rest of the street (and the whole rest of the address) matched.
+  // normalizeStreetLine already treats a MISSING suffix as a non-
+  // mismatch (see "330 Sycamore" vs "330 Sycamore St" above); this
+  // extends that to a PRESENT-BUT-GARBAGE suffix token: a SINGLE
+  // alphabetic character, non-directional, trailing token on the side
+  // that has no real suffix, when the OTHER side states an actual
+  // recognized suffix, is dropped as OCR noise so the streets compare on
+  // their cores.
+  //
+  // REVIEW FIX (blocking finding): this used to also cover 2-char
+  // tokens, on the theory that anything that short and unrecognized must
+  // be noise. Reviewer execution disproved that — SUFFIX_ABBREVIATIONS
+  // is a documented SUBSET of USPS Pub 28, not the full list, so real
+  // (if uncommon) 2-char suffixes this table doesn't enumerate ("Pt" =
+  // Point, "Cv" = Cove, "Tr" = Trail, "Mt", "Un", "Is", "Rw", "Ky") were
+  // being silently dropped as noise and producing false GREENs. Now
+  // restricted to exactly 1 character (see isGarbageSuffixCandidate) —
+  // the SAFETY BOUND tests below pin the reviewer's exact counterexamples
+  // as still address_differs.
+  describe('garbage short suffix token where a real street suffix should be (live-test bug: "m" for "Dr")', () => {
+    it('is GREEN for "4930 Overland m" vs "4930 Overland Dr" (garbage 1-char suffix dropped as OCR noise)', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland m', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN for the live-test shape (house number + street name + garbled 1-char suffix + inline unit): "1811 Fictional m ste 102" vs "1811 Fictional Dr Ste 102"', () => {
+      const r = compareAddresses(
+        { street: '1811 Fictional m ste 102', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '1811 Fictional Dr Ste 102', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('SAFETY BOUND: a recognized-but-DIFFERENT suffix on both sides ("St" vs "Dr") still differs — never dropped as noise', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland St', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND: a garbage-shaped trailing token is only dropped when the OTHER side has a real recognized suffix — two garbage/absent suffixes still compare on the raw core', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland m', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4931 Overland', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // REVIEW FIX (blocking finding) — reviewer-executed counterexamples,
+    // pinned exactly as reported: 2-char trailing tokens that are REAL
+    // (if uncommon) USPS street suffixes not enumerated in
+    // SUFFIX_ABBREVIATIONS must never be dropped as OCR noise. Before
+    // this fix, all three of these returned green/exact_match.
+    it('SAFETY BOUND (reviewer counterexample): "100 Overland Pt" ("Pt" = Point, a real 2-char suffix) vs "100 Overland Dr" still differs', () => {
+      const r = compareAddresses(
+        { street: '100 Overland Pt', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '100 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND (reviewer counterexample): "200 Meadow Cv" ("Cv" = Cove) vs "200 Meadow St" still differs', () => {
+      const r = compareAddresses(
+        { street: '200 Meadow Cv', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '200 Meadow St', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND (reviewer counterexample): "300 Birch Tr" ("Tr" = Trail) vs "300 Birch Ln" still differs', () => {
+      const r = compareAddresses(
+        { street: '300 Birch Tr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '300 Birch Ln', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
+  // Bug 4 (round 3, W-T-round3): live report — prescriber addresses
+  // otherwise identical, but the ENTERED (freeform, PioneerRx) side
+  // lacked a comma before the state ("...Testville KS", no comma) so
+  // parseFreeformAddress's ", ST [ZIP]" anchor never matched at all and
+  // the WHOLE remaining line (city+state included) fell into `street`
+  // undifferentiated — misaligning the street-core token count against
+  // the source's cleanly split components and landing address_differs,
+  // even though every component actually agreed. The source-side parser
+  // (ADDRESS_RE in parseEscriptOcr.ts) already tolerates a comma-OR-
+  // whitespace separator before the state; parseFreeformAddress required
+  // a literal comma — that asymmetry is the actual bug. A component
+  // absent on EITHER side (entered's freeform line omitting the ZIP
+  // entirely, the pattern actually named in the report) was already a
+  // non-disagreement via componentDiffers; the real gap was upstream, in
+  // recognizing the state/city split at all when there's no comma.
+  describe('freeform entered line with no comma before the state (live-test bug: real component match landing address_differs)', () => {
+    it('is GREEN when the entered freeform line has no comma before the state and omits the ZIP entirely', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr Testville KS' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('is GREEN (pinned regression) for the comma-present shape from the branch brief: entered line missing only the ZIP', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr Testville, KS 66049' },
+        { street: '4930 Overland Dr Testville, KS' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('SAFETY BOUND: a no-comma entered line with a genuinely DIFFERENT state still differs', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr Testville MO' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // REVIEW FIX (non-blocking finding, round 3): the comma-less guard
+    // above only excluded SUFFIX_ABBREVIATIONS collisions ("Ct" = Court
+    // vs Connecticut), not DIRECTIONAL_ABBREVIATIONS ones ("NE" =
+    // Northeast vs Nebraska) — a bare, comma-less, city-less street
+    // whose real core ends in a directional ("123 Main St NE") could
+    // misparse as city="St", state="NE", producing a false address_differs
+    // against a fully-populated, otherwise-identical source (the city/
+    // ZIP the source states would spuriously conflict with the bogus
+    // parsed city/state). Now guarded the same way suffixes are.
+    it('is GREEN when a comma-less, city-less entered line ends in a real directional-suffixed street ("123 Main St NE") — not misread as city="St", state="NE"', () => {
+      const r = compareAddresses(
+        { street: '123 Main St NE', city: 'Fakeburg', state: 'KS', zip: '66049' },
+        { street: '123 Main St NE' } // no city/state/zip stated at all
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+  });
+
+  // Bug 6 (round 3, W-T-round3): live report — source OCR read unit
+  // "M1" as "MI" (digit 1 misread as letter I). Common OCR digit/letter
+  // confusables (I/l -> 1, O -> 0) are now folded on the unit token
+  // ONLY before comparing — never on street number/name, city, state, or
+  // ZIP, where a real letter/digit distinction must still count as a
+  // genuine disagreement.
+  describe('OCR digit/letter confusables in the unit token (live-test bug: unit "M1" read as "MI")', () => {
+    it('is GREEN when the unit differs only by an I/1 confusable ("M1" vs "MI")', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: 'M1', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '123 Main St', unit: 'MI', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN when the unit differs by both an O/0 and an I/1 confusable ("01" vs "OI")', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: '01', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '123 Main St', unit: 'OI', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('still flags unit_differs for a genuinely different unit number ("M2" vs "M1"), confusable-folding included', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: 'M2', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '123 Main St', unit: 'M1', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unit_differs');
+    });
+
+    it('SAFETY BOUND: an O/0 or I/1 difference in the HOUSE NUMBER (not the unit) still counts as a real street mismatch', () => {
+      const r = compareAddresses(
+        { street: '10 Main St', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '1O Main St', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
+  // Bug 7 (round 3, Will verbatim: "If prescriber address is missing
+  // Suite number I think we shouldn't bother marking that as
+  // different"): a unit stated on only ONE side is no longer a
+  // disagreement at all (previously downgraded to yellow unit_differs,
+  // now not flagged when everything else matches) — same treatment as
+  // the already-existing missing-street-suffix leniency. Unit stated on
+  // BOTH sides but genuinely different (after Bug 6's confusable
+  // folding) still flags unit_differs.
+  describe('unit present on one side only is not a disagreement (live-test bug: missing Suite number)', () => {
+    it('is GREEN when a unit is stated only on the source side and everything else matches', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore Blvd Suite 300, Testville KS 66049' },
+        { street: '330 Sycamore Blvd, Testville KS 66049' } // no unit stated at all
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN when a unit is stated only on the entered side and everything else matches', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore Blvd', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '330 Sycamore Blvd Suite 300, Testville KS 66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('still flags unit_differs when BOTH sides state a unit and it genuinely differs ("Suite 300" vs "Suite 200")', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore Blvd Suite 300, Testville KS 66049' },
+        { street: '330 Sycamore Blvd Suite 200, Testville KS 66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unit_differs');
     });
   });
 });

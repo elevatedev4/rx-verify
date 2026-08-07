@@ -194,12 +194,55 @@ function streetBaseDiffers(a: string, b: string): boolean {
 /** Set of normalized (abbreviated) street-suffix tokens, e.g. "st", "ave", "rd". Used to split a trailing suffix token off the street CORE so a suffix present on only one side (or missing entirely) doesn't fail the comparison — see NormalizedStreet.suffix. */
 const SUFFIX_ABBREVIATIONS = new Set(Object.values(STREET_SUFFIXES));
 
+/** Set of normalized directional abbreviations ("n", "ne", ...). Used by isGarbageSuffixCandidate so a legitimate leading/trailing directional is never mistaken for OCR noise. */
+const DIRECTIONAL_ABBREVIATIONS = new Set(Object.values(DIRECTIONALS));
+
+/**
+ * True for a SINGLE-character alphabetic token. Used only for the
+ * narrow "garbage trailing token where a real suffix should be" case
+ * (live-test bug: source street suffix "Dr" OCR-misread as the single
+ * character "m") — see NormalizedStreet.trailingToken and
+ * compareAddresses' use of it.
+ *
+ * REVIEW FIX (blocking finding): this used to also accept 2-char
+ * tokens not in SUFFIX_ABBREVIATIONS/DIRECTIONAL_ABBREVIATIONS, on the
+ * theory that anything that short with no recognized meaning must be
+ * noise. That's false — SUFFIX_ABBREVIATIONS is an explicitly
+ * documented SUBSET of USPS Pub 28 (see its own comment above), not the
+ * full list: real, un-enumerated 2-char suffixes like "Pt" (Point),
+ * "Cv" (Cove), "Tr" (Trail), "Mt", "Un", "Is", "Rw", "Ky" all collided,
+ * and reviewer execution confirmed false GREENs — "100 Overland Pt" vs
+ * "100 Overland Dr", "200 Meadow Cv" vs "200 Meadow St", "300 Birch Tr"
+ * vs "300 Birch Ln" — a direct violation of this file's own
+ * never-false-green invariant (see the compareAddresses doc above).
+ * Rather than try to enumerate every 2-char USPS suffix as another
+ * exception list (the same drift risk STREET_SUFFIXES' own doc already
+ * warns about), this is restricted to exactly 1 character: no real USPS
+ * street suffix is a single alphabetic character, so a 1-char trailing
+ * token has no plausible reading as real suffix text at all, while a
+ * 2-char token might always be a real (if uncommon) one this table
+ * doesn't happen to enumerate.
+ */
+function isGarbageSuffixCandidate(token: string): boolean {
+  return /^[a-z]$/.test(token) && !DIRECTIONAL_ABBREVIATIONS.has(token);
+}
+
 interface NormalizedStreet {
   /** Street line with unit AND trailing suffix stripped out, tokens normalized. */
   base: string;
   /** Trailing street-type suffix (already normalized to its abbreviation, e.g. "st"), or null if the line didn't end in a recognized one. */
   suffix: string | null;
   unit: string | null;
+  /**
+   * The line's actual trailing token, but ONLY when `suffix` is null
+   * (nothing recognized there) — the candidate garbage token itself, for
+   * compareAddresses to evaluate via isGarbageSuffixCandidate against
+   * the OTHER side's suffix. Null whenever `suffix` is non-null, or the
+   * line is too short to have a distinct trailing token.
+   */
+  trailingToken: string | null;
+  /** `base` with its own trailing token ALSO removed — only set alongside `trailingToken` (i.e. only meaningful when `suffix` is null). Lets compareAddresses drop the trailing token as OCR noise without re-deriving it from `base` by string surgery. */
+  baseWithoutTrailingToken: string | null;
 }
 
 /** Split a raw street line into base + unit, and normalize tokens. */
@@ -241,13 +284,24 @@ function normalizeStreetLine(raw: string): NormalizedStreet {
   // is just an incomplete entry, not a different street.
   let suffix: string | null = null;
   let core = normalized;
+  let trailingToken: string | null = null;
+  let baseWithoutTrailingToken: string | null = null;
   const last = normalized[normalized.length - 1];
   if (normalized.length > 1 && last !== undefined && SUFFIX_ABBREVIATIONS.has(last)) {
     suffix = last;
     core = normalized.slice(0, -1);
+  } else if (normalized.length > 1 && last !== undefined) {
+    trailingToken = last;
+    baseWithoutTrailingToken = normalized.slice(0, -1).join(' ');
   }
 
-  return { base: core.join(' '), suffix, unit: unit ? unit.toLowerCase() : null };
+  return {
+    base: core.join(' '),
+    suffix,
+    unit: unit ? unit.toLowerCase() : null,
+    trailingToken,
+    baseWithoutTrailingToken
+  };
 }
 
 /**
@@ -275,6 +329,22 @@ function normalizeCity(raw: string): string {
 
 function normalizeState(raw: string): string {
   return foldCase(raw).replace(/\s+/g, '');
+}
+
+/**
+ * Fold common OCR digit/letter confusables within a UNIT token ONLY
+ * (Bug 6, round 3 — live report: source OCR read unit "M1" as "MI").
+ * Applied to both sides before comparing so an OCR misread doesn't
+ * flag as a real unit difference: I/l -> 1, O -> 0 (the token is
+ * already lowercased by this point via foldCase, so only the lowercase
+ * forms need handling). Deliberately scoped to the unit token — never
+ * applied to the street number/name, city, state, or ZIP, where a real
+ * letter/digit distinction must still count as a genuine disagreement;
+ * the unit token is already this comparison's most advisory-tier
+ * component (see the "unit differs" handling in compareAddresses).
+ */
+function foldUnitConfusables(unit: string): string {
+  return unit.replace(/[il]/g, '1').replace(/o/g, '0');
 }
 
 function normalizeZip(raw: string): string {
@@ -318,7 +388,34 @@ function normalizeZip(raw: string): string {
  */
 function parseFreeformAddress(raw: string): { street: string; city: string | null; state: string | null; zip: string | null } {
   const trimmed = raw.trim();
-  const m = /^(.*?),\s*([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
+  // Prefer the literal-comma form first (unambiguous). Live-test bug:
+  // the entered freeform line sometimes omits the comma before the state
+  // entirely ("...Testville KS") — the source-side parser (ADDRESS_RE in
+  // src/ocr/parseEscriptOcr.ts) already tolerates a comma-OR-whitespace
+  // separator here, so a comma-less entered line fell through to the
+  // no-match branch below and dumped the whole remaining line (city AND
+  // state included) into `street` undifferentiated, misaligning the
+  // street-core token count against the source's cleanly split
+  // components. Falling back to a bare-whitespace separator closes that
+  // gap — BUT only when the candidate 2-letter "state" token isn't
+  // itself a recognized street-type suffix OR directional abbreviation
+  // (SUFFIX_ABBREVIATIONS overlaps real state codes closely enough —
+  // "Ct" is both Court and Connecticut — that a comma-less, city-less
+  // street ending in its own suffix, e.g. "330 Sycamore St", would
+  // otherwise be misread as a city-less state; likewise
+  // DIRECTIONAL_ABBREVIATIONS overlaps real state codes — "NE" is both
+  // Northeast and Nebraska — so "123 Main St NE" with no city/state at
+  // all, review finding, would otherwise misparse as city="St",
+  // state="NE"). That narrower case is left exactly as before (whole
+  // line treated as street) rather than risk a wrong split.
+  let m = /^(.*?),\s*([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
+  if (!m) {
+    const loose = /^(.*?)\s+([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
+    const looseCandidate = (loose?.[2] ?? '').toLowerCase();
+    if (loose && !SUFFIX_ABBREVIATIONS.has(looseCandidate) && !DIRECTIONAL_ABBREVIATIONS.has(looseCandidate)) {
+      m = loose;
+    }
+  }
   if (!m) {
     // No recognizable ", ST [ZIP]" tail at all — nothing to split out;
     // treat the whole line as street and leave city/state/zip unknown
@@ -512,9 +609,37 @@ export function compareAddresses(
   // confirmed nothing. sourceAbsentIsGap closes that the same way city's
   // already does: entered-blank stays tolerated (unchanged), but
   // source-blank-while-entered-states-one is now a genuine gap.
+  //
+  // BUG 2 (round 3, live-test): a GARBAGE trailing token where a real
+  // suffix should be — source street suffix "Dr" OCR-misread as the
+  // single character "m" — must not fail the match either, same
+  // rationale as a suffix missing outright. Only fires on the side that
+  // has NO recognized suffix at all (suffix === null) when its own
+  // trailing token is short/unrecognized/non-directional
+  // (isGarbageSuffixCandidate) AND the OTHER side DOES state a real,
+  // recognized suffix — i.e. exactly the shape of "one side's suffix got
+  // eaten by OCR", never a case where neither side has a real suffix
+  // (that's ordinary core-text comparison, unchanged) or both sides have
+  // one (handled, unchanged, by the differing-suffix check below).
+  const srcBaseForCompare =
+    srcStreet.suffix === null &&
+    entStreet.suffix !== null &&
+    srcStreet.trailingToken !== null &&
+    srcStreet.baseWithoutTrailingToken !== null &&
+    isGarbageSuffixCandidate(srcStreet.trailingToken)
+      ? srcStreet.baseWithoutTrailingToken
+      : srcStreet.base;
+  const entBaseForCompare =
+    entStreet.suffix === null &&
+    srcStreet.suffix !== null &&
+    entStreet.trailingToken !== null &&
+    entStreet.baseWithoutTrailingToken !== null &&
+    isGarbageSuffixCandidate(entStreet.trailingToken)
+      ? entStreet.baseWithoutTrailingToken
+      : entStreet.base;
   const streetDiffers =
-    sourceAbsentIsGap(srcStreet.base, entStreet.base) ||
-    (srcStreet.base !== '' && entStreet.base !== '' && streetBaseDiffers(srcStreet.base, entStreet.base)) ||
+    sourceAbsentIsGap(srcBaseForCompare, entBaseForCompare) ||
+    (srcBaseForCompare !== '' && entBaseForCompare !== '' && streetBaseDiffers(srcBaseForCompare, entBaseForCompare)) ||
     (srcStreet.suffix !== null && entStreet.suffix !== null && srcStreet.suffix !== entStreet.suffix);
   const cityDiffers = cityMissingOrDiffers(srcCity, entCity);
   const stateDiffers = componentDiffers(srcState, entState);
@@ -582,17 +707,31 @@ export function compareAddresses(
     };
   }
 
-  if (srcUnit !== entUnit) {
-    // Includes "one side states a unit, the other doesn't mention one at
-    // all" (missing unit on one side only) — per the owner's requirement
-    // that's a soft signal worth a glance, never a hard mismatch. It's
-    // downgraded to its own unit_differs reason code (not address_differs)
-    // precisely so it reads as "everything else matches, just double-check
-    // the suite/apt" rather than "this looks like a different address".
+  // BUG 7 (round 3 — Will, verbatim: "If prescriber address is missing
+  // Suite number I think we shouldn't bother marking that as
+  // different"): a unit stated on only ONE side is no longer treated as
+  // a disagreement AT ALL — same "incomplete entry, not evidence of a
+  // real difference" treatment already given to a missing street
+  // suffix/state/ZIP elsewhere in this function. Only when BOTH sides
+  // actually state a unit, and it genuinely differs after Bug 6's
+  // OCR-confusable folding, does this still flag unit_differs.
+  if (srcUnit !== null && entUnit !== null && foldUnitConfusables(srcUnit) !== foldUnitConfusables(entUnit)) {
     return {
       status: 'yellow',
       reasonCode: 'unit_differs',
-      explanation: `Street, city, state, and ZIP match; unit differs ("${srcUnit ?? 'none'}" vs "${entUnit ?? 'none'}").`
+      explanation: `Street, city, state, and ZIP match; unit differs ("${srcUnit}" vs "${entUnit}").`
+    };
+  }
+
+  if (srcUnit !== entUnit) {
+    // Exactly one side states a unit (the other is null) — not a
+    // disagreement, but worth naming in the explanation since it's the
+    // one component this verdict didn't actually confirm either way.
+    const statedUnit = srcUnit ?? entUnit;
+    return {
+      status: 'green',
+      reasonCode: 'exact_match',
+      explanation: `Address matches after normalization; a unit ("${statedUnit ?? ''}") was only stated on one side, which is not treated as a disagreement.`
     };
   }
 

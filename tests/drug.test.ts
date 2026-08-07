@@ -121,6 +121,78 @@ describe('compareDrugs', () => {
       it('does not fold "cap" inside an unrelated word like "captopril" into "capsule"', () => {
         expect(normalizeDrugNameString('Captopril 25mg tablet')).toBe('captopril 25 mg tablet');
       });
+
+      // Bug 5 (round 3, W-T-round3): live report — entered drug said
+      // "oint", source said "ointment"; unmatched, fell through to a
+      // yellow unknown_drug. Extends DOSAGE_FORM_WORDS with the same
+      // common-abbreviation folding already applied for tab/cap/sol/susp,
+      // for the other dosage forms actually seen on e-scripts vs
+      // PioneerRx free-text entry.
+      describe('Bug 5: additional dosage-form abbreviations (oint, crm, supp, inj, gtt)', () => {
+        it('is GREEN name_identity_match for "Clindamycin 2% oint" vs "Clindamycin 2% ointment"', () => {
+          const r = compareDrugs({ name: 'Clindamycin 2% oint' }, { name: 'Clindamycin 2% ointment' }, provider);
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        it('folds "ung" (unguentum) to "ointment" too', () => {
+          expect(normalizeDrugNameString('Nystatin 100000 unit/g ung')).toBe('nystatin 100000 unit/g ointment');
+        });
+
+        it('folds "crm" to "cream"', () => {
+          const r = compareDrugs({ name: 'Hydrocortisone 1% crm' }, { name: 'Hydrocortisone 1% cream' }, provider);
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        it('does NOT fold bare "cr" to "cream" — ambiguous with the controlled-release release qualifier ("Diltiazem CR" is not a cream)', () => {
+          expect(normalizeDrugNameString('Diltiazem 240mg cr')).toBe('diltiazem 240 mg cr');
+        });
+
+        it('folds "supp" to "suppository"', () => {
+          const r = compareDrugs(
+            { name: 'Promethazine 25mg supp' },
+            { name: 'Promethazine 25mg suppository' },
+            provider
+          );
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        it('folds "inj" to "injection"', () => {
+          const r = compareDrugs({ name: 'Enoxaparin 40mg inj' }, { name: 'Enoxaparin 40mg injection' }, provider);
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        // REVIEW FIX (non-blocking finding, round 3): "lot" -> "lotion"
+        // was removed rather than added — "lot"/"Lot" routinely appears
+        // as a lot/batch-number token bleeding into a free-text name
+        // field, and folding it here would feed the primary
+        // name_identity_match GREEN path on a token that isn't reliably
+        // a dosage-form abbreviation at all. No live report asked for
+        // this fold (only "oint" vs "ointment" was reported), so it's
+        // pinned as NOT folded.
+        it('does NOT fold "lot" to "lotion" (ambiguous with a lot/batch-number token, not requested by any field report)', () => {
+          expect(normalizeDrugNameString('Triamcinolone 0.1% lot')).toBe('triamcinolone 01% lot');
+          const r = compareDrugs(
+            { name: 'Triamcinolone 0.1% lot' },
+            { name: 'Triamcinolone 0.1% lotion' },
+            provider
+          );
+          expect(r.reasonCode).not.toBe('name_identity_match');
+        });
+
+        it('folds "gtt" to "drops"', () => {
+          const r = compareDrugs({ name: 'Timolol 0.5% gtt' }, { name: 'Timolol 0.5% drops' }, provider);
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        it('leaves "patch"/"patches" as-is (no synonym folding — unambiguous already, per branch brief)', () => {
+          expect(normalizeDrugNameString('Fentanyl 25mcg patch')).toBe('fentanyl 25 mcg patch');
+        });
+      });
     });
   });
 });

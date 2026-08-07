@@ -778,6 +778,44 @@ function findNdcToken(words: OcrWord[], exclude: Set<string>): OcrWord | null {
 }
 
 /**
+ * Refills-via-"Total Fills" pattern anchor, independent of any label
+ * (Bug 3, round 3, msg id 386, "Refill Approved" layout — live report:
+ * refills showed "(not provided)" though the page reads "Total Fills: 2
+ * (including this fill)"). Confirmed against the real OCR word dump: on
+ * this layout OCR drops the "Total"/"Fills:" label text ENTIRELY —
+ * neither word appears anywhere in the capture — so every label-fuzzy-
+ * match pass above (which all require SOME label text to anchor on) has
+ * nothing to find, and the value tail is silently lost even though it
+ * survived OCR intact.
+ *
+ * The trailing phrase "(including this fill)" is distinctive enough on
+ * an escript — it doesn't occur for any other field — that a bare
+ * integer immediately followed by it is trusted as a Total-Fills read on
+ * its own, mirroring the NPI/NDC pattern anchors just above (and
+ * resolveDateField's pool-fallback further below): a narrow, exact
+ * shape match, never a generic "any number near parentheses" guess.
+ * Scans row-by-row (a physical OCR row, not the whole page flattened) so
+ * a number and an unrelated "(including this fill)" elsewhere on the
+ * page can never pair up across rows.
+ */
+function findTotalFillsPhraseValue(lines: OcrWord[][]): string | undefined {
+  for (const line of lines) {
+    for (let i = 0; i + 3 < line.length; i++) {
+      const value = (line[i]?.text ?? '').trim();
+      const w1 = (line[i + 1]?.text ?? '').toLowerCase().replace(/^\(/, '');
+      const w2 = (line[i + 2]?.text ?? '').toLowerCase();
+      const w3 = (line[i + 3]?.text ?? '')
+        .toLowerCase()
+        .replace(/[).,]+$/, '');
+      if (/^\d+$/.test(value) && w1 === 'including' && w2 === 'this' && w3 === 'fill') {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * Phone-number shape anchor (branch brief item 2). Deliberately lenient —
  * this validates "looks phone-shaped enough to trust", not "is a
  * perfectly OCR'd US phone number": a live capture can mangle the
@@ -1594,6 +1632,22 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     if (ndcWord) usedDigitTokens.add(ndcWord.text.trim());
     const npi = npiWord?.text.trim();
     const ndc = ndcWord?.text.trim();
+
+    // ---- Pattern anchor: refills via "N (including this fill)" tail,
+    // independent of any label (Bug 3) ----
+    // Only a FALLBACK — an explicit "Refills"/"Refills Authorized"/
+    // "Refills Remaining"/"Total fills" label match from Pass A/B above
+    // always wins (raw.refills already set); this only fires when the
+    // label itself was dropped by OCR entirely and nothing above found
+    // anything at all. See findTotalFillsPhraseValue.
+    if (raw.refills === undefined) {
+      const totalFillsPhrase = findTotalFillsPhraseValue(lines);
+      if (totalFillsPhrase !== undefined) {
+        raw.refills = totalFillsPhrase;
+        refillsResolvedCanonical = 'totalfills';
+        resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
+      }
+    }
 
     // ---- Date validation/correction for dob & written ----
     // If the label-associated value for either date field doesn't

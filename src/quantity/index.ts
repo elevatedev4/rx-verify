@@ -328,10 +328,41 @@ export function comparePrescriberNpi(
 }
 
 /**
- * Prescriber PHONE field. Never RED on its own — a clinic often has more
- * than one legitimate number (direct line vs front desk vs after-hours),
- * so a differing phone doesn't imply a different prescriber the way a
- * differing NPI does. Compared on digits only (formatting-agnostic).
+ * True for a 3-digit string shaped like a real NANP area code — the
+ * first digit must be 2-9 (US/Canada area codes never start with 0 or
+ * 1). Used only to tell "OCR mangled this area code into something that
+ * can't even be a real one" apart from "this is a plausible area code
+ * that's simply different" — see comparePrescriberPhone.
+ */
+function looksLikeRealAreaCode(threeDigits: string): boolean {
+  return /^[2-9]\d{2}$/.test(threeDigits);
+}
+
+/**
+ * Prescriber PHONE field. Compared on digits only (formatting-agnostic).
+ * Three outcomes:
+ *  - GREEN: the last 10 digits match exactly (a leading US country code
+ *    "1" on only one side doesn't count as a difference).
+ *  - YELLOW `phone_differs` (never treated as a hard conflict — a clinic
+ *    often has more than one legitimate number, direct line vs front
+ *    desk vs after-hours, so a differing phone doesn't imply a different
+ *    prescriber the way a differing NPI does): the LOCAL 7 digits also
+ *    differ, i.e. this looks like an entirely different number.
+ *  - YELLOW `phone_ocr_suspect`: the local 7 digits match, but the area
+ *    code isn't a normal, complete 10-digit one on both sides (either
+ *    side has other-than-10 total digits, or the disagreeing area-code
+ *    segment isn't shaped like a real NANP area code — e.g. OCR read
+ *    "(7" as "0", producing an area code that starts with 0). That
+ *    pattern is OCR noise, not a second legitimate line, so it's called
+ *    out distinctly rather than folded into the generic phone_differs
+ *    wording.
+ *  - RED `phone_area_code_mismatch`: both sides are structurally normal,
+ *    complete 10-digit numbers with a real-shaped area code, and the
+ *    LOCAL 7 digits match but the area code genuinely differs. Unlike an
+ *    entirely different number, "identical local number, different real
+ *    area code" is not the shape of "the clinic has another line" — it
+ *    reads as a transposition/entry error, so it stays RED rather than
+ *    falling under the never-RED multi-line leniency above.
  */
 export function comparePrescriberPhone(
   sourcePhone: string | null | undefined,
@@ -357,6 +388,30 @@ export function comparePrescriberPhone(
   if (tailA && tailA === tailB) {
     return { status: 'green', reasonCode: 'exact_match', explanation: 'Prescriber phone number matches exactly.' };
   }
+
+  const localA = tailA.slice(-7);
+  const localB = tailB.slice(-7);
+  if (localA.length === 7 && localA === localB) {
+    const areaA = tailA.length > 7 ? tailA.slice(0, tailA.length - 7) : '';
+    const areaB = tailB.length > 7 ? tailB.slice(0, tailB.length - 7) : '';
+    const structurallyNormal =
+      areaA.length === 3 && areaB.length === 3 && looksLikeRealAreaCode(areaA) && looksLikeRealAreaCode(areaB);
+
+    if (!structurallyNormal) {
+      return {
+        status: 'yellow',
+        reasonCode: 'phone_ocr_suspect',
+        explanation: `Local number matches; area code looks garbled by OCR ("${sourcePhone}" vs "${enteredPhone}") — verify visually.`
+      };
+    }
+
+    return {
+      status: 'red',
+      reasonCode: 'phone_area_code_mismatch',
+      explanation: `Prescriber phone number differs: local number matches but the area code does not ("${sourcePhone}" vs "${enteredPhone}") — verify which is correct.`
+    };
+  }
+
   return {
     status: 'yellow',
     reasonCode: 'phone_differs',

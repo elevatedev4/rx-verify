@@ -336,14 +336,41 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
   tab: 'tablet', tabs: 'tablet', tablets: 'tablet',
   cap: 'capsule', caps: 'capsule', capsules: 'capsule',
   sol: 'solution', soln: 'solution',
-  susp: 'suspension'
+  susp: 'suspension',
+  // Bug 5 (round 3, W-T-round3): live report — entered "oint", source
+  // "ointment", not recognized as the same form. Deliberately excludes
+  // bare "cr" for cream ("crm" is unambiguous, added below) — "CR" is
+  // ALREADY a protected release-qualifier abbreviation elsewhere in this
+  // engine's philosophy (controlled-release, e.g. "Diltiazem CR" — see
+  // this function's own doc above), so folding it to "cream" too would
+  // risk conflating a release profile with a dosage form; per the branch
+  // brief's own "only fold unambiguous abbreviations" instruction, it's
+  // left out.
+  oint: 'ointment', ung: 'ointment',
+  crm: 'cream',
+  supp: 'suppository',
+  inj: 'injection',
+  gtt: 'drops'
+  // REVIEW FIX (non-blocking finding, round 3): "lot" -> "lotion" was
+  // removed. "Lot"/"lot" routinely appears as a lot/batch-number token
+  // that bleeds into a free-text name field on either side (not just a
+  // dosage form abbreviation) — folding it here feeds the PRIMARY
+  // name_identity_match GREEN path (normalizeDrugNameString is compared
+  // for exact equality there), so a stray "Lot" token folding to
+  // "lotion" on one side while the other side coincidentally has a real
+  // "lotion" dosage form elsewhere in its text risked a false
+  // name-identity match. The field report that motivated this round was
+  // specifically "oint" vs "ointment" — no lotion-abbreviation report
+  // exists — so this is dropped rather than guessed at.
 };
 
 /**
  * Normalize a free-text drug name/description for IDENTITY comparison:
- * case/punctuation/whitespace, common dosage-FORM abbreviations (TAB/
- * TABS -> tablet, CAP/CAPS -> capsule, SOL -> solution, SUSP ->
- * suspension), and number/unit spacing only — no pharmaceutical-
+ * case/punctuation/whitespace, common dosage-FORM abbreviations (see
+ * DOSAGE_FORM_WORDS — TAB/TABS -> tablet, CAP/CAPS -> capsule, SOL ->
+ * solution, SUSP -> suspension, OINT/UNG -> ointment, CRM -> cream,
+ * SUPP -> suppository, INJ -> injection, GTT -> drops),
+ * and number/unit spacing only — no pharmaceutical-
  * equivalence reasoning (that would need real RxNorm data — see this
  * file's header). Deliberately conservative: this can only ever fail to
  * recognize a real match (e.g. "Phosp" vs "Phosphate" spelled out
