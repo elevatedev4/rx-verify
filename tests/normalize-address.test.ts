@@ -156,14 +156,23 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('address_differs');
     });
 
-    it('is NOT a hard mismatch when unit/apt is missing on one side only (downgraded to unit_differs, not address_differs)', () => {
+    // UPDATED (round 3, Bug 7 — Will, verbatim: "If prescriber address is
+    // missing Suite number I think we shouldn't bother marking that as
+    // different"): this used to assert 'yellow'/'unit_differs' here — a
+    // unit missing on one side only used to be downgraded from
+    // address_differs to unit_differs, but was still a visible flag. Per
+    // Bug 7, a unit stated on only ONE side is no longer treated as a
+    // disagreement at all now that everything else matches; see the
+    // "unit present on one side only" describe block below for the full
+    // behavior (including the still-flagged "unit differs on both
+    // sides" case).
+    it('is NOT flagged at all when unit/apt is missing on one side only (everything else matches)', () => {
       const r = compareAddresses(
         { street: '123 Main St', unit: 'Apt 4', city: 'Testville', state: 'KS', zip: '99999' },
         { street: '123 Main St Testville, KS 99999' } // no unit stated at all
       );
-      expect(r.status).toBe('yellow');
-      expect(r.reasonCode).toBe('unit_differs');
-      expect(r.status).not.toBe('red');
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
     });
   });
 
@@ -501,6 +510,87 @@ describe('compareAddresses', () => {
       );
       expect(r.status).toBe('yellow');
       expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
+  // Bug 6 (round 3, W-T-round3): live report — source OCR read unit
+  // "M1" as "MI" (digit 1 misread as letter I). Common OCR digit/letter
+  // confusables (I/l -> 1, O -> 0) are now folded on the unit token
+  // ONLY before comparing — never on street number/name, city, state, or
+  // ZIP, where a real letter/digit distinction must still count as a
+  // genuine disagreement.
+  describe('OCR digit/letter confusables in the unit token (live-test bug: unit "M1" read as "MI")', () => {
+    it('is GREEN when the unit differs only by an I/1 confusable ("M1" vs "MI")', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: 'M1', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '123 Main St', unit: 'MI', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN when the unit differs by both an O/0 and an I/1 confusable ("01" vs "OI")', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: '01', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '123 Main St', unit: 'OI', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('still flags unit_differs for a genuinely different unit number ("M2" vs "M1"), confusable-folding included', () => {
+      const r = compareAddresses(
+        { street: '123 Main St', unit: 'M2', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '123 Main St', unit: 'M1', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unit_differs');
+    });
+
+    it('SAFETY BOUND: an O/0 or I/1 difference in the HOUSE NUMBER (not the unit) still counts as a real street mismatch', () => {
+      const r = compareAddresses(
+        { street: '10 Main St', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '1O Main St', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
+  // Bug 7 (round 3, Will verbatim: "If prescriber address is missing
+  // Suite number I think we shouldn't bother marking that as
+  // different"): a unit stated on only ONE side is no longer a
+  // disagreement at all (previously downgraded to yellow unit_differs,
+  // now not flagged when everything else matches) — same treatment as
+  // the already-existing missing-street-suffix leniency. Unit stated on
+  // BOTH sides but genuinely different (after Bug 6's confusable
+  // folding) still flags unit_differs.
+  describe('unit present on one side only is not a disagreement (live-test bug: missing Suite number)', () => {
+    it('is GREEN when a unit is stated only on the source side and everything else matches', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore Blvd Suite 300, Testville KS 66049' },
+        { street: '330 Sycamore Blvd, Testville KS 66049' } // no unit stated at all
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN when a unit is stated only on the entered side and everything else matches', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore Blvd', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '330 Sycamore Blvd Suite 300, Testville KS 66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('still flags unit_differs when BOTH sides state a unit and it genuinely differs ("Suite 300" vs "Suite 200")', () => {
+      const r = compareAddresses(
+        { street: '330 Sycamore Blvd Suite 300, Testville KS 66049' },
+        { street: '330 Sycamore Blvd Suite 200, Testville KS 66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unit_differs');
     });
   });
 });

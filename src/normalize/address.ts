@@ -317,6 +317,22 @@ function normalizeState(raw: string): string {
   return foldCase(raw).replace(/\s+/g, '');
 }
 
+/**
+ * Fold common OCR digit/letter confusables within a UNIT token ONLY
+ * (Bug 6, round 3 — live report: source OCR read unit "M1" as "MI").
+ * Applied to both sides before comparing so an OCR misread doesn't
+ * flag as a real unit difference: I/l -> 1, O -> 0 (the token is
+ * already lowercased by this point via foldCase, so only the lowercase
+ * forms need handling). Deliberately scoped to the unit token — never
+ * applied to the street number/name, city, state, or ZIP, where a real
+ * letter/digit distinction must still count as a genuine disagreement;
+ * the unit token is already this comparison's most advisory-tier
+ * component (see the "unit differs" handling in compareAddresses).
+ */
+function foldUnitConfusables(unit: string): string {
+  return unit.replace(/[il]/g, '1').replace(/o/g, '0');
+}
+
 function normalizeZip(raw: string): string {
   // Compare on the 5-digit base; ZIP+4 vs ZIP5 is not treated as a diff.
   const digits = raw.replace(/[^0-9]/g, '');
@@ -672,17 +688,31 @@ export function compareAddresses(
     };
   }
 
-  if (srcUnit !== entUnit) {
-    // Includes "one side states a unit, the other doesn't mention one at
-    // all" (missing unit on one side only) — per the owner's requirement
-    // that's a soft signal worth a glance, never a hard mismatch. It's
-    // downgraded to its own unit_differs reason code (not address_differs)
-    // precisely so it reads as "everything else matches, just double-check
-    // the suite/apt" rather than "this looks like a different address".
+  // BUG 7 (round 3 — Will, verbatim: "If prescriber address is missing
+  // Suite number I think we shouldn't bother marking that as
+  // different"): a unit stated on only ONE side is no longer treated as
+  // a disagreement AT ALL — same "incomplete entry, not evidence of a
+  // real difference" treatment already given to a missing street
+  // suffix/state/ZIP elsewhere in this function. Only when BOTH sides
+  // actually state a unit, and it genuinely differs after Bug 6's
+  // OCR-confusable folding, does this still flag unit_differs.
+  if (srcUnit !== null && entUnit !== null && foldUnitConfusables(srcUnit) !== foldUnitConfusables(entUnit)) {
     return {
       status: 'yellow',
       reasonCode: 'unit_differs',
-      explanation: `Street, city, state, and ZIP match; unit differs ("${srcUnit ?? 'none'}" vs "${entUnit ?? 'none'}").`
+      explanation: `Street, city, state, and ZIP match; unit differs ("${srcUnit}" vs "${entUnit}").`
+    };
+  }
+
+  if (srcUnit !== entUnit) {
+    // Exactly one side states a unit (the other is null) — not a
+    // disagreement, but worth naming in the explanation since it's the
+    // one component this verdict didn't actually confirm either way.
+    const statedUnit = srcUnit ?? entUnit;
+    return {
+      status: 'green',
+      reasonCode: 'exact_match',
+      explanation: `Address matches after normalization; a unit ("${statedUnit ?? ''}") was only stated on one side, which is not treated as a disagreement.`
     };
   }
 
