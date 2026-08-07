@@ -90,6 +90,38 @@ describe('compareQuantity', () => {
     expect(r.status).toBe('green');
     expect(r.reasonCode).toBe('exact_match');
   });
+
+  // Repro for Will's live-test bug report: source "42.5000 Grams" vs
+  // entered 42.5 "gm" flagged a false RED unit_mismatch ("g" vs "gm")
+  // even though the numeric quantity matched exactly. "gm" is a real
+  // gram spelling (confirmed in the same live-test session where "12.0000"
+  // vs "12" compared GREEN) that was simply missing from UNIT_ALIASES.
+  it('is GREEN on "42.5000 Grams" vs 42.5 "gm" (live-test bug repro)', () => {
+    const r = compareQuantity('42.5000', 'Grams', 42.5, 'gm', null);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('treats every gram spelling (g / gm / gram / grams) as the same unit', () => {
+    const spellings = ['g', 'gm', 'gram', 'grams', 'GM', 'Gram', 'GRAMS'];
+    for (const unit of spellings) {
+      const r = compareQuantity(10, 'g', 10, unit, null);
+      expect(r.status, `unit "${unit}" should match "g"`).toBe('green');
+    }
+  });
+
+  it('treats mcg / microgram / micrograms as the same unit', () => {
+    const r1 = compareQuantity(100, 'mcg', 100, 'microgram', null);
+    expect(r1.status).toBe('green');
+    const r2 = compareQuantity(100, 'Micrograms', 100, 'MCG', null);
+    expect(r2.status).toBe('green');
+  });
+
+  it('does NOT treat "g" and "kg" as the same unit (a real conversion, not a spelling synonym) — still RED', () => {
+    const r = compareQuantity(1, 'kg', 1000, 'g', null);
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('unit_mismatch');
+  });
 });
 
 describe('compareRefills', () => {

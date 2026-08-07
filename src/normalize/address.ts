@@ -56,6 +56,107 @@ function foldCase(s: string): string {
   return s.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Unit-designator words that OCR sometimes glues directly onto the
+ * following unit value with no space at all — e.g. "suite205" (live-test
+ * bug: source "...suite205..." vs entered "...Suite 205..." read as a
+ * false address_differs because "suite205" never matched the UNIT_
+ * DESIGNATORS token check below, which requires the designator to be its
+ * OWN token). Split BEFORE any other normalization runs (suffix/
+ * directional/unit) so the existing UNIT_DESIGNATORS handling in
+ * normalizeStreetLine sees "suite" and "205" as separate tokens exactly
+ * like the already-correct "Suite 205" side does. Deliberately scoped to
+ * just these known designator words (not a blind "any letter run
+ * followed by any digit run" split) — splitting only where we already
+ * know a unit designator is expected keeps this from mangling a street
+ * NAME that happens to end in digits for an unrelated reason.
+ */
+const GLUED_UNIT_RE = /^(apartment|apt|suite|ste|unit)(\d.*)$/;
+
+function splitGluedUnitTokens(s: string): string {
+  return s
+    .split(' ')
+    .map((tok) => {
+      const m = GLUED_UNIT_RE.exec(tok);
+      return m ? `${m[1]} ${m[2]}` : tok;
+    })
+    .join(' ');
+}
+
+/** Standard Levenshtein edit distance, small-string DP (address tokens are short). */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp: number[] = new Array(n + 1);
+  for (let j = 0; j <= n; j++) dp[j] = j;
+  for (let i = 1; i <= m; i++) {
+    let prev = dp[0] as number;
+    dp[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const temp = dp[j] as number;
+      dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j] as number, dp[j - 1] as number);
+      prev = temp;
+    }
+  }
+  return dp[n] as number;
+}
+
+/**
+ * True if two ALREADY street-suffix/directional-normalized street tokens
+ * should be treated as the same word. Exact match always passes. Beyond
+ * that, tolerance is intentionally narrow and asymmetric by token shape:
+ *  - Any token that is purely digits (house numbers, unit numbers that
+ *    slipped through as part of base, ZIP-shaped fragments) must match
+ *    EXACTLY — never fuzzed. This is the safety bound from the verdict
+ *    philosophy stated elsewhere in this file (never a false GREEN on an
+ *    identity-critical value): a single-character edit-distance pass on
+ *    "4930" vs "4931" would silently treat two different house numbers
+ *    as the same address.
+ *  - Alphabetic-only tokens of length >=5 tolerate a Levenshtein distance
+ *    of <=1 — covers real single-character OCR misreads (live-test bug:
+ *    source "overtand" vs entered "Overland", 1 substitution) without
+ *    opening the door on short words (directionals like "n"/"s", or
+ *    short suffix-adjacent tokens) where a 1-edit fuzz would blur
+ *    genuinely different words. A single uniform <=1 threshold is used
+ *    at every length (rather than widening to <=2 for very long tokens)
+ *    to keep the tolerance easy to reason about and equally conservative
+ *    everywhere.
+ *  - Anything else (mixed alnum, short tokens, differing shapes) falls
+ *    back to exact match.
+ */
+function streetTokensMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  const isNumeric = (t: string) => /^\d+$/.test(t);
+  if (isNumeric(a) || isNumeric(b)) return false;
+  const isAlpha = (t: string) => /^[a-z]+$/.test(t);
+  if (isAlpha(a) && isAlpha(b) && a.length >= 5 && b.length >= 5) {
+    return levenshtein(a, b) <= 1;
+  }
+  return false;
+}
+
+/**
+ * True if two already-normalized street CORE strings (house number +
+ * street name, unit/suffix already stripped out by normalizeStreetLine)
+ * differ. Word-count MUST match to attempt token-wise fuzzy comparison —
+ * a differing word count means the two strings aren't lined up token-for-
+ * token in any safe, non-guessing way, so this falls back to a plain
+ * whole-string compare (same behavior as before this fix) rather than
+ * risk mis-aligning tokens and fuzz-matching the wrong pair.
+ */
+function streetBaseDiffers(a: string, b: string): boolean {
+  if (a === b) return false;
+  const aTokens = a.split(' ').filter(Boolean);
+  const bTokens = b.split(' ').filter(Boolean);
+  if (aTokens.length !== bTokens.length) return true;
+  for (let i = 0; i < aTokens.length; i++) {
+    if (!streetTokensMatch(aTokens[i] as string, bTokens[i] as string)) return true;
+  }
+  return false;
+}
+
 /** Set of normalized (abbreviated) street-suffix tokens, e.g. "st", "ave", "rd". Used to split a trailing suffix token off the street CORE so a suffix present on only one side (or missing entirely) doesn't fail the comparison — see NormalizedStreet.suffix. */
 const SUFFIX_ABBREVIATIONS = new Set(Object.values(STREET_SUFFIXES));
 
@@ -69,7 +170,7 @@ interface NormalizedStreet {
 
 /** Split a raw street line into base + unit, and normalize tokens. */
 function normalizeStreetLine(raw: string): NormalizedStreet {
-  let s = foldCase(raw);
+  let s = splitGluedUnitTokens(foldCase(raw));
 
   // Extract "#123" style unit anywhere in the string.
   let unit: string | null = null;
@@ -291,15 +392,19 @@ export function compareAddresses(
   // simply doesn't state at all (componentDiffers only flags an actual
   // stated disagreement, never a blank vs a value).
   //
-  // NOT implemented: fuzzy/typo tolerance on the street NAME text itself
-  // (e.g. "Wellz" vs "Wells"). That would need real edit-distance
-  // matching, and — per this engine's stated philosophy elsewhere (see
-  // src/drug/index.ts's "can only ever fail toward MORE yellow, never a
-  // false green") — a permissive fuzzy-string match on an address risks
-  // treating two DIFFERENT streets as the same one, i.e. a false GREEN,
-  // which this engine avoids everywhere else. Abbreviation normalization
-  // (already handled) covers the realistic "different formatting, same
-  // address" case without that risk.
+  // Street NAME text gets a NARROW edit-distance tolerance too (live-test
+  // bug: source "overtand" vs entered "Overland" — a single-character OCR
+  // misread — read as address_differs): alphabetic street-core tokens of
+  // length >=5 match if they're <=1 Levenshtein edit apart (see
+  // streetTokensMatch/streetBaseDiffers). Per this engine's stated
+  // philosophy elsewhere (see src/drug/index.ts's "can only ever fail
+  // toward MORE yellow, never a false green"), this tolerance is
+  // DELIBERATELY narrow and asymmetric: numeric tokens (house numbers,
+  // unit numbers, ZIPs already handled below) and state codes are never
+  // fuzzed — only alphabetic street-name words get the 1-edit allowance,
+  // so a permissive match can blur "Overland"/"overtand" but can never
+  // treat two different house numbers, unit numbers, or states as the
+  // same one.
   const srcComponents = resolveComponents(src);
   const entComponents = resolveComponents(ent);
   const srcStreet = normalizeStreetLine(srcComponents.street);
@@ -323,7 +428,7 @@ export function compareAddresses(
   // stated philosophy, if the suffix genuinely differs on both sides
   // (e.g. "St" vs "Ave") it's still a real signal worth a yellow.
   const streetDiffers =
-    componentDiffers(srcStreet.base, entStreet.base) ||
+    (srcStreet.base !== '' && entStreet.base !== '' && streetBaseDiffers(srcStreet.base, entStreet.base)) ||
     (srcStreet.suffix !== null && entStreet.suffix !== null && srcStreet.suffix !== entStreet.suffix);
   const cityDiffers = componentDiffers(srcCity, entCity);
   const stateDiffers = componentDiffers(srcState, entState);

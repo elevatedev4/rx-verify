@@ -1092,6 +1092,99 @@ describe('parseEscriptOcr', () => {
     expect(record.refillsFromTotalFills).toBeUndefined();
   });
 
+  it('(x) [live-tuning fixture 9, real capture] prescriberAddress continuation row also carries an unrelated right-column value (wrapped "Agent name" tail) on the SAME OCR row — must not bleed into the address', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump (PHI replaced with fabricated street/city/zip/
+    // agent-name text). The real capture's address continuation row
+    // (y=227) ALSO carried the wrapped tail of an unrelated right-column
+    // "Agent name" value on the exact same physical OCR row: city-line
+    // words at x=120-247, agent-name words at x=590/618 — a gap of
+    // ~340px, well past the generic 150px column-gap threshold. Before
+    // this fix, the continuation-line lookup read the row's RAW
+    // (untrimmed) word list, so the whole merged string —
+    // "Testville, KS 66049 Jon Heeb" — was appended straight into
+    // prescriberAddress.
+    const locationRow: OcrWord[] = [
+      { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
+      { text: '4930', x: 120, y: 207, w: 35, h: 11 },
+      { text: 'Overland', x: 160, y: 207, w: 69, h: 11 },
+      { text: 'Drive', x: 233, y: 207, w: 40, h: 11 }
+    ];
+    const continuationRow: OcrWord[] = [
+      { text: 'Testville,', x: 120, y: 227, w: 70, h: 12 },
+      { text: 'KS', x: 188, y: 227, w: 18, h: 10 },
+      { text: '66049', x: 209, y: 227, w: 38, h: 10 },
+      // Unrelated right-column bleed — wrapped tail of a prescriber
+      // "Agent name" value, ~340px away, on the SAME physical row.
+      { text: 'Jon', x: 590, y: 227, w: 30, h: 11 },
+      { text: 'Heeb', x: 618, y: 227, w: 40, h: 11 }
+    ];
+    const phoneRow: OcrWord[] = [
+      { text: 'Phone', x: 66, y: 247, w: 39, h: 10 },
+      { text: '(555)', x: 120, y: 247, w: 31, h: 14 },
+      { text: '555-4488', x: 155, y: 247, w: 58, h: 11 }
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, locationRow, continuationRow, phoneRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.prescriber?.address).toEqual({
+      street: '4930 Overland Drive',
+      city: 'Testville',
+      state: 'KS',
+      zip: '66049'
+    });
+    expect(record.prescriber?.phone).toBe('(555) 555-4488');
+  });
+
+  it('(y) [live-tuning fixture 10, real capture] prescriberAddress continuation row must be reserved BEFORE Pass B, so an unrelated label-only row elsewhere ("Note", no value anywhere) cannot steal it — the city/state/zip line must never be silently dropped', () => {
+    // SYNTHETIC — geometry mirrors a real owner capture where the street
+    // line ("4930 overtand Drive") was captured but the city/state/zip
+    // continuation line was silently dropped, even though the geometry
+    // was near-identical to a capture that worked. Root cause: the old
+    // prescriber-address continuation lookup ran AFTER Pass B — so
+    // whenever some OTHER label on the capture had no inline value of
+    // its own (here: a bare "Note" row), Pass B's fallback ("next
+    // remaining leftover line, any column") could steal the still-
+    // unclaimed continuation row for that unrelated field before the
+    // address continuation logic ever got a turn. This capture has
+    // exactly one leftover (non-label) line — the city/state/zip
+    // continuation — and one label with no value ("Note"), the minimal
+    // shape that reproduces the steal.
+    const locationRow: OcrWord[] = [
+      { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
+      { text: '4930', x: 120, y: 207, w: 35, h: 11 },
+      { text: 'Overland', x: 160, y: 207, w: 69, h: 11 },
+      { text: 'Drive', x: 233, y: 207, w: 40, h: 11 }
+    ];
+    const continuationRow: OcrWord[] = [
+      { text: 'Testville,', x: 120, y: 227, w: 70, h: 12 },
+      { text: 'KS', x: 188, y: 227, w: 18, h: 10 },
+      { text: '66049', x: 209, y: 227, w: 38, h: 10 }
+    ];
+    const phoneRow: OcrWord[] = [
+      { text: 'Phone', x: 66, y: 247, w: 39, h: 10 },
+      { text: '(555)', x: 120, y: 247, w: 31, h: 14 },
+      { text: '555-4488', x: 155, y: 247, w: 58, h: 11 }
+    ];
+    // Label-only row with NO inline value anywhere in the capture —
+    // pre-fix, this forced Pass B to go looking for a value for it,
+    // which could steal the still-unclaimed address continuation row
+    // above before this module's location-continuation logic ever got a
+    // turn (see class doc "BUG 4 FIX").
+    const noteLabelOnly: OcrWord[] = [{ text: 'Note', x: 55, y: 300, w: 29, h: 10 }];
+
+    const ocr = flatten([TOOLBAR_ROW, locationRow, continuationRow, phoneRow, noteLabelOnly]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.prescriber?.address).toEqual({
+      street: '4930 Overland Drive',
+      city: 'Testville',
+      state: 'KS',
+      zip: '66049'
+    });
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [
