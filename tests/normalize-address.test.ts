@@ -428,11 +428,22 @@ describe('compareAddresses', () => {
   // rest of the street (and the whole rest of the address) matched.
   // normalizeStreetLine already treats a MISSING suffix as a non-
   // mismatch (see "330 Sycamore" vs "330 Sycamore St" above); this
-  // extends that to a PRESENT-BUT-GARBAGE suffix token: a short (1-2
-  // char), unrecognized, non-directional trailing token on the side that
-  // has no real suffix, when the OTHER side states an actual recognized
-  // suffix, is dropped as OCR noise so the streets compare on their
-  // cores.
+  // extends that to a PRESENT-BUT-GARBAGE suffix token: a SINGLE
+  // alphabetic character, non-directional, trailing token on the side
+  // that has no real suffix, when the OTHER side states an actual
+  // recognized suffix, is dropped as OCR noise so the streets compare on
+  // their cores.
+  //
+  // REVIEW FIX (blocking finding): this used to also cover 2-char
+  // tokens, on the theory that anything that short and unrecognized must
+  // be noise. Reviewer execution disproved that — SUFFIX_ABBREVIATIONS
+  // is a documented SUBSET of USPS Pub 28, not the full list, so real
+  // (if uncommon) 2-char suffixes this table doesn't enumerate ("Pt" =
+  // Point, "Cv" = Cove, "Tr" = Trail, "Mt", "Un", "Is", "Rw", "Ky") were
+  // being silently dropped as noise and producing false GREENs. Now
+  // restricted to exactly 1 character (see isGarbageSuffixCandidate) —
+  // the SAFETY BOUND tests below pin the reviewer's exact counterexamples
+  // as still address_differs.
   describe('garbage short suffix token where a real street suffix should be (live-test bug: "m" for "Dr")', () => {
     it('is GREEN for "4930 Overland m" vs "4930 Overland Dr" (garbage 1-char suffix dropped as OCR noise)', () => {
       const r = compareAddresses(
@@ -465,6 +476,38 @@ describe('compareAddresses', () => {
       const r = compareAddresses(
         { street: '4930 Overland m', city: 'Testville', state: 'KS', zip: '66049' },
         { street: '4931 Overland', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // REVIEW FIX (blocking finding) — reviewer-executed counterexamples,
+    // pinned exactly as reported: 2-char trailing tokens that are REAL
+    // (if uncommon) USPS street suffixes not enumerated in
+    // SUFFIX_ABBREVIATIONS must never be dropped as OCR noise. Before
+    // this fix, all three of these returned green/exact_match.
+    it('SAFETY BOUND (reviewer counterexample): "100 Overland Pt" ("Pt" = Point, a real 2-char suffix) vs "100 Overland Dr" still differs', () => {
+      const r = compareAddresses(
+        { street: '100 Overland Pt', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '100 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND (reviewer counterexample): "200 Meadow Cv" ("Cv" = Cove) vs "200 Meadow St" still differs', () => {
+      const r = compareAddresses(
+        { street: '200 Meadow Cv', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '200 Meadow St', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND (reviewer counterexample): "300 Birch Tr" ("Tr" = Trail) vs "300 Birch Ln" still differs', () => {
+      const r = compareAddresses(
+        { street: '300 Birch Tr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '300 Birch Ln', city: 'Testville', state: 'KS', zip: '66049' }
       );
       expect(r.status).toBe('yellow');
       expect(r.reasonCode).toBe('address_differs');
@@ -510,6 +553,24 @@ describe('compareAddresses', () => {
       );
       expect(r.status).toBe('yellow');
       expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // REVIEW FIX (non-blocking finding, round 3): the comma-less guard
+    // above only excluded SUFFIX_ABBREVIATIONS collisions ("Ct" = Court
+    // vs Connecticut), not DIRECTIONAL_ABBREVIATIONS ones ("NE" =
+    // Northeast vs Nebraska) — a bare, comma-less, city-less street
+    // whose real core ends in a directional ("123 Main St NE") could
+    // misparse as city="St", state="NE", producing a false address_differs
+    // against a fully-populated, otherwise-identical source (the city/
+    // ZIP the source states would spuriously conflict with the bogus
+    // parsed city/state). Now guarded the same way suffixes are.
+    it('is GREEN when a comma-less, city-less entered line ends in a real directional-suffixed street ("123 Main St NE") — not misread as city="St", state="NE"', () => {
+      const r = compareAddresses(
+        { street: '123 Main St NE', city: 'Fakeburg', state: 'KS', zip: '66049' },
+        { street: '123 Main St NE' } // no city/state/zip stated at all
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
     });
   });
 

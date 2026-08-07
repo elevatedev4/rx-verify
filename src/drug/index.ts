@@ -350,8 +350,18 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
   crm: 'cream',
   supp: 'suppository',
   inj: 'injection',
-  lot: 'lotion',
   gtt: 'drops'
+  // REVIEW FIX (non-blocking finding, round 3): "lot" -> "lotion" was
+  // removed. "Lot"/"lot" routinely appears as a lot/batch-number token
+  // that bleeds into a free-text name field on either side (not just a
+  // dosage form abbreviation) — folding it here feeds the PRIMARY
+  // name_identity_match GREEN path (normalizeDrugNameString is compared
+  // for exact equality there), so a stray "Lot" token folding to
+  // "lotion" on one side while the other side coincidentally has a real
+  // "lotion" dosage form elsewhere in its text risked a false
+  // name-identity match. The field report that motivated this round was
+  // specifically "oint" vs "ointment" — no lotion-abbreviation report
+  // exists — so this is dropped rather than guessed at.
 };
 
 /**
@@ -359,7 +369,7 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
  * case/punctuation/whitespace, common dosage-FORM abbreviations (see
  * DOSAGE_FORM_WORDS — TAB/TABS -> tablet, CAP/CAPS -> capsule, SOL ->
  * solution, SUSP -> suspension, OINT/UNG -> ointment, CRM -> cream,
- * SUPP -> suppository, INJ -> injection, LOT -> lotion, GTT -> drops),
+ * SUPP -> suppository, INJ -> injection, GTT -> drops),
  * and number/unit spacing only — no pharmaceutical-
  * equivalence reasoning (that would need real RxNorm data — see this
  * file's header). Deliberately conservative: this can only ever fail to

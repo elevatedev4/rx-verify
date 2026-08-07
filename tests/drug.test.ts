@@ -128,7 +128,7 @@ describe('compareDrugs', () => {
       // common-abbreviation folding already applied for tab/cap/sol/susp,
       // for the other dosage forms actually seen on e-scripts vs
       // PioneerRx free-text entry.
-      describe('Bug 5: additional dosage-form abbreviations (oint, crm, supp, inj, lot, gtt)', () => {
+      describe('Bug 5: additional dosage-form abbreviations (oint, crm, supp, inj, gtt)', () => {
         it('is GREEN name_identity_match for "Clindamycin 2% oint" vs "Clindamycin 2% ointment"', () => {
           const r = compareDrugs({ name: 'Clindamycin 2% oint' }, { name: 'Clindamycin 2% ointment' }, provider);
           expect(r.status).toBe('green');
@@ -165,14 +165,22 @@ describe('compareDrugs', () => {
           expect(r.reasonCode).toBe('name_identity_match');
         });
 
-        it('folds "lot" to "lotion"', () => {
+        // REVIEW FIX (non-blocking finding, round 3): "lot" -> "lotion"
+        // was removed rather than added — "lot"/"Lot" routinely appears
+        // as a lot/batch-number token bleeding into a free-text name
+        // field, and folding it here would feed the primary
+        // name_identity_match GREEN path on a token that isn't reliably
+        // a dosage-form abbreviation at all. No live report asked for
+        // this fold (only "oint" vs "ointment" was reported), so it's
+        // pinned as NOT folded.
+        it('does NOT fold "lot" to "lotion" (ambiguous with a lot/batch-number token, not requested by any field report)', () => {
+          expect(normalizeDrugNameString('Triamcinolone 0.1% lot')).toBe('triamcinolone 01% lot');
           const r = compareDrugs(
             { name: 'Triamcinolone 0.1% lot' },
             { name: 'Triamcinolone 0.1% lotion' },
             provider
           );
-          expect(r.status).toBe('green');
-          expect(r.reasonCode).toBe('name_identity_match');
+          expect(r.reasonCode).not.toBe('name_identity_match');
         });
 
         it('folds "gtt" to "drops"', () => {

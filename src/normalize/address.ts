@@ -198,19 +198,33 @@ const SUFFIX_ABBREVIATIONS = new Set(Object.values(STREET_SUFFIXES));
 const DIRECTIONAL_ABBREVIATIONS = new Set(Object.values(DIRECTIONALS));
 
 /**
- * True for a short (1-2 char), alphabetic token that ISN'T any known
- * real address token (not a recognized street suffix, not a directional
- * abbreviation). Used only for the narrow "garbage trailing token where
- * a real suffix should be" case (live-test bug: source street suffix
- * "Dr" OCR-misread as the single character "m") — see
- * NormalizedStreet.trailingToken and compareAddresses' use of it. A
- * token this short that ISN'T a recognized suffix/directional has no
- * other plausible reading as real street-name text (real street-name
- * words this short essentially don't occur), so treating it as noise
- * carries negligible risk of masking an actually different street.
+ * True for a SINGLE-character alphabetic token. Used only for the
+ * narrow "garbage trailing token where a real suffix should be" case
+ * (live-test bug: source street suffix "Dr" OCR-misread as the single
+ * character "m") — see NormalizedStreet.trailingToken and
+ * compareAddresses' use of it.
+ *
+ * REVIEW FIX (blocking finding): this used to also accept 2-char
+ * tokens not in SUFFIX_ABBREVIATIONS/DIRECTIONAL_ABBREVIATIONS, on the
+ * theory that anything that short with no recognized meaning must be
+ * noise. That's false — SUFFIX_ABBREVIATIONS is an explicitly
+ * documented SUBSET of USPS Pub 28 (see its own comment above), not the
+ * full list: real, un-enumerated 2-char suffixes like "Pt" (Point),
+ * "Cv" (Cove), "Tr" (Trail), "Mt", "Un", "Is", "Rw", "Ky" all collided,
+ * and reviewer execution confirmed false GREENs — "100 Overland Pt" vs
+ * "100 Overland Dr", "200 Meadow Cv" vs "200 Meadow St", "300 Birch Tr"
+ * vs "300 Birch Ln" — a direct violation of this file's own
+ * never-false-green invariant (see the compareAddresses doc above).
+ * Rather than try to enumerate every 2-char USPS suffix as another
+ * exception list (the same drift risk STREET_SUFFIXES' own doc already
+ * warns about), this is restricted to exactly 1 character: no real USPS
+ * street suffix is a single alphabetic character, so a 1-char trailing
+ * token has no plausible reading as real suffix text at all, while a
+ * 2-char token might always be a real (if uncommon) one this table
+ * doesn't happen to enumerate.
  */
 function isGarbageSuffixCandidate(token: string): boolean {
-  return /^[a-z]{1,2}$/.test(token) && !SUFFIX_ABBREVIATIONS.has(token) && !DIRECTIONAL_ABBREVIATIONS.has(token);
+  return /^[a-z]$/.test(token) && !DIRECTIONAL_ABBREVIATIONS.has(token);
 }
 
 interface NormalizedStreet {
@@ -384,16 +398,21 @@ function parseFreeformAddress(raw: string): { street: string; city: string | nul
   // street-core token count against the source's cleanly split
   // components. Falling back to a bare-whitespace separator closes that
   // gap — BUT only when the candidate 2-letter "state" token isn't
-  // itself a recognized street-type suffix (SUFFIX_ABBREVIATIONS
-  // overlaps real state codes closely enough — "Ct" is both Court and
-  // Connecticut — that a comma-less, city-less street ending in its own
-  // suffix, e.g. "330 Sycamore St", would otherwise be misread as a
-  // city-less state). That narrower case is left exactly as before
-  // (whole line treated as street) rather than risk a wrong split.
+  // itself a recognized street-type suffix OR directional abbreviation
+  // (SUFFIX_ABBREVIATIONS overlaps real state codes closely enough —
+  // "Ct" is both Court and Connecticut — that a comma-less, city-less
+  // street ending in its own suffix, e.g. "330 Sycamore St", would
+  // otherwise be misread as a city-less state; likewise
+  // DIRECTIONAL_ABBREVIATIONS overlaps real state codes — "NE" is both
+  // Northeast and Nebraska — so "123 Main St NE" with no city/state at
+  // all, review finding, would otherwise misparse as city="St",
+  // state="NE"). That narrower case is left exactly as before (whole
+  // line treated as street) rather than risk a wrong split.
   let m = /^(.*?),\s*([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
   if (!m) {
     const loose = /^(.*?)\s+([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\s*$/.exec(trimmed);
-    if (loose && !SUFFIX_ABBREVIATIONS.has((loose[2] ?? '').toLowerCase())) {
+    const looseCandidate = (loose?.[2] ?? '').toLowerCase();
+    if (loose && !SUFFIX_ABBREVIATIONS.has(looseCandidate) && !DIRECTIONAL_ABBREVIATIONS.has(looseCandidate)) {
       m = loose;
     }
   }
