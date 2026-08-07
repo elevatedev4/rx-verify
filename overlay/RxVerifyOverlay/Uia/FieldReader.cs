@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using FlaUI.Core.AutomationElements;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Parsing;
 
@@ -37,7 +39,29 @@ namespace RxVerifyOverlay.Uia;
 public sealed class FieldReader
 {
     private readonly UiaTreeWalker _walker;
+    private readonly IntPtr _windowHandle;
     private bool _escriptTreeFound;
+
+    // ENTERED-FIELD ELEMENT CACHE (latency fix: FieldReader.ReadEntered
+    // was the dominant ~2.5-3s "uia" timing bucket — every one of its
+    // ~14 fields did a fresh FindFirstDescendant walk from the window
+    // root on EVERY refresh, with no caching at all). Static, same
+    // reasoning as the per-Rx source cache below: FieldReader is
+    // reconstructed fresh every refresh, so an instance field would
+    // never survive between calls. See Uia/EnteredFieldElementCache.cs
+    // for the invalidation rule (keyed by window handle — PioneerRx's
+    // Pre-Check window layout is static per session, so once an
+    // element's found for THIS window instance it stays valid for as
+    // long as that window is open; only the VALUE changes refresh to
+    // refresh, never re-cached — see ResolveElement/ReadWithRetry/
+    // ReadBoolWithRetry below).
+    private static readonly EnteredFieldElementCache<AutomationElement> ElementCache = new();
+
+    /// <summary>Cumulative time this ReadEntered() call spent doing FRESH FindFirstDescendant walks (cache misses only) — see Diagnostics/RefreshTiming.cs UiaFindMs. Reset at the start of every ReadEntered() call.</summary>
+    public long LastReadFindMs { get; private set; }
+
+    /// <summary>Cumulative time this ReadEntered() call spent re-reading CURRENT values off elements (cached or freshly found) — see Diagnostics/RefreshTiming.cs UiaReadMs. Reset at the start of every ReadEntered() call.</summary>
+    public long LastReadValueMs { get; private set; }
 
     /// <summary>
     /// Rx number parsed from the window title ("Edit Rx - 1234567 - ..."
@@ -65,6 +89,7 @@ public sealed class FieldReader
     public FieldReader(PioneerRxWindow window)
     {
         _walker = new UiaTreeWalker(window.WindowElement);
+        _windowHandle = window.NativeWindowHandle;
         _rxNumber = ExtractRxNumber(SafeWindowName(window));
     }
 
@@ -107,6 +132,13 @@ public sealed class FieldReader
     /// </summary>
     public PrescriptionRecord ReadEntered()
     {
+        // Reset every call — these accumulate DURING this one ReadEntered
+        // pass (across all ~14 field reads below) and are read by
+        // OverlayViewModel right after this method returns; see
+        // LastReadFindMs/LastReadValueMs doc above.
+        LastReadFindMs = 0;
+        LastReadValueMs = 0;
+
         return new PrescriptionRecord
         {
             PatientName = StripNicknameParenthetical(ReadEditOrCombo(FieldMap.EnteredPatientQuickSearchId)),
@@ -277,30 +309,164 @@ public sealed class FieldReader
     }
 
     // ------------------------------------------------------------------
+    // CACHED READS (latency fix — see ElementCache field doc above).
+    // Each of the three public-facing methods below keeps its original
+    // signature/behavior (null on any failure, never throws) but now
+    // routes through ResolveElement + a retry-on-suspicion re-read
+    // instead of always doing a fresh FindFirstDescendant walk. SAFETY
+    // (branch brief item 4 — "NEVER serve stale entered-field VALUES"):
+    // only the ELEMENT reference is ever cached; the current VALUE is
+    // read fresh from it on every single call, cache hit or miss alike.
+    // ------------------------------------------------------------------
 
     private string? ReadText(string automationId)
     {
-        try { return _walker.ReadTextByAutomationId(automationId); }
+        try { return ReadWithRetry(automationId, UiaTreeWalker.ReadTextValue); }
         catch
         {
-            // Any UIA read can throw if PioneerRx redraws mid-read or the
-            // element goes stale; treat as "not found" rather than crash
-            // the whole verification pass.
+            // Belt-and-suspenders: ReadWithRetry already guards every
+            // UIA call it makes, but PioneerRx redrawing mid-read can
+            // throw from unexpected places; treat as "not found" rather
+            // than crash the whole verification pass, same as before.
             return null;
         }
     }
 
     private string? ReadEditOrCombo(string automationId)
     {
-        try { return _walker.ReadEditOrComboByAutomationId(automationId); }
+        try { return ReadWithRetry(automationId, UiaTreeWalker.ReadEditOrComboValue); }
         catch { return null; }
     }
 
     private bool? ReadCheckBox(string automationId)
     {
-        try { return _walker.ReadCheckBoxByAutomationId(automationId); }
+        try { return ReadBoolWithRetry(automationId, UiaTreeWalker.ReadCheckBoxValue); }
         catch { return null; }
     }
+
+    /// <summary>
+    /// Finds the element for <paramref name="automationId"/> — reusing
+    /// ElementCache's reference for this window if one's already cached,
+    /// otherwise doing a fresh FindFirstDescendant walk (timed into
+    /// LastReadFindMs) and caching whatever it finds for next time. When
+    /// _windowHandle couldn't be read at attach time (IntPtr.Zero — a
+    /// documented rare edge case, see PioneerRxWindow.PickBestCandidate),
+    /// caching is skipped entirely rather than risk keying it wrong —
+    /// always resolves fresh in that case, same as before this change.
+    /// </summary>
+    private AutomationElement? ResolveElement(string automationId)
+    {
+        if (_windowHandle == IntPtr.Zero)
+        {
+            return _walker.FindDescendantByAutomationId(automationId);
+        }
+
+        if (ElementCache.TryGetElement(_windowHandle, automationId, out var cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        var findStopwatch = Stopwatch.StartNew();
+        var found = _walker.FindDescendantByAutomationId(automationId);
+        LastReadFindMs += findStopwatch.ElapsedMilliseconds;
+
+        if (found is not null)
+        {
+            ElementCache.SetElement(_windowHandle, automationId, found);
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Reads a string-valued field through the cache: resolve (cached or
+    /// fresh) -&gt; timed read. If the read throws, OR reads blank where
+    /// this field has read non-blank before this window session (see
+    /// EnteredFieldElementCache.HasEverReadNonBlank), the cached element
+    /// is evicted and re-resolved ONCE more before the result is trusted
+    /// — branch brief item 4: a possibly-stale cached element must never
+    /// be allowed to silently feed a wrong/blank value into a verdict.
+    /// </summary>
+    private string? ReadWithRetry(string automationId, Func<AutomationElement, string?> readValue)
+    {
+        var element = ResolveElement(automationId);
+        if (element is null) return null;
+
+        var (value, threw) = TimedRead(element, readValue);
+
+        if (threw || (IsBlank(value) && _windowHandle != IntPtr.Zero && ElementCache.HasEverReadNonBlank(_windowHandle, automationId)))
+        {
+            ElementCache.InvalidateField(_windowHandle, automationId);
+            element = ResolveElement(automationId);
+            if (element is null) return null;
+            (value, _) = TimedRead(element, readValue);
+        }
+
+        if (!IsBlank(value) && _windowHandle != IntPtr.Zero)
+        {
+            ElementCache.MarkNonBlank(_windowHandle, automationId);
+        }
+
+        return value;
+    }
+
+    /// <summary>Same retry-on-suspicion shape as ReadWithRetry, for the one bool? (checkbox) field — see ReadWithRetry's doc.</summary>
+    private bool? ReadBoolWithRetry(string automationId, Func<AutomationElement, bool?> readValue)
+    {
+        var element = ResolveElement(automationId);
+        if (element is null) return null;
+
+        var (value, threw) = TimedReadBool(element, readValue);
+
+        if (threw || (value is null && _windowHandle != IntPtr.Zero && ElementCache.HasEverReadNonBlank(_windowHandle, automationId)))
+        {
+            ElementCache.InvalidateField(_windowHandle, automationId);
+            element = ResolveElement(automationId);
+            if (element is null) return null;
+            (value, _) = TimedReadBool(element, readValue);
+        }
+
+        if (value is not null && _windowHandle != IntPtr.Zero)
+        {
+            ElementCache.MarkNonBlank(_windowHandle, automationId);
+        }
+
+        return value;
+    }
+
+    private (string? Value, bool Threw) TimedRead(AutomationElement element, Func<AutomationElement, string?> readValue)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var value = readValue(element);
+            LastReadValueMs += stopwatch.ElapsedMilliseconds;
+            return (value, false);
+        }
+        catch
+        {
+            LastReadValueMs += stopwatch.ElapsedMilliseconds;
+            return (null, true);
+        }
+    }
+
+    private (bool? Value, bool Threw) TimedReadBool(AutomationElement element, Func<AutomationElement, bool?> readValue)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var value = readValue(element);
+            LastReadValueMs += stopwatch.ElapsedMilliseconds;
+            return (value, false);
+        }
+        catch
+        {
+            LastReadValueMs += stopwatch.ElapsedMilliseconds;
+            return (null, true);
+        }
+    }
+
+    private static bool IsBlank(string? value) => string.IsNullOrWhiteSpace(value);
 
     /// <summary>
     /// e.g. "Testperson, Jamie (Jay/They)" -&gt; "Testperson, Jamie" —

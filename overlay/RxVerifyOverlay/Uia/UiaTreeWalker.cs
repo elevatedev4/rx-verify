@@ -46,8 +46,18 @@ public sealed class UiaTreeWalker
     public string? ReadTextByAutomationId(string automationId)
     {
         var element = FindDescendantByAutomationId(automationId);
-        if (element is null) return null;
+        return element is null ? null : ReadTextValue(element);
+    }
 
+    /// <summary>
+    /// The read-value half of ReadTextByAutomationId, extracted so a
+    /// CACHED element (FieldReader's per-window entered-field cache —
+    /// see Uia/EnteredFieldElementCache.cs, latency fix) can be re-read
+    /// directly on every refresh without paying for a fresh
+    /// FindDescendantByAutomationId walk each time.
+    /// </summary>
+    public static string? ReadTextValue(AutomationElement element)
+    {
         try
         {
             var name = element.Name;
@@ -83,8 +93,12 @@ public sealed class UiaTreeWalker
     public bool? ReadCheckBoxByAutomationId(string automationId)
     {
         var element = FindDescendantByAutomationId(automationId);
-        if (element is null) return null;
+        return element is null ? null : ReadCheckBoxValue(element);
+    }
 
+    /// <summary>The read-value half of ReadCheckBoxByAutomationId, extracted for the same reason as ReadTextValue above — lets a cached element be re-read without a fresh find.</summary>
+    public static bool? ReadCheckBoxValue(AutomationElement element)
+    {
         try
         {
             if (!element.Patterns.Toggle.IsSupported) return null;

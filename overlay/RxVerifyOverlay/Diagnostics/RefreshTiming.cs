@@ -19,8 +19,45 @@ public sealed class RefreshTiming
     /// <summary>Time to find + attach the PioneerRx window (PioneerRxWindow.TryAttach).</summary>
     public long AttachMs { get; set; }
 
-    /// <summary>Time to read the ENTERED-side fields via UIA (FieldReader.ReadEntered) — always UIA regardless of source method (Ocr vs Uia), see OverlayViewModel.RefreshAsync doc.</summary>
-    public long UiaMs { get; set; }
+    /// <summary>
+    /// Latency-fix diagnosis (uia-read-latency branch): true when
+    /// TryAttach's fast path reused the previously-resolved PioneerRx
+    /// window (see PioneerRxWindow.WasAttachCacheHit / AttachCacheDecision)
+    /// instead of paying for a full top-level-window enumeration +
+    /// disambiguation. AttachMs should read near-zero whenever this is
+    /// true. Null before the first refresh sets it (mirrors Phase2Ms's
+    /// "not yet known" convention).
+    /// </summary>
+    public bool? AttachCacheHit { get; set; }
+
+    /// <summary>
+    /// Sub-part of UiaMs (latency-fix diagnosis, uia-read-latency branch):
+    /// cumulative time spent doing FRESH FindFirstDescendant walks
+    /// across all ~14 entered-side fields — zero (or near it) on cache
+    /// hits once Uia/EnteredFieldElementCache.cs has an element cached
+    /// for every field this window's session has read so far. See
+    /// Uia/FieldReader.cs LastReadFindMs.
+    /// </summary>
+    public long UiaFindMs { get; set; }
+
+    /// <summary>
+    /// Sub-part of UiaMs: cumulative time re-reading each field's
+    /// CURRENT value (cached element or freshly found) — this cost is
+    /// NOT eliminated by the element cache (see branch brief item 4:
+    /// values are never cached, only re-read), so it's the floor UiaMs
+    /// can reach even with a 100% cache-hit refresh. See Uia/
+    /// FieldReader.cs LastReadValueMs.
+    /// </summary>
+    public long UiaReadMs { get; set; }
+
+    /// <summary>
+    /// Time to read the ENTERED-side fields via UIA (FieldReader.
+    /// ReadEntered) — always UIA regardless of source method (Ocr vs
+    /// Uia), see OverlayViewModel.RefreshAsync doc. Computed (mirroring
+    /// CaptureMs) as UiaFindMs + UiaReadMs so it can never drift from
+    /// its two sub-parts.
+    /// </summary>
+    public long UiaMs => UiaFindMs + UiaReadMs;
 
     /// <summary>
     /// Sub-part of CaptureMs (latency-fix diagnosis, branch brief item 2):
