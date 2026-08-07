@@ -395,18 +395,22 @@ describe('compareAddresses', () => {
     // SAFETY BOUND (iii): the new leniency (reasonCode
     // 'exact_match_partial_source') is state/ZIP-only and requires an
     // actively CONFIRMED street match — a source missing STREET entirely
-    // must not produce that reasonCode; note this case can still end up
-    // green via the engine's PRE-EXISTING, separate, general blank-
-    // component tolerance (unrelated to and untouched by this defect —
-    // that tolerance already treated a blank street as "not a stated
-    // disagreement" long before this fix), which is a different codepath
-    // this test is not asserting on.
-    it('SAFETY BOUND: the new partial-source leniency does not fire when street itself is absent on the source', () => {
+    // must not produce that reasonCode. UPGRADED (round-2 review fold
+    // #2): this used to also silently fall through to GREEN via a
+    // separate, unrelated general blank-component tolerance that treated
+    // a blank source street the same as a blank entered street — a real
+    // gap (a source with no street confirms literally nothing about the
+    // street), now closed by streetDiffers' own sourceAbsentIsGap check
+    // (mirrors cityMissingOrDiffers). This asserts the full outcome, not
+    // just the reasonCode.
+    it('SAFETY BOUND: the new partial-source leniency does not fire when street itself is absent on the source, and the overall result is YELLOW (not a silent green)', () => {
       const r = compareAddresses(
         { city: 'Faketown' },
         { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
       );
       expect(r.reasonCode).not.toBe('exact_match_partial_source');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
     });
   });
 });

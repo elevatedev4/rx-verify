@@ -820,13 +820,40 @@ function isPhoneShaped(raw: string): boolean {
  *     parseDate (month/day/days-in-month) before accepting it, so an
  *     implausible repaired date is rejected there, not here — this step
  *     only proposes a candidate, never confirms one.
+ *
+ *     REVIEWER-DEMONSTRATED BLOCKER, FIXED: unlike patterns 1-5 (every
+ *     one of which requires an EXISTING structural signal that the
+ *     token really was a mangled date — a literal "/" already present,
+ *     a dash/dot/space separator, or a stray space splitting the year),
+ *     pattern 6 can fire on a token with NO such evidence at all: a
+ *     plain 10-digit number whose 3rd and 6th characters both happen to
+ *     be a valid separator-lookalike DIGIT ("1") is, by shape alone,
+ *     indistinguishable from a genuinely mangled "MM/DD/YYYY". The
+ *     reviewer verified live that applying pattern 6 inside
+ *     resolveDateField's page-wide candidatePool fallback scan (which
+ *     has no label anchor at all) fabricated "07/15/1980" out of a
+ *     completely unrelated bare ID token "0711511980" on a page with NO
+ *     DOB label anywhere — replacing an honest not_provided with a
+ *     fabricated value, with a narrow false-GREEN path if that
+ *     fabrication happened to equal the entered DOB. Pattern 6 is
+ *     therefore gated behind `allowSeparatorLookalike` (see param doc)
+ *     and MUST ONLY be passed true from the label-anchored repair
+ *     context — there, a wrong guess can only ever produce a MISMATCH
+ *     against the entered date (more review), never a value
+ *     materializing out of unrelated page text nothing points at.
  * Returns null (no repair attempted/needed) if the token doesn't match
  * any of the above and wasn't changed by digit/separator repair — never
  * guesses beyond these specific shapes.
+ *
+ * @param allowSeparatorLookalike - Enables pattern 6 above. Pass `true`
+ *   ONLY when `raw` is the value already associated with a recognized
+ *   dob/written LABEL (resolveDateField's `current` branch). MUST stay
+ *   false (the default) for the page-wide candidatePool fallback scan,
+ *   which has no label to anchor a guess to — see the pattern 6 doc.
  */
 const DATE_SEPARATOR_LOOKALIKE_RE = /^(\d{2})[/lI1|](\d{2})[/lI1|](\d{4})$/;
 
-function repairMangledDate(raw: string): string | null {
+function repairMangledDate(raw: string, allowSeparatorLookalike = false): string | null {
   const trimmed = raw.trim();
   let candidate = repairDigits(trimmed);
 
@@ -843,8 +870,10 @@ function repairMangledDate(raw: string): string | null {
   m = /^(\d{2})(\d{2})\/(\d{4})$/.exec(candidate);
   if (m) return `${m[1]}/${m[2]}/${m[3]}`;
 
-  m = DATE_SEPARATOR_LOOKALIKE_RE.exec(candidate);
-  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+  if (allowSeparatorLookalike) {
+    m = DATE_SEPARATOR_LOOKALIKE_RE.exec(candidate);
+    if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+  }
 
   return candidate !== trimmed ? candidate : null;
 }
@@ -1617,7 +1646,11 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         const meta = resolutionMeta[key];
         const pos = meta?.words[0];
         if (parseDate(current)) return { value: current, strategy: meta?.strategy, pos };
-        const repaired = repairMangledDate(current);
+        // Label-anchored: `current` is the value already tied to this
+        // field's recognized dob/written label, so pattern 6's
+        // separator-lookalike repair is safe here (reviewer blocker fix
+        // — see repairMangledDate's allowSeparatorLookalike doc).
+        const repaired = repairMangledDate(current, true);
         if (repaired && parseDate(repaired)) return { value: repaired, strategy: meta?.strategy, pos };
       }
       for (const candidate of candidatePool) {
@@ -1626,6 +1659,11 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
           claimedFromPool.add(candidate.text);
           return { value: candidate.text, strategy: 'pattern-anchor-fallback', pos: candidate.pos };
         }
+        // NOT label-anchored — this is a page-wide scan over every
+        // still-unclaimed leftover line with no label pointing at it at
+        // all, so allowSeparatorLookalike stays false (the default):
+        // pattern 6 must never fire here (reviewer blocker fix — see
+        // repairMangledDate's doc).
         const repaired = repairMangledDate(candidate.text);
         if (repaired && parseDate(repaired)) {
           claimedFromPool.add(candidate.text);

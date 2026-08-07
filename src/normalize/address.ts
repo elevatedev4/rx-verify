@@ -388,25 +388,35 @@ function componentDiffers(a: string, b: string): boolean {
 }
 
 /**
- * Like componentDiffers, but ASYMMETRIC — used only for CITY (branch
- * brief defect #7c, safety bound (ii)). A blank on the ENTERED side
- * keeps the exact same tolerance as componentDiffers (the entered
+ * Like componentDiffers, but ASYMMETRIC — used for CITY (branch brief
+ * defect #7c, safety bound (ii)) and, via sourceAbsentIsGap below, for
+ * STREET's base too (round-2 review fold #2). A blank on the ENTERED
+ * side keeps the exact same tolerance as componentDiffers (the entered
  * freeform line commonly omits trailing components — see
  * componentDiffers' own doc). A blank on the SOURCE side, however, is
- * treated as a genuine gap whenever the entered side DOES state a city:
- * a source that stops before ever reaching a city ("street-only") is
- * "too little to verify" a match against, not a silent pass — unlike
- * state/ZIP, which get an explicit, EXPLAINED leniency further down
+ * treated as a genuine gap whenever the entered side DOES state a value:
+ * a source that never even reaches this component ("too little to
+ * verify") is not the same thing as a confirmed match — unlike state/
+ * ZIP, which get an explicit, EXPLAINED leniency further down
  * (compareAddresses' own "confirmed street+city, source just didn't
  * reach state/ZIP" branch) specifically because street+city being
- * independently confirmed is what makes that leniency safe. City has no
- * equivalent "something else confirms it" signal, so its own absence on
- * the source is never waved through.
+ * independently confirmed is what makes THAT leniency safe. Street and
+ * city have no equivalent "something else confirms it" signal, so their
+ * own absence on the source is never waved through.
  */
 function cityMissingOrDiffers(sourceCity: string, enteredCity: string): boolean {
-  if (enteredCity === '') return false;
-  if (sourceCity === '') return true;
-  return sourceCity !== enteredCity;
+  return sourceAbsentIsGap(sourceCity, enteredCity) || componentDiffers(sourceCity, enteredCity);
+}
+
+/**
+ * True when `enteredVal` states something but `sourceVal` is blank — see
+ * cityMissingOrDiffers' doc for the full rationale. Reused directly (not
+ * a strict equality check) by streetDiffers below, which layers its own
+ * fuzzy streetBaseDiffers comparison on top for the "both present" case
+ * — this helper only covers the "source never even stated it" gap.
+ */
+function sourceAbsentIsGap(sourceVal: string, enteredVal: string): boolean {
+  return enteredVal !== '' && sourceVal === '';
 }
 
 export function compareAddresses(
@@ -491,7 +501,19 @@ export function compareAddresses(
   // must not fail the match. Per the "address alone is never RED"
   // stated philosophy, if the suffix genuinely differs on both sides
   // (e.g. "St" vs "Ave") it's still a real signal worth a yellow.
+  //
+  // ROUND-2 REVIEW FOLD #2: the base-vs-base comparison used to be fully
+  // symmetric (a blank base on EITHER side skipped it) — same class of
+  // gap as cityMissingOrDiffers originally fixed for city, just not yet
+  // applied to street: a source with NO street at all (e.g. only a
+  // `city` field, nothing else) compared against a fully-populated
+  // entered address could fall through every differs-check and land
+  // GREEN via the generic exact_match fallthrough below, having
+  // confirmed nothing. sourceAbsentIsGap closes that the same way city's
+  // already does: entered-blank stays tolerated (unchanged), but
+  // source-blank-while-entered-states-one is now a genuine gap.
   const streetDiffers =
+    sourceAbsentIsGap(srcStreet.base, entStreet.base) ||
     (srcStreet.base !== '' && entStreet.base !== '' && streetBaseDiffers(srcStreet.base, entStreet.base)) ||
     (srcStreet.suffix !== null && entStreet.suffix !== null && srcStreet.suffix !== entStreet.suffix);
   const cityDiffers = cityMissingOrDiffers(srcCity, entCity);

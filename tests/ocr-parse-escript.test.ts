@@ -1300,6 +1300,46 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  describe('name value-shape gate boundary (defect #5 follow-up — pin the digit-run threshold on both sides so it can\'t silently drift)', () => {
+    // The gate (isImplausibleNameValue) rejects a candidate name value
+    // when it contains a 6+ digit run OR is >40% digits overall. Both
+    // thresholds were a deliberate choice, not an arbitrary one — pin
+    // them with a real-shaped credential suffix just under and just over
+    // the digit-run line, so a future change to either number shows up
+    // here instead of silently drifting.
+    it('ACCEPTED: a name with a credential suffix carrying a 5-digit run (license number) is NOT rejected', () => {
+      // "O'Day-Smith, Kaitlyn A.P.R.N. 12345" — a plausible real-world
+      // shape (name + credential + a license number under the run
+      // threshold). Digit run is exactly 5, under the 6+ trip-wire, and
+      // well under 40% of the total text.
+      const prescriberRow: OcrWord[] = [
+        { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+        { text: "O'Day-Smith,", x: 119, y: 186, w: 90, h: 11 },
+        { text: 'Kaitlyn', x: 215, y: 186, w: 60, h: 11 },
+        { text: 'A.P.R.N.', x: 280, y: 186, w: 60, h: 11 },
+        { text: '12345', x: 345, y: 186, w: 45, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBe("O'Day-Smith, Kaitlyn A.P.R.N. 12345");
+    });
+
+    it('REJECTED: the SAME shape with a 6-digit run instead of 5 is rejected to not_provided', () => {
+      const prescriberRow: OcrWord[] = [
+        { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+        { text: "O'Day-Smith,", x: 119, y: 186, w: 90, h: 11 },
+        { text: 'Kaitlyn', x: 215, y: 186, w: 60, h: 11 },
+        { text: 'A.P.R.N.', x: 280, y: 186, w: 60, h: 11 },
+        { text: '123456', x: 345, y: 186, w: 50, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBeUndefined();
+    });
+  });
+
   describe('DOB label/value OCR noise (defect #6, live-test bug: patientDOB stayed not_provided)', () => {
     // SYNTHETIC — coordinates copied verbatim from a real owner OCR
     // word-position dump. Two independent misreads on the same field:
@@ -1371,6 +1411,44 @@ describe('parseEscriptOcr', () => {
       const record = parseEscriptOcr(ocr);
 
       expect(record.patientDOB).toBeUndefined();
+    });
+
+    // REVIEWER-DEMONSTRATED BLOCKER, FIXED: pattern 6 (separator-
+    // lookalike repair) requires NO existing structural evidence of a
+    // mangled date at all — unlike patterns 1-5 (which all need an
+    // existing "/", dash, or similar), a plain 10-digit number can
+    // satisfy pattern 6's shape purely by having a "1" at positions 3
+    // and 6. Applying it inside the page-wide candidatePool fallback
+    // scan (no label anchor — searches every still-unclaimed leftover
+    // line for anything date-shaped) let it fabricate a date out of
+    // ordinary, uncorrupted page text with nothing pointing at it as a
+    // DOB at all. Fix: pattern 6 now only fires for the value already
+    // tied to a recognized dob/written LABEL (repairMangledDate's
+    // allowSeparatorLookalike param) — never in the label-less pool
+    // scan, where patterns 1-5 (all still requiring real structural
+    // evidence) remain unaffected.
+    it('SAFETY (reviewer probe): a bare, uncorrupted 10-digit ID with NO dob/written label anywhere on the page must NOT be fabricated into a date', () => {
+      // No "DOB"/"DOBI"/"Written" label at all — just an ordinary
+      // leftover value (e.g. some other ID/reference number) that
+      // happens to be exactly 10 digits with a "1" at the two positions
+      // pattern 6 treats as separator slots. Reviewer verified this
+      // fabricated "07/15/1980" pre-fix.
+      const idRow: OcrWord[] = [{ text: '0711511980', x: 300, y: 400, w: 90, h: 12 }];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), idRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBeUndefined();
+    });
+
+    it('defect #6 live case still resolves after the blocker fix: "DOBI" label + "07/0711977" value (label-anchored repair still allowed)', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '07/0711977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('07/07/1977');
     });
   });
 
