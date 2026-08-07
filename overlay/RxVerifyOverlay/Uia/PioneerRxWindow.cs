@@ -26,7 +26,6 @@ namespace RxVerifyOverlay.Uia;
 public sealed class PioneerRxWindow : IDisposable
 {
     private readonly Application? _application;
-    private readonly AutomationBase _automation;
 
     public AutomationElement WindowElement { get; }
     public Rectangle WindowBounds { get; }
@@ -49,14 +48,33 @@ public sealed class PioneerRxWindow : IDisposable
     /// </summary>
     public string? RxNumber { get; }
 
-    private PioneerRxWindow(AutomationBase automation, AutomationElement windowElement, Application? application)
+    /// <summary>
+    /// True when this instance came from TryAttach's FAST PATH (branch
+    /// brief item 2d, latency fix) — the previously-resolved window was
+    /// reused as-is (see AttachCacheDecision) instead of paying for a
+    /// fresh top-level-window enumeration + disambiguation. Surfaced so
+    /// OverlayViewModel can log it next to the "attach" timing bucket —
+    /// see Diagnostics/RefreshTiming.cs AttachCacheHit.
+    /// </summary>
+    public bool WasAttachCacheHit { get; }
+
+    /// <summary>
+    /// The <c>AutomationBase</c> parameter TryAttach used to exist here
+    /// (it's always <see cref="GetOrCreateSharedAutomation"/>'s shared
+    /// instance now — see the ATTACH CACHE fields below) was dropped
+    /// entirely rather than stored unused: nothing on this class needs
+    /// to reference the automation session directly, only WindowElement
+    /// (which already carries what it needs internally for FindFirst/
+    /// FindAll calls).
+    /// </summary>
+    private PioneerRxWindow(AutomationElement windowElement, Application? application, bool wasAttachCacheHit)
     {
-        _automation = automation;
         WindowElement = windowElement;
         _application = application;
         WindowBounds = SafeBounds(windowElement);
         NativeWindowHandle = SafeNativeHandle(windowElement);
         RxNumber = ExtractRxNumber(SafeName(windowElement));
+        WasAttachCacheHit = wasAttachCacheHit;
     }
 
     private static string SafeName(AutomationElement el)
@@ -74,10 +92,41 @@ public sealed class PioneerRxWindow : IDisposable
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    // ------------------------------------------------------------------
+    // ATTACH CACHE (latency fix, branch brief item 2d): the "attach"
+    // timing bucket cost 240-335ms per refresh, and neither cost was
+    // buying anything TryAttach's own callers actually needed on every
+    // single call:
+    //  - `new UIA3Automation()` was constructed and torn down (via
+    //    PioneerRxWindow.Dispose -> automation.Dispose()) EVERY call,
+    //    even though creating that COM automation session is real,
+    //    fixed, per-instantiation overhead — not a per-window or
+    //    per-property cost. GetOrCreateSharedAutomation below creates it
+    //    once (lazily) and reuses it for the lifetime of the process.
+    //  - The full top-level-window enumeration + disambiguation (see
+    //    TryAttach's doc below) re-ran every call even when the exact
+    //    same PioneerRx window was still both open AND still the
+    //    foreground window — the fast path in TryAttach below skips
+    //    straight to reusing that window in exactly the cases where the
+    //    full disambiguation logic would have landed on the same answer
+    //    anyway (see AttachCacheDecision).
+    // Static, not per-instance: this overlay only ever tracks ONE
+    // attached PioneerRx window at a time (mirrors Ocr/
+    // CaptureRegionCache.cs and Uia/EnteredFieldElementCache.cs).
+    // ------------------------------------------------------------------
+    private static UIA3Automation? _sharedAutomation;
+    private static IntPtr _cachedHandle = IntPtr.Zero;
+    private static AutomationElement? _cachedWindowElement;
+
+    private static UIA3Automation GetOrCreateSharedAutomation() => _sharedAutomation ??= new UIA3Automation();
 
     /// <summary>
     /// Attempts to find a top-level window whose title starts with one
@@ -85,6 +134,17 @@ public sealed class PioneerRxWindow : IDisposable
     /// throw) if none is currently open — callers should show "waiting
     /// for PioneerRx..." rather than crash, since the pharmacist may be
     /// on an unrelated screen at any given moment.
+    ///
+    /// FAST PATH (see the ATTACH CACHE fields above and
+    /// AttachCacheDecision): if a window is already cached, two cheap
+    /// Win32-only calls (IsWindow + GetForegroundWindow — no UIA/COM
+    /// involved) decide whether it can be reused outright. Only when
+    /// that's true is the cached AutomationElement asked for its current
+    /// Name (one UIA property read, not a tree walk) to re-verify the
+    /// title still looks like a target window — a cheap guard against
+    /// the rare case of HWND reuse. Any failure at any step here falls
+    /// straight through to the full resolve below; "when in doubt,
+    /// re-resolve".
     ///
     /// DISAMBIGUATING MULTIPLE MATCHES (latency fix — field report of an
     /// auto-watch transition missed for ~55s, not just delayed): if MORE
@@ -99,6 +159,9 @@ public sealed class PioneerRxWindow : IDisposable
     ///   1. Prefer whichever candidate IS the current OS foreground
     ///      window (GetForegroundWindow, compared by native HWND) — the
     ///      common case: Will just switched to/opened the new screen.
+    ///      (This is also exactly the FAST PATH's own reuse condition —
+    ///      see AttachCacheDecision's doc for why that can never regress
+    ///      this disambiguation.)
     ///   2. Otherwise (e.g. PioneerRx itself is behind some other app,
     ///      so none of the candidates are foreground), prefer whichever
     ///      candidate is highest in Z-order among top-level windows —
@@ -116,7 +179,29 @@ public sealed class PioneerRxWindow : IDisposable
     /// </summary>
     public static PioneerRxWindow? TryAttach()
     {
-        var automation = new UIA3Automation();
+        var automation = GetOrCreateSharedAutomation();
+
+        if (_cachedWindowElement is not null && _cachedHandle != IntPtr.Zero)
+        {
+            var isAlive = IsWindow(_cachedHandle);
+            var isForeground = isAlive && GetForegroundWindow() == _cachedHandle;
+
+            // Short-circuit: only pay for the one UIA property read
+            // (TitleStillMatches) when the two purely-native Win32 checks
+            // already say this is worth checking — no reason to touch
+            // the (possibly dead/stale) cached element at all otherwise.
+            var titleStillMatches = isForeground && TitleStillMatches(_cachedWindowElement);
+
+            if (AttachCacheDecision.CanReuseCachedWindow(isAlive, isForeground, titleStillMatches))
+            {
+                return new PioneerRxWindow(_cachedWindowElement, application: null, wasAttachCacheHit: true);
+            }
+
+            // Didn't pan out this call — fall through to the full
+            // resolve below, which overwrites (or clears) the cache
+            // with whatever it actually finds.
+        }
+
         try
         {
             var desktop = automation.GetDesktop();
@@ -141,17 +226,65 @@ public sealed class PioneerRxWindow : IDisposable
                 }
             }
 
-            if (candidates.Count == 0) return null;
-            if (candidates.Count == 1) return new PioneerRxWindow(automation, candidates[0], application: null);
+            if (candidates.Count == 0)
+            {
+                _cachedHandle = IntPtr.Zero;
+                _cachedWindowElement = null;
+                return null;
+            }
 
-            var best = PickBestCandidate(candidates) ?? candidates[0];
-            return new PioneerRxWindow(automation, best, application: null);
+            var best = candidates.Count == 1 ? candidates[0] : (PickBestCandidate(candidates) ?? candidates[0]);
+
+            _cachedHandle = SafeNativeHandle(best);
+            _cachedWindowElement = best;
+
+            return new PioneerRxWindow(best, application: null, wasAttachCacheHit: false);
         }
         catch
         {
-            automation.Dispose();
+            // The SHARED automation may itself have gone bad (e.g. the
+            // accessibility service restarted) — recreate it so the
+            // NEXT call can recover instead of staying permanently
+            // broken, and drop the window cache alongside it (an
+            // element from a torn-down automation session isn't safe to
+            // reuse). Not retried inline here: the caller (OverlayViewModel.
+            // RefreshAsync via SafeRefreshAsync) already turns this into
+            // a status message / error dialog rather than crashing, same
+            // as before this change, and the next refresh tick tries
+            // again from a clean slate.
+            //
+            // Post-review fix: FieldReader.ElementCache holds its OWN
+            // AutomationElement references, keyed only by window handle
+            // — a same-handle cache hit there would otherwise survive
+            // this reset untouched, reusing entered-field elements minted
+            // under the automation session being disposed right here.
+            // That would rely on undocumented COM disconnect-exception
+            // behavior to ever self-heal rather than being invalidated
+            // explicitly, so it's cleared alongside everything else.
+            _sharedAutomation?.Dispose();
+            _sharedAutomation = null;
+            _cachedHandle = IntPtr.Zero;
+            _cachedWindowElement = null;
+            FieldReader.InvalidateElementCache();
             throw;
         }
+    }
+
+    /// <summary>Cheap re-verification for the fast path above: does this element's CURRENT title still start with a target prefix? One UIA property read (Name), not a tree walk.</summary>
+    private static bool TitleStillMatches(AutomationElement element)
+    {
+        string? name;
+        try { name = element.Name; }
+        catch { return false; }
+
+        if (name is null) return false;
+
+        foreach (var prefix in FieldMap.TargetWindowTitlePrefixes)
+        {
+            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -211,10 +344,19 @@ public sealed class PioneerRxWindow : IDisposable
         }
     }
 
+    /// <summary>
+    /// The automation session behind WindowElement is now ALWAYS the
+    /// shared, process-lifetime instance (see
+    /// GetOrCreateSharedAutomation) — never owned or disposed per
+    /// PioneerRxWindow instance, only self-healing on a genuine failure
+    /// (see TryAttach's catch block). Every existing call site still
+    /// does `using var window = PioneerRxWindow.TryAttach();`, which is
+    /// harmless: Dispose() here just no longer has an automation session
+    /// of its own to tear down.
+    /// </summary>
     public void Dispose()
     {
         _application?.Dispose();
-        _automation.Dispose();
     }
 
     /// <summary>

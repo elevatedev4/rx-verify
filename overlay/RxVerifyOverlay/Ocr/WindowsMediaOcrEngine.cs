@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
@@ -39,6 +40,36 @@ namespace RxVerifyOverlay.Ocr;
 public sealed class WindowsMediaOcrEngine : IOcrEngine
 {
     /// <summary>
+    /// UPSCALE (field report fix: OCR silently dropped part of a sig
+    /// line — "1 tab PO" captured, the rest of that line never appeared
+    /// in the OCR word list AT ALL, i.e. the words are missing from the
+    /// raw output, not mis-grouped). The captured region's text runs
+    /// ~11px tall, well under Windows.Media.Ocr's reliable minimum text
+    /// size — small enough that the engine can simply fail to detect
+    /// some words rather than misread them. Upscaling 2x before
+    /// recognition (see Upscale below) is the standard mitigation for
+    /// small-text OCR misses; RecognizeAsync divides every returned
+    /// word's (x, y, w, h) back down by the SAME factor before this
+    /// class hands anything back, so the upscale is entirely transparent
+    /// to every caller (OcrFieldReader, EscriptImageCapture's capture-
+    /// region math, src/ocr/parseEscriptOcr.ts, and every existing test
+    /// fixture) — they all see the ORIGINAL captured-bitmap coordinate
+    /// space, unchanged. OcrTextResult.OcrScaleFactor carries the value
+    /// through to the "OCR: ..." status line purely as a diagnostic (see
+    /// ViewModels/OverlayViewModel.cs), not for any geometry callers do
+    /// themselves.
+    ///
+    /// OCR DURATION TRADE-OFF (flagged, not measured — no live Windows
+    /// box here): 2x LINEAR scale is 4x the PIXEL COUNT Windows.Media.Ocr
+    /// has to process, which will likely increase OcrMs by more than 2x.
+    /// Will's field logs currently show ocr 70-650ms with the capture
+    /// bucket now fixed (cffe2bc) and attach/uia now fixed (this branch),
+    /// so there's real headroom — but this needs live confirmation that
+    /// OcrMs stays acceptable, not just that accuracy improves.
+    /// </summary>
+    private const float UpscaleFactor = 2.0f;
+
+    /// <summary>
     /// Recognizes text in a GDI+ Bitmap (as produced by
     /// EscriptImageCapture.CaptureRegion) by converting it to a WinRT
     /// SoftwareBitmap and running Windows.Media.Ocr.OcrEngine over it.
@@ -64,7 +95,9 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
                 "Install one via Settings > Time & Language > Language & region > Add a language " +
                 "(ensure 'Optical character recognition' is included), then relaunch VerifyOCR.");
 
-        using var softwareBitmap = await ConvertToSoftwareBitmapAsync(bitmap);
+        using var upscaledBitmap = Upscale(bitmap, UpscaleFactor, out var scaleX, out var scaleY);
+
+        using var softwareBitmap = await ConvertToSoftwareBitmapAsync(upscaledBitmap);
         cancellationToken.ThrowIfCancellationRequested();
 
         var ocrResult = await ocrEngine.RecognizeAsync(softwareBitmap);
@@ -75,11 +108,14 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
         // src/ocr/parseEscriptOcr.ts consumes — it reconstructs its own
         // line grouping from (x, y, w, h), so no line boundary needs to
         // be preserved here beyond each word's own box. Windows.Media.Ocr's
-        // OcrWord.BoundingRect is already in the same screen-pixel space
-        // as the captured bitmap (see EscriptImageCapture.CaptureRegion),
-        // so no coordinate translation is needed — these boxes are
-        // relative to the CAPTURED REGION, not the full screen; that's
-        // fine, parseEscriptOcr only ever compares words to each other
+        // OcrWord.BoundingRect is in the UPSCALED bitmap's pixel space
+        // (see UPSCALE doc above) — divide by the ACTUAL per-axis scale
+        // applied (scaleX/scaleY, not just the nominal UpscaleFactor —
+        // see Upscale's doc for why those can differ by a sub-pixel
+        // rounding amount) to land back in the ORIGINAL captured-region
+        // coordinate space every caller already expects. These boxes
+        // remain relative to the CAPTURED REGION, not the full screen —
+        // parseEscriptOcr only ever compares words to each other
         // (relative geometry), never to an absolute screen position.
         var words = new List<RxVerifyOverlay.Models.OcrWord>();
         foreach (var line in ocrResult.Lines)
@@ -89,10 +125,10 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
                 words.Add(new RxVerifyOverlay.Models.OcrWord
                 {
                     Text = word.Text ?? "",
-                    X = word.BoundingRect.X,
-                    Y = word.BoundingRect.Y,
-                    W = word.BoundingRect.Width,
-                    H = word.BoundingRect.Height
+                    X = word.BoundingRect.X / scaleX,
+                    Y = word.BoundingRect.Y / scaleY,
+                    W = word.BoundingRect.Width / scaleX,
+                    H = word.BoundingRect.Height / scaleY
                 });
             }
         }
@@ -101,8 +137,43 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
         {
             Text = ocrResult.Text ?? "",
             Lines = lines,
-            Words = words
+            Words = words,
+            OcrScaleFactor = UpscaleFactor
         };
+    }
+
+    /// <summary>
+    /// Upscales <paramref name="source"/> by (approximately)
+    /// <paramref name="factor"/> using high-quality bicubic
+    /// interpolation — the standard GDI+ mitigation for small-text OCR
+    /// misses (see UpscaleFactor's doc). Caller owns and must dispose
+    /// the returned Bitmap.
+    ///
+    /// <paramref name="scaleX"/>/<paramref name="scaleY"/> are the
+    /// ACTUAL ratios applied (scaled dimension / source dimension), NOT
+    /// necessarily bit-for-bit equal to <paramref name="factor"/>: pixel
+    /// dimensions must be whole numbers, so scaledWidth/Height are
+    /// rounded, which can shift the true ratio by a sub-pixel amount on
+    /// an odd-sized source. RecognizeAsync divides by these exact ratios
+    /// (not the nominal factor) so the coordinate round-trip back to the
+    /// original space is exact, not approximate.
+    /// </summary>
+    private static Bitmap Upscale(Bitmap source, float factor, out double scaleX, out double scaleY)
+    {
+        var scaledWidth = Math.Max(1, (int)Math.Round(source.Width * factor));
+        var scaledHeight = Math.Max(1, (int)Math.Round(source.Height * factor));
+
+        var scaled = new Bitmap(scaledWidth, scaledHeight, PixelFormat.Format32bppArgb);
+        using (var graphics = Graphics.FromImage(scaled))
+        {
+            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            graphics.DrawImage(source, 0, 0, scaledWidth, scaledHeight);
+        }
+
+        scaleX = source.Width > 0 ? (double)scaledWidth / source.Width : factor;
+        scaleY = source.Height > 0 ? (double)scaledHeight / source.Height : factor;
+        return scaled;
     }
 
     /// <summary>

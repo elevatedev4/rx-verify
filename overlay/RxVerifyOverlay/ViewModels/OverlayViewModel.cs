@@ -405,6 +405,11 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
+        // Latency-fix diagnosis (uia-read-latency branch): whether the
+        // above TryAttach hit its fast path — see
+        // PioneerRxWindow.WasAttachCacheHit / RefreshTiming.AttachCacheHit.
+        timing.AttachCacheHit = window.WasAttachCacheHit;
+
         try { _lastRxWindowTitle = window.WindowElement.Name; } catch { _lastRxWindowTitle = null; }
 
         FieldReader reader;
@@ -413,11 +418,15 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         {
             // ENTERED side unchanged regardless of Method: still
             // UIA/AutomationId via FieldReader (see Uia/FieldReader.cs
-            // ReadEntered).
-            var uiaStopwatch = Stopwatch.StartNew();
+            // ReadEntered). FieldReader now times its own find-vs-read
+            // split internally (LastReadFindMs/LastReadValueMs) — read
+            // those directly into timing's sub-parts instead of wrapping
+            // the whole call in one opaque stopwatch, so UiaMs (computed
+            // from those two sub-parts, see RefreshTiming.cs) can't drift.
             reader = new FieldReader(window);
             entered = reader.ReadEntered();
-            timing.UiaMs = uiaStopwatch.ElapsedMilliseconds;
+            timing.UiaFindMs = reader.LastReadFindMs;
+            timing.UiaReadMs = reader.LastReadValueMs;
         }
         catch (Exception ex)
         {
@@ -459,7 +468,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         LastOcrRawText = ocrResult.RawText;
         OcrStatusText = ocrResult.Error is not null
             ? $"OCR: error — {ocrResult.Error}"
-            : $"OCR: {ocrResult.TotalMs}ms (capture {ocrResult.CaptureMs}ms + ocr {ocrResult.OcrMs}ms) · {ocrResult.CharCount} chars";
+            : $"OCR: {ocrResult.TotalMs}ms (capture {ocrResult.CaptureMs}ms + ocr {ocrResult.OcrMs}ms) · {ocrResult.CharCount} chars · scale {ocrResult.OcrScaleFactor:0.#}x";
 
         if (ocrResult.Error is not null)
         {

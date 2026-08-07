@@ -42,41 +42,55 @@ public static class RxLogFormatter
     /// Latency fix (Will's field report — verdicts noticeably slower
     /// than the OCR pipeline alone suggested): one compact line spelling
     /// out where a refresh's time actually went, e.g.
-    /// "Timing: detect-&gt;render 612ms (attach 40 + uia 55 + capture 56
-    /// [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render
-    /// 8) - phase2 +240ms · exclusion on". The bracketed region/hidewait/
-    /// blit breakdown of "capture" is a follow-up latency-fix diagnosis
-    /// (branch brief item 2): a >1000ms capture bucket on its own didn't
-    /// say WHICH of region-resolve (UIA walk), hide-wait (overlay hide +
-    /// repaint settle), or the GDI blit was the culprit — see
+    /// "Timing: detect-&gt;render 612ms (attach 3 [hit] + uia 62 [find 4 +
+    /// read 58] + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105
+    /// + engine 180 + render 8) - phase2 +240ms · exclusion on".
+    ///
+    /// The "attach N [hit|resolve]" and "uia N [find X + read Y]"
+    /// breakdowns are the uia-read-latency branch's diagnosis follow-up:
+    /// attach and uia together used to run 2.5-3.8s per refresh
+    /// (FieldReader.ReadEntered re-walking the UIA tree from scratch for
+    /// all ~14 entered fields on every single call, and TryAttach
+    /// constructing a brand-new UIA3Automation + re-enumerating every
+    /// top-level window every call) with no visibility into which part
+    /// was actually slow. "[hit]" means PioneerRxWindow.TryAttach reused
+    /// the already-resolved window (see AttachCacheDecision) instead of
+    /// re-resolving from scratch; "[resolve]" means it didn't. "find" is
+    /// cumulative time doing fresh FindFirstDescendant walks across all
+    /// entered fields (near-zero once every field's element is cached
+    /// for this window — see Uia/EnteredFieldElementCache.cs); "read" is
+    /// cumulative time re-reading each field's CURRENT value, which
+    /// isn't eliminated by caching (values are never cached, only
+    /// element references — see FieldReader.cs's safety doc) and so is
+    /// uia's floor even on an all-cache-hit refresh.
+    ///
+    /// The bracketed region/hidewait/blit breakdown of "capture" is an
+    /// earlier latency-fix diagnosis (capture-latency branch): see
     /// Ocr/EscriptImageCapture.cs / Uia/OcrFieldReader.cs / MainWindow.
     /// xaml.cs for the region-cache and SetWindowDisplayAffinity fixes
-    /// that target the first two.
+    /// that target it.
     ///
     /// The trailing "· exclusion on|off" (post-review diagnostic-
     /// visibility fix, <paramref name="captureExclusionActive"/>, omitted
     /// entirely when null) says whether SetWindowDisplayAffinity(
     /// WDA_EXCLUDEFROMCAPTURE) is the reason hide-wait is ~0, or whether
     /// the hide/show fallback ran instead — see
-    /// IOverlayVisibilityController.IsExcludedFromCapture. This exists
-    /// because a SILENT exclusion failure, combined with the
-    /// documented "pharmacist drags the Topmost overlay over the capture
-    /// region" scenario (see Ocr/IOverlayVisibilityController.cs class
-    /// doc), would feed the overlay's own UI into OCR with no obvious
-    /// explanation — this line is what lets a troubleshoot report prove
-    /// which capture path was actually live for that read.
+    /// IOverlayVisibilityController.IsExcludedFromCapture.
     ///
     /// Shared by Ocr/OcrLogger.cs's per-day log file and the "Copy logs"
     /// blob (BuildLogBlob below) so the two surfaces can never drift on
     /// format. No patient/prescriber/drug content — pure millisecond
-    /// counts and an on/off flag — so unlike the rest of this file's
+    /// counts and on/off/hit flags — so unlike the rest of this file's
     /// redaction machinery, this needs none.
     /// </summary>
     public static string FormatTimingLine(RefreshTiming timing, bool? captureExclusionActive = null)
     {
+        var attachTag = timing.AttachCacheHit is { } attachCacheHit ? $" [{(attachCacheHit ? "hit" : "resolve")}]" : "";
+
         var line = $"Timing: detect->render {timing.Phase1TotalMs}ms " +
-                   $"(attach {timing.AttachMs} + uia {timing.UiaMs} + capture {timing.CaptureMs} " +
-                   $"[region {timing.CaptureRegionResolveMs} + hidewait {timing.CaptureHideWaitMs} + blit {timing.CaptureBlitMs}] + " +
+                   $"(attach {timing.AttachMs}{attachTag} + " +
+                   $"uia {timing.UiaMs} [find {timing.UiaFindMs} + read {timing.UiaReadMs}] + " +
+                   $"capture {timing.CaptureMs} [region {timing.CaptureRegionResolveMs} + hidewait {timing.CaptureHideWaitMs} + blit {timing.CaptureBlitMs}] + " +
                    $"ocr {timing.OcrMs} + engine {timing.EngineMs} + render {timing.RenderMs})";
 
         if (timing.Phase2Ms is { } phase2Ms)

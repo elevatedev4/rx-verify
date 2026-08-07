@@ -14,15 +14,18 @@ namespace RxVerifyOverlay.Tests;
 /// </summary>
 public class RefreshTimingFormatterTests
 {
-    // CaptureMs is NOT set here — it's a computed property (post-review
-    // fix: mirrors Phase1TotalMs, always CaptureRegionResolveMs +
-    // CaptureHideWaitMs + CaptureBlitMs = 3 + 0 + 53 = 56 below) so it
-    // can never drift from the three sub-parts. See
-    // CaptureMsIsAlwaysTheSumOfItsThreeSubParts.
-    private static RefreshTiming MakeTiming(long? phase2Ms = null) => new()
+    // CaptureMs and UiaMs are NOT set here — both are computed properties
+    // (mirroring Phase1TotalMs) so they can never drift from their
+    // sub-parts: CaptureMs = CaptureRegionResolveMs + CaptureHideWaitMs +
+    // CaptureBlitMs = 3 + 0 + 53 = 56; UiaMs = UiaFindMs + UiaReadMs =
+    // 4 + 51 = 55. See CaptureMsIsAlwaysTheSumOfItsThreeSubParts /
+    // UiaMsIsAlwaysTheSumOfItsTwoSubParts.
+    private static RefreshTiming MakeTiming(long? phase2Ms = null, bool? attachCacheHit = null) => new()
     {
         AttachMs = 40,
-        UiaMs = 55,
+        AttachCacheHit = attachCacheHit,
+        UiaFindMs = 4,
+        UiaReadMs = 51,
         CaptureRegionResolveMs = 3,
         CaptureHideWaitMs = 0,
         CaptureBlitMs = 53,
@@ -55,7 +58,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8)",
+            "Timing: detect->render 444ms (attach 40 + uia 55 [find 4 + read 51] + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8)",
             line);
     }
 
@@ -67,7 +70,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) - phase2 +240ms",
+            "Timing: detect->render 444ms (attach 40 + uia 55 [find 4 + read 51] + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) - phase2 +240ms",
             line);
     }
 
@@ -79,7 +82,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing);
 
         Assert.Equal(
-            "Timing: detect->render 0ms (attach 0 + uia 0 + capture 0 [region 0 + hidewait 0 + blit 0] + ocr 0 + engine 0 + render 0)",
+            "Timing: detect->render 0ms (attach 0 + uia 0 [find 0 + read 0] + capture 0 [region 0 + hidewait 0 + blit 0] + ocr 0 + engine 0 + render 0)",
             line);
     }
 
@@ -110,6 +113,53 @@ public class RefreshTimingFormatterTests
     }
 
     [Fact]
+    public void UiaMsIsAlwaysTheSumOfItsTwoSubParts()
+    {
+        // uia-read-latency branch: UiaMs is a computed property
+        // (mirroring CaptureMs/Phase1TotalMs) instead of a separately-set
+        // field, so it can never drift from UiaFindMs + UiaReadMs.
+        var timing = MakeTiming();
+
+        Assert.Equal(4 + 51, timing.UiaMs);
+
+        timing.UiaFindMs = 500;
+
+        Assert.Equal(500 + 51, timing.UiaMs);
+    }
+
+    [Fact]
+    public void FormatTimingLineOmitsAttachTagWhenAttachCacheHitIsNull()
+    {
+        var timing = MakeTiming(attachCacheHit: null);
+
+        var line = RxLogFormatter.FormatTimingLine(timing);
+
+        Assert.Contains("attach 40 + uia", line);
+        Assert.DoesNotContain("[hit]", line);
+        Assert.DoesNotContain("[resolve]", line);
+    }
+
+    [Fact]
+    public void FormatTimingLineTagsAttachHitWhenAttachCacheHitIsTrue()
+    {
+        var timing = MakeTiming(attachCacheHit: true);
+
+        var line = RxLogFormatter.FormatTimingLine(timing);
+
+        Assert.Contains("attach 40 [hit] + uia", line);
+    }
+
+    [Fact]
+    public void FormatTimingLineTagsAttachResolveWhenAttachCacheHitIsFalse()
+    {
+        var timing = MakeTiming(attachCacheHit: false);
+
+        var line = RxLogFormatter.FormatTimingLine(timing);
+
+        Assert.Contains("attach 40 [resolve] + uia", line);
+    }
+
+    [Fact]
     public void FormatTimingLineAppendsExclusionOnWhenCaptureExclusionActiveIsTrue()
     {
         var timing = MakeTiming();
@@ -117,7 +167,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: true);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) · exclusion on",
+            "Timing: detect->render 444ms (attach 40 + uia 55 [find 4 + read 51] + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) · exclusion on",
             line);
     }
 
@@ -129,7 +179,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: false);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) · exclusion off",
+            "Timing: detect->render 444ms (attach 40 + uia 55 [find 4 + read 51] + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) · exclusion off",
             line);
     }
 
@@ -159,7 +209,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: true);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) - phase2 +240ms · exclusion on",
+            "Timing: detect->render 444ms (attach 40 + uia 55 [find 4 + read 51] + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) - phase2 +240ms · exclusion on",
             line);
     }
 }

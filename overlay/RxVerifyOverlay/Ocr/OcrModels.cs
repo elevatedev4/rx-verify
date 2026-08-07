@@ -28,6 +28,21 @@ public sealed class OcrTextResult
     public string Text { get; init; } = "";
     public IReadOnlyList<string> Lines { get; init; } = Array.Empty<string>();
     public IReadOnlyList<OcrWord> Words { get; init; } = Array.Empty<OcrWord>();
+
+    /// <summary>
+    /// Small-text accuracy fix: how much the engine upscaled the
+    /// captured bitmap before recognizing it (e.g. 2.0 = 2x), purely for
+    /// diagnostics — see WindowsMediaOcrEngine's UPSCALE doc. Words'
+    /// (x, y, w, h) are ALREADY divided back down to the ORIGINAL
+    /// captured-bitmap coordinate space by the engine before this result
+    /// is returned, so this factor carries no information callers need
+    /// for geometry — it exists only so Will's logs can confirm
+    /// upscaling is actually active (see Ocr/OcrCaptureResult.cs
+    /// OcrScaleFactor / ViewModels/OverlayViewModel.cs OcrStatusText).
+    /// Defaults to 1.0 (no upscaling) for any IOcrEngine implementation
+    /// that doesn't set it.
+    /// </summary>
+    public double OcrScaleFactor { get; init; } = 1.0;
 }
 
 /// <summary>
@@ -82,6 +97,9 @@ public sealed class OcrCaptureResult
     public long OcrMs { get; init; }
     public long TotalMs { get; init; }
     public int CharCount { get; init; }
+
+    /// <summary>See OcrTextResult.OcrScaleFactor — passed straight through from the engine's result, diagnostics only.</summary>
+    public double OcrScaleFactor { get; init; } = 1.0;
 
     /// <summary>Non-null on any capture/recognition failure — see OcrFieldReader.ReadSourceFromOcrAsync's catch block. Words is empty in that case, never partially populated.</summary>
     public string? Error { get; init; }
