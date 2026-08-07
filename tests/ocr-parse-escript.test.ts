@@ -1308,28 +1308,28 @@ describe('parseEscriptOcr', () => {
     // the digit-run line, so a future change to either number shows up
     // here instead of silently drifting.
     it('ACCEPTED: a name with a credential suffix carrying a 5-digit run (license number) is NOT rejected', () => {
-      // "O'Day-Smith, Kaitlyn A.P.R.N. 12345" — a plausible real-world
+      // "O'Brien-Hale, Maureen A.P.R.N. 12345" — a plausible real-world
       // shape (name + credential + a license number under the run
       // threshold). Digit run is exactly 5, under the 6+ trip-wire, and
       // well under 40% of the total text.
       const prescriberRow: OcrWord[] = [
         { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
-        { text: "O'Day-Smith,", x: 119, y: 186, w: 90, h: 11 },
-        { text: 'Kaitlyn', x: 215, y: 186, w: 60, h: 11 },
+        { text: "O'Brien-Hale,", x: 119, y: 186, w: 90, h: 11 },
+        { text: 'Maureen', x: 215, y: 186, w: 60, h: 11 },
         { text: 'A.P.R.N.', x: 280, y: 186, w: 60, h: 11 },
         { text: '12345', x: 345, y: 186, w: 45, h: 11 }
       ];
       const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow]);
       const record = parseEscriptOcr(ocr);
 
-      expect(record.prescriber?.name).toBe("O'Day-Smith, Kaitlyn A.P.R.N. 12345");
+      expect(record.prescriber?.name).toBe("O'Brien-Hale, Maureen A.P.R.N. 12345");
     });
 
     it('REJECTED: the SAME shape with a 6-digit run instead of 5 is rejected to not_provided', () => {
       const prescriberRow: OcrWord[] = [
         { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
-        { text: "O'Day-Smith,", x: 119, y: 186, w: 90, h: 11 },
-        { text: 'Kaitlyn', x: 215, y: 186, w: 60, h: 11 },
+        { text: "O'Brien-Hale,", x: 119, y: 186, w: 90, h: 11 },
+        { text: 'Maureen', x: 215, y: 186, w: 60, h: 11 },
         { text: 'A.P.R.N.', x: 280, y: 186, w: 60, h: 11 },
         { text: '123456', x: 345, y: 186, w: 50, h: 11 }
       ];
