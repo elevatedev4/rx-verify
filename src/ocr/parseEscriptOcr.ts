@@ -57,6 +57,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Address, DrugDescriptor, Prescriber, PrescriptionRecord } from '../types.js';
 import { parseDate } from '../normalize/date.js';
+import { STREET_SUFFIXES } from '../normalize/address.js';
 
 /** One OCR-recognized word plus its on-screen bounding box (screen pixels, origin top-left — matches Windows.Media.Ocr's OcrWord.BoundingRect). */
 export interface OcrWord {
@@ -557,16 +558,59 @@ function isChromeLine(line: OcrWord[]): boolean {
  * observed shapes: "<street> <city>, <ST> <zip>" (comma before state)
  * and "<street> <city> <ST><zip>" (no separators at all, OCR having
  * dropped the comma/space — e.g. "...FAKETOWN KS660000000"). ZIP is
- * reduced to its first 5 digits (see class doc / branch brief). Falls
- * back to treating the whole string as street-only if no trailing
- * "<state><zip>" shape is recognized — never throws, never guesses city
- * beyond the one trailing token before the state. The trailing
- * "<state><zip>" shape doubles as this field's format anchor (branch
- * brief item 2, "ZIP/state for addresses") — an address blob that never
- * matches it yields a street-only value rather than a guessed
- * city/state/zip split.
+ * reduced to its first 5 digits (see class doc / branch brief). The
+ * trailing "<state><zip>" shape doubles as this field's PRIMARY format
+ * anchor (branch brief item 2, "ZIP/state for addresses") — note ZIP
+ * here already tolerates a GLUED state+zip token with zero separator
+ * ("KS66047") via the `\s*` between the state and ZIP capture groups
+ * below, needing no extra handling (branch brief defect #7a — verified
+ * this already parses "KS66047"/"KS66614"-style tokens correctly).
+ *
+ * FALLBACK (branch brief defect #7b, live-test bug: an address line that
+ * stops at the city — OCR simply never emitted a state/ZIP token in that
+ * capture, "not recoverable" per the bug report): when NO "<state><zip>"
+ * tail is found at all, still try to split a CITY off the end using
+ * splitCityAfterStreetSuffix (the last recognized street-suffix word,
+ * from the SAME STREET_SUFFIXES table normalize/address.ts's
+ * comparator uses, as the boundary) rather than dumping the entire line
+ * into `street` with no city at all — see that function's doc for the
+ * "never guess beyond a recognized suffix" bound.
  */
 const ADDRESS_RE = /^(.*?)[,\s]+([A-Za-z]{2})\s*(\d{5})(\d{4})?\s*$/;
+
+/**
+ * Given an address blob's tokens with NO recognized "<state><zip>" tail
+ * (parseAddressBlob's fallback path), try to split off a CITY using the
+ * LAST token that matches a known street-suffix word (case-insensitive;
+ * reuses normalize/address.ts's STREET_SUFFIXES table, which has both
+ * spelled-out and already-abbreviated forms as keys, e.g. "road"/"rd"
+ * both present) as the street/city boundary — everything up to and
+ * including that suffix word is `street`, everything after it is `city`.
+ * Returns null (never guesses) when:
+ *  - no token matches a known suffix at all (nothing to safely anchor
+ *    on — could be a street type this table doesn't know, a PO Box, or
+ *    genuinely not an address at all), or
+ *  - the suffix word IS the last token (nothing follows it to call a
+ *    city).
+ * This mirrors the SAME "only split on a recognized, bounded pattern,
+ * never a positional guess" discipline the rest of this module's
+ * date/quantity repair functions already follow.
+ */
+function splitCityAfterStreetSuffix(tokens: string[]): { street: string; city: string } | null {
+  let suffixIdx = -1;
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const norm = (tokens[i] ?? '').toLowerCase().replace(/[.,]/g, '');
+    if (STREET_SUFFIXES[norm]) {
+      suffixIdx = i;
+      break;
+    }
+  }
+  if (suffixIdx === -1 || suffixIdx === tokens.length - 1) return null;
+
+  const street = tokens.slice(0, suffixIdx + 1).join(' ');
+  const city = tokens.slice(suffixIdx + 1).join(' ');
+  return { street, city };
+}
 
 function parseAddressBlob(raw: string): Address {
   const trimmed = raw.trim();
@@ -582,7 +626,10 @@ function parseAddressBlob(raw: string): Address {
       m = ADDRESS_RE.exec(stripped);
     }
   }
-  if (!m) return { street: trimmed };
+  if (!m) {
+    const citySplit = splitCityAfterStreetSuffix(trimmed.split(/\s+/).filter(Boolean));
+    return citySplit ?? { street: trimmed };
+  }
 
   const before = (m[1] ?? '').trim();
   const state = (m[2] ?? '').toUpperCase();

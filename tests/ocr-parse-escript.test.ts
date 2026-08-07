@@ -6,6 +6,7 @@ import {
   type OcrWord,
   type FieldDiagnostic
 } from '../src/ocr/parseEscriptOcr.js';
+import { compareAddresses } from '../src/normalize/address.js';
 
 /**
  * SYNTHETIC DATA ONLY — every name/DOB/NPI/NDC/address/phone below is
@@ -1223,11 +1224,18 @@ describe('parseEscriptOcr', () => {
     const ocr = flatten([TOOLBAR_ROW, locationRow, strayPhoneShapedRow, phoneRow]);
     const record = parseEscriptOcr(ocr);
 
-    // Documents current (accepted) behavior: the stray row is swept in,
-    // and — since it doesn't match the trailing "<state><zip>" shape
-    // parseAddressBlob requires — the whole value falls back to a
-    // street-only Address with no city/state/zip parsed out of it.
-    expect(record.prescriber?.address).toEqual({ street: '4930 Overland Drive 555-0001' });
+    // Documents current (accepted) behavior: the stray row is swept in.
+    // UPDATED (defect #7b): parseAddressBlob's no-state/ZIP fallback now
+    // splits a CITY off the end using the last recognized street-suffix
+    // word ("Drive") as the boundary, rather than dumping the whole
+    // string into `street` — a deliberate, correct improvement for the
+    // real case it targets (an OCR-dropped address tail). It has no way
+    // to know THIS particular trailing text is stray phone-shaped noise
+    // rather than a real city, so it still ends up mis-split into
+    // `city` — that residual imprecision is the accepted geometric
+    // limitation this test pins, now one layer downstream of where it
+    // used to be.
+    expect(record.prescriber?.address).toEqual({ street: '4930 Overland Drive', city: '555-0001' });
     // The real Phone field, on its own recognized row further down,
     // still resolves correctly and independently.
     expect(record.prescriber?.phone).toBe('(555) 555-4488');
@@ -1363,6 +1371,169 @@ describe('parseEscriptOcr', () => {
       const record = parseEscriptOcr(ocr);
 
       expect(record.patientDOB).toBeUndefined();
+    });
+  });
+
+  describe('address city-segmentation (defect #7a/#7b, live-test bug: on-screen line "808 E 1250 Road Lawrence KS66047" displayed as stopping at the city)', () => {
+    // SYNTHETIC — geometry mirrors the real owner capture (patient
+    // Address: label @ (51,116)). Ground truth confirmed from the OCR
+    // word dump: the left-column value tokens are EXACTLY five ("808"
+    // "E" "1250" "Road" "Lawrence") and then nothing until the far
+    // right-column phone tokens — OCR never emitted a state/ZIP token in
+    // this capture at all, so it is not recoverable by parsing; this
+    // describe block is about the THREE downstream weaknesses that
+    // exposed, not about inventing the missing state/ZIP.
+    it('acceptance (1)/(4)-adjacent: exact live y=116 geometry (no state/ZIP anywhere in the OCR read) splits city off the end using the street-suffix boundary, instead of dumping the whole line into `street`', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({ street: '907 W 1300 Road', city: 'Faketown' });
+    });
+
+    it('acceptance (1) end-to-end: that same source address compares GREEN (with the partial-compare explanation) against a fully-populated entered address', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      const result = compareAddresses(record.patientAddress, {
+        street: '907 W 1300 Road',
+        city: 'Faketown',
+        state: 'KS',
+        zip: '66099'
+      });
+      expect(result.status).toBe('green');
+      expect(result.reasonCode).toBe('exact_match_partial_source');
+      expect(result.explanation).toContain('did not provide');
+    });
+
+    it('acceptance (2): same geometry, but the entered CITY differs — stays yellow, never waved through', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      const result = compareAddresses(record.patientAddress, {
+        street: '907 W 1300 Road',
+        city: 'Differentburg',
+        state: 'KS',
+        zip: '66099'
+      });
+      expect(result.status).toBe('yellow');
+      expect(result.reasonCode).toBe('address_differs');
+    });
+
+    // Acceptance (3): a glued state+ZIP token ("KS66614") after a comma,
+    // as part of a realistic full address line — the live prescriber-row
+    // example ("Topeka," @ (121,227) "KS66614" @ (174,227)).
+    it('acceptance (3): glued "KS66614" (comma before it, prescriber-row live example) parses into city/state/zip and the full compare works', () => {
+      const locationRow: OcrWord[] = [
+        { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
+        { text: '808', x: 120, y: 207, w: 30, h: 11 },
+        { text: 'E', x: 155, y: 207, w: 12, h: 11 },
+        { text: '1250', x: 172, y: 207, w: 30, h: 11 },
+        { text: 'Road', x: 207, y: 207, w: 35, h: 11 },
+        { text: 'Topeka,', x: 121, y: 227, w: 55, h: 11 },
+        { text: 'KS66614', x: 174, y: 227, w: 70, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), locationRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.address).toEqual({
+        street: '808 E 1250 Road',
+        city: 'Topeka',
+        state: 'KS',
+        zip: '66614'
+      });
+
+      const result = compareAddresses(record.prescriber?.address, {
+        street: '808 E 1250 Road',
+        city: 'Topeka',
+        state: 'KS',
+        zip: '66614'
+      });
+      expect(result.status).toBe('green');
+    });
+
+    // Acceptance (4): no-comma full single line, state+ZIP present but
+    // glued, no separator at all before it.
+    it('acceptance (4): no-comma full line "907 W 1300 Road Faketown KS66099" segments street/city/state/zip correctly', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 },
+        { text: 'KS66099', x: 300, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({
+        street: '907 W 1300 Road',
+        city: 'Faketown',
+        state: 'KS',
+        zip: '66099'
+      });
+    });
+
+    // Acceptance (5): street-only source (no city token at all — the
+    // suffix word IS the last token, nothing follows it) — the "don't
+    // guess" guard must hold, and the resulting compare stays yellow.
+    it('acceptance (5): street-only source (suffix word is the last token, no city follows) keeps current street-only behavior and compares yellow', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({ street: '907 W 1300 Road' });
+
+      const result = compareAddresses(record.patientAddress, {
+        street: '907 W 1300 Road',
+        city: 'Faketown',
+        state: 'KS',
+        zip: '66099'
+      });
+      expect(result.status).toBe('yellow');
+    });
+
+    it('GUARD: no recognized street-suffix word at all — falls back to the pre-existing street-only behavior (never guesses)', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'Fictional', x: 155, y: 116, w: 60, h: 11 },
+        { text: 'Faketown', x: 220, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({ street: '907 Fictional Faketown' });
     });
   });
 

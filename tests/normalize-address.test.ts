@@ -330,4 +330,83 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('exact_match');
     });
   });
+
+  describe('source address stops at the city — no state/ZIP at all (defect #7c, live-test bug: OCR read "808 E 1250 Road Lawrence", never reached state/ZIP, and compared address_differs against a fully-populated entered address)', () => {
+    // Acceptance (1): confirmed street+city, source simply never provided
+    // state/ZIP → GREEN, with an explanation that says what was (and
+    // wasn't) actually compared.
+    it('is GREEN when source has street+city but no state/ZIP at all, and both match the entered address', () => {
+      const r = compareAddresses(
+        { street: '907 W 1300 Road', city: 'Faketown' },
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match_partial_source');
+      expect(r.explanation).toContain('Street and city match');
+      expect(r.explanation).toContain('state/ZIP');
+    });
+
+    it('explanation names ONLY the missing piece when just one of state/ZIP is absent (state present-and-matching, ZIP absent)', () => {
+      const r = compareAddresses(
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS' },
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match_partial_source');
+      expect(r.explanation).toContain('did not provide ZIP');
+      expect(r.explanation).not.toContain('state/ZIP');
+    });
+
+    // Acceptance (2): same shape, but the entered CITY genuinely differs
+    // — must NOT be waved through by the new state/ZIP leniency.
+    it('is YELLOW when source has no state/ZIP AND the entered city differs', () => {
+      const r = compareAddresses(
+        { street: '907 W 1300 Road', city: 'Faketown' },
+        { street: '907 W 1300 Road', city: 'Differentburg', state: 'KS', zip: '66099' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // SAFETY BOUND (i): a present-but-DIFFERENT state must still flag —
+    // this is not the same thing as "source didn't provide a state".
+    it('SAFETY BOUND: is YELLOW when source STATES a different state, even though ZIP is absent on the source', () => {
+      const r = compareAddresses(
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'MO' },
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // Acceptance (5) / SAFETY BOUND (ii): source missing CITY too
+    // (street-only) is "too little to verify" — must stay yellow, never
+    // waved through by this leniency (which requires a CONFIRMED city
+    // match, not just "city wasn't stated").
+    it('SAFETY BOUND: street-only source (no city, no state, no ZIP) stays YELLOW, not green', () => {
+      const r = compareAddresses(
+        { street: '907 W 1300 Road' },
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // SAFETY BOUND (iii): the new leniency (reasonCode
+    // 'exact_match_partial_source') is state/ZIP-only and requires an
+    // actively CONFIRMED street match — a source missing STREET entirely
+    // must not produce that reasonCode; note this case can still end up
+    // green via the engine's PRE-EXISTING, separate, general blank-
+    // component tolerance (unrelated to and untouched by this defect —
+    // that tolerance already treated a blank street as "not a stated
+    // disagreement" long before this fix), which is a different codepath
+    // this test is not asserting on.
+    it('SAFETY BOUND: the new partial-source leniency does not fire when street itself is absent on the source', () => {
+      const r = compareAddresses(
+        { city: 'Faketown' },
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
+      );
+      expect(r.reasonCode).not.toBe('exact_match_partial_source');
+    });
+  });
 });
