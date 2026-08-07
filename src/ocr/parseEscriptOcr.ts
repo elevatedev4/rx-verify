@@ -159,6 +159,56 @@ const LABELS: LabelDef[] = [
 /** Field keys whose inline/positional raw text is prone to absorbing a following recognized label or pharmacy-chrome token on the same OCR line (branch brief defect #3 — "Agent name"/"spr <SPI>"/"/ Mab" bleed). Trimmed via trimValueNoise before being stored. NOT applied to address/location — those get trailing bare-digit noise (a bled-in license number) stripped by parseAddressBlob's own targeted retry instead, since a generic trim there would also eat the address's own trailing ZIP digits. */
 const NOISE_TRIM_KEYS = new Set<LabelKey>(['patient', 'prescriber', 'phone']);
 
+/**
+ * Field keys whose value is a PERSON'S NAME (branch brief defect #5,
+ * live-test bug: verdict showed source prescriberName = "Order Nurnt*r:
+ * 110922S2S"). Root cause: the page had a second, unrelated line that
+ * ALSO fuzzy-matches the 'prescriber' label — a mangled footer, "Prescr'
+ * ber Order Nurnt*r: 110922S2S" (a garbled "Prescriber Order Number:"),
+ * sitting well below the real "Prescriber:" row. Every OTHER key in this
+ * module keeps the documented "last-encountered-row wins" overwrite
+ * semantics (see the refills doc above), and since lines are walked
+ * top-to-bottom, the footer row — processed AFTER the real one — simply
+ * overwrote the correctly-resolved name with the order number.
+ *
+ * Column/y-band position was considered as the fix and rejected as the
+ * PRIMARY signal (per branch brief): the real live-test decoy footer
+ * sits at x≈24, actually LEFT of the real label's own x≈45, so a naive
+ * "prefer the leftmost column" rule would have picked the WRONG one.
+ * Instead, these two keys get a VALUE-SHAPE gate (isImplausibleNameValue)
+ * at every assignment site: a candidate whose value is digit-dominated
+ * is rejected outright — never assigned, and never allowed to overwrite
+ * an already-resolved value. Because a real name value naturally passes
+ * (letters, not digits) and a decoy order-number value naturally fails,
+ * this has the practical effect of "first plausible candidate wins,
+ * subsequent implausible ones are simply discarded" without needing to
+ * hardcode any column/position assumption — and if NO candidate for a
+ * name field ever passes, the field is left unresolved (surfaces as
+ * yellow not_provided downstream), never storing a garbage value.
+ */
+const NAME_FIELDS = new Set<LabelKey>(['patient', 'prescriber']);
+
+/**
+ * True if `text` is implausible as a person's name — see NAME_FIELDS
+ * doc. Either tripwire alone disqualifies:
+ *  - a run of 6+ consecutive digits (an order/ID number's own shape —
+ *    the live-test decoy's "110922S2S" trips this via its embedded
+ *    "110922" run);
+ *  - more than 40% of all (non-whitespace) characters are digits
+ *    overall.
+ * Deliberately conservative in the OTHER direction: a real name
+ * containing an occasional digit is left untouched unless it actually
+ * crosses one of these thresholds — this is a rejection gate for
+ * clearly-not-a-name text, not a strict name validator.
+ */
+function isImplausibleNameValue(text: string): boolean {
+  if (/\d{6,}/.test(text)) return true;
+  const digitCount = (text.match(/\d/g) ?? []).length;
+  const totalCount = text.replace(/\s/g, '').length;
+  if (totalCount === 0) return false;
+  return digitCount / totalCount > 0.4;
+}
+
 /** Horizontal gap (px) beyond which two consecutive words on the same reconstructed line are treated as belonging to different on-screen columns, not the same value. Chosen well above normal within-value word spacing (the widest normal gap observed between real sig words on the live capture was ~105px) but well below the far-column jump actually observed (~309px). Reused (same threshold) as the column-CLUSTERING distance for Pass B — a column boundary and a "different column" word gap are the same underlying signal at two different granularities (word-level vs line-start-level). */
 const MAX_VALUE_WORD_GAP_PX = 150;
 
@@ -709,10 +759,26 @@ function isPhoneShaped(raw: string): boolean {
  *  4. "MM/DDYYYY" — the "/" between day and year got OCR-dropped
  *     (branch brief defect #2, e.g. "07/022026" -> "07/02/2026").
  *  5. "MMDD/YYYY" — the "/" between month and day got OCR-dropped.
+ *  6. "MM<sep>DD<sep>YYYY" where EITHER separator was OCR'd as a
+ *     slash-lookalike character rather than dropped or read as "/"
+ *     (live-test bug, e.g. "07/0711977" for "07/07/1977" — the day/year
+ *     "/" misread as "1"). Position-ANCHORED to the exact
+ *     digit-sep-digit-sep-digit shape (2+1+2+1+4 chars) so a lookalike
+ *     is only ever reinterpreted as a separator at those two fixed
+ *     positions — this never guesses at a DIGIT value the way
+ *     repairDigits does; it only asks "is the character AT this
+ *     specific position one of the small slash-lookalike set", and a
+ *     bare "1" elsewhere in a token (not at a separator position) is
+ *     left alone. Every call site re-validates the result with
+ *     parseDate (month/day/days-in-month) before accepting it, so an
+ *     implausible repaired date is rejected there, not here — this step
+ *     only proposes a candidate, never confirms one.
  * Returns null (no repair attempted/needed) if the token doesn't match
  * any of the above and wasn't changed by digit/separator repair — never
  * guesses beyond these specific shapes.
  */
+const DATE_SEPARATOR_LOOKALIKE_RE = /^(\d{2})[/lI1|](\d{2})[/lI1|](\d{4})$/;
+
 function repairMangledDate(raw: string): string | null {
   const trimmed = raw.trim();
   let candidate = repairDigits(trimmed);
@@ -728,6 +794,9 @@ function repairMangledDate(raw: string): string | null {
   if (m) return `${m[1]}/${m[2]}/${m[3]}`;
 
   m = /^(\d{2})(\d{2})\/(\d{4})$/.exec(candidate);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+
+  m = DATE_SEPARATOR_LOOKALIKE_RE.exec(candidate);
   if (m) return `${m[1]}/${m[2]}/${m[3]}`;
 
   return candidate !== trimmed ? candidate : null;
@@ -1069,7 +1138,12 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         // canonical always wins over a "Total fills" canonical for this
         // key, regardless of on-screen row order -- see
         // refillsResolvedCanonical doc above. Every other key keeps the
-        // existing unconditional overwrite (last-encountered-row wins).
+        // existing unconditional overwrite (last-encountered-row wins) —
+        // EXCEPT NAME_FIELDS (patient/prescriber), which reject a
+        // digit-dominated candidate outright rather than let it overwrite
+        // an already-resolved real name (branch brief defect #5 — see
+        // NAME_FIELDS doc for the live-test bug and why this beats a
+        // column/position-based fix).
         if (match.label.key === 'refills') {
           const shouldAssign = raw.refills === undefined || match.label.canonical !== 'totalfills';
           if (shouldAssign) {
@@ -1077,6 +1151,11 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
             resolutionMeta.refills = { strategy: 'inline-row', words: remainderWords };
             refillsResolvedCanonical = match.label.canonical;
           }
+        } else if (NAME_FIELDS.has(match.label.key) && isImplausibleNameValue(remainder)) {
+          // Discarded, not assigned: a decoy label match with a
+          // garbage/digit-dominated value can never overwrite a
+          // previously-resolved real name, and can never become the
+          // value itself. See NAME_FIELDS doc.
         } else {
           raw[match.label.key] = remainder;
           resolutionMeta[match.label.key] = { strategy: 'inline-row', words: remainderWords };
@@ -1351,7 +1430,14 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         segWords = trimColumnGap(segWords);
         if (key === 'directions') segWords = trimSigColumnGap(segWords);
         const text = wordsToText(segWords);
-        if (text) {
+        // Same NAME_FIELDS value-shape gate as Pass A (branch brief
+        // defect #5) — Pass B only ever runs for a key still undefined
+        // at this point, so there's no "overwrite a good value" risk
+        // here, but a geometrically-paired leftover row for
+        // patient/prescriber can still be digit-dominated garbage (e.g.
+        // an ID/order number that happened to land in that column/row
+        // slot); reject it the same way rather than store it as a name.
+        if (text && !(NAME_FIELDS.has(key) && isImplausibleNameValue(text))) {
           raw[key] = text;
           resolutionMeta[key] = { strategy: 'block-column', words: segWords };
           // Pass B only ever runs for a key still undefined at this point

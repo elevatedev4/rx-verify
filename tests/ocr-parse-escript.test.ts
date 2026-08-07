@@ -1233,6 +1233,139 @@ describe('parseEscriptOcr', () => {
     expect(record.prescriber?.phone).toBe('(555) 555-4488');
   });
 
+  describe('prescriber name label decoy (defect #5, live-test bug: source prescriberName resolved to "Order Nurnt*r: 110922S2S")', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump; the prescriber's own name is fabricated (not
+    // reused verbatim from the live report) per this repo's
+    // synthetic-data-only discipline. Root cause: the page has TWO
+    // lines that both fuzzy-match the 'prescriber' label — the real
+    // "Prescriber:" row (label+name inline, y=186) and a mangled footer
+    // line, "Prescr'ber Order Nurnt*r: 110922S2S" (a garbled
+    // "Prescriber Order Number:", y=630), whose leading word alone
+    // fuzzy-matches 'prescriber' under the existing edit-distance
+    // threshold. Lines are walked top-to-bottom, so without a fix the
+    // LATER (footer) match unconditionally overwrites the correctly-
+    // resolved name with the order number.
+    const realPrescriberRow: OcrWord[] = [
+      { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+      { text: 'Sampleton,', x: 119, y: 186, w: 80, h: 11 },
+      { text: 'Casey', x: 208, y: 186, w: 55, h: 11 }
+    ];
+    // Decoy footer — its OWN row, well below the real label, x≈24 (LEFT
+    // of the real label's own x≈45 — column position alone would have
+    // picked the WRONG one here, see NAME_FIELDS doc in
+    // parseEscriptOcr.ts).
+    const decoyFooterRow: OcrWord[] = [
+      { text: "Prescr'ber", x: 24, y: 630, w: 70, h: 10 },
+      { text: 'Order', x: 100, y: 630, w: 40, h: 10 },
+      { text: "Nurnt*r:", x: 145, y: 630, w: 60, h: 10 },
+      { text: '110922S2S', x: 210, y: 630, w: 70, h: 10 }
+    ];
+
+    it('resolves the REAL name even with the decoy footer also present, and never stores the order number', () => {
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), realPrescriberRow, decoyFooterRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBe('Sampleton, Casey');
+      expect(record.prescriber?.name).not.toMatch(/\d{6,}/);
+    });
+
+    it('is not_provided (never the order number) when ONLY the decoy footer exists', () => {
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), decoyFooterRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBeUndefined();
+    });
+
+    it('SAFETY: a genuinely digit-light name is unaffected by the value-shape gate', () => {
+      // e.g. a name with a single incidental digit (rare OCR noise) must
+      // not be rejected — the gate only trips on digit-DOMINATED text.
+      const row2: OcrWord[] = [
+        { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+        { text: 'O2Brien,', x: 119, y: 186, w: 70, h: 11 },
+        { text: 'Drew', x: 200, y: 186, w: 50, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row2]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBe('O2Brien, Drew');
+    });
+  });
+
+  describe('DOB label/value OCR noise (defect #6, live-test bug: patientDOB stayed not_provided)', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump. Two independent misreads on the same field:
+    // the label "DOB:" OCR'd as "DOBI" (colon misread as a trailing
+    // "I"), and the value "07/07/1977" OCR'd as "07/0711977" (the
+    // day/year "/" misread as "1").
+    it('label "DOBI" already fuzzy-matches the DOB label (verifies existing tolerance, no false negative)', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '07/07/1977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('07/07/1977');
+    });
+
+    it('sibling label noise "DOB1" also fuzzy-matches', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOB1', x: 76, y: 137, w: 40, h: 12 },
+        { text: '07/07/1977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('07/07/1977');
+    });
+
+    it('exact live-test repro: "DOBI" label + "07/0711977" value (day/year slash misread as "1") still resolves', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '07/0711977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('07/07/1977');
+    });
+
+    it('also repairs the month/day slash (not just day/year) when it is misread as a separator lookalike', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOB:', x: 76, y: 137, w: 40, h: 12 },
+        // Month/day "/" misread as "l" this time.
+        { text: '07l07/1977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('07/07/1977');
+    });
+
+    it('SAFETY: an unrepairable/garbage token stays not_provided, never a guessed date', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '07/0A11977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBeUndefined();
+    });
+
+    it('SAFETY: the separator-repair never invents an implausible date (e.g. month 13) — stays not_provided', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '13/0711977', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBeUndefined();
+    });
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [
