@@ -1195,6 +1195,21 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // confirmed, below, to start in the location value's own x column) is
     // ever read; the far-column text is left behind as its own leftover
     // line for whatever field (if any) actually owns it.
+    //
+    // KNOWN, ACCEPTED SCOPE LIMIT (mirrors the sig-continuation block
+    // immediately above, same constraint): this runs BEFORE Pass B, so
+    // `raw.location` is only set here when Pass A already resolved the
+    // location's own row INLINE (label + street value on the same
+    // physical OCR row). If a capture instead needs Pass B's block-
+    // column pairing to resolve "Location:" in the first place (a
+    // labels-block-then-values-block layout where the label and its
+    // value are NOT on the same row), raw.location is still undefined at
+    // this point and this whole block is a no-op for that capture — any
+    // wrapped 2nd/3rd address line on such a capture is not gathered.
+    // Every real live-test capture this branch was tuned against has
+    // "Location:" resolved inline (same shape sig always resolves in),
+    // so this hasn't been a reported gap; flagging it here rather than
+    // silently relying on that.
     if (raw.location) {
       const locationIdx = labelOrder.findIndex((k) => k === 'location');
       const locationMeta = resolutionMeta.location;

@@ -1185,6 +1185,54 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  it('(z) [documented geometric limitation, non-blocking review follow-up] a stray non-address leftover line sitting inside the claimed Y/X band still gets swept into the continuation — purely geometric, no content check; regression tripwire for future geometry changes', () => {
+    // Defects 2 and 4's fixes made the continuation gather PURELY
+    // geometric (same Y-band + same left-x column, reserved BEFORE Pass
+    // B) — the old content-based regex gate (state abbreviation + ZIP
+    // shape) was deliberately dropped, since it was redundant with the
+    // Y/X bound and was also part of what let Pass B silently steal the
+    // row before this block got a turn (see the "BUG 4 FIX" note on the
+    // block above). One consequence: if a stray, non-address leftover
+    // line (e.g. a bare phone-number-shaped value with no "Phone" label
+    // of its own on ITS row) happens to land inside that exact Y/X band,
+    // it gets absorbed into prescriberAddress just like a real
+    // continuation line would — there's no content check to reject it.
+    // No real live-test capture has produced this shape (an unrelated
+    // left-column value between the location row and the next label,
+    // with no label of its own), so this is a documented, accepted
+    // geometric limitation rather than something fixed here. This test
+    // pins the CURRENT behavior so a future change to this gather can't
+    // silently drift without a test catching it.
+    const locationRow: OcrWord[] = [
+      { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
+      { text: '4930', x: 120, y: 207, w: 35, h: 11 },
+      { text: 'Overland', x: 160, y: 207, w: 69, h: 11 },
+      { text: 'Drive', x: 233, y: 207, w: 40, h: 11 }
+    ];
+    // Stray leftover row — a bare, phone-number-shaped value, NOT an
+    // address continuation, with no recognized label of its own — sitting
+    // in the same left-x column one row below the street line, well
+    // inside the (locationRow, Phone) Y-band.
+    const strayPhoneShapedRow: OcrWord[] = [{ text: '555-0001', x: 120, y: 227, w: 60, h: 11 }];
+    const phoneRow: OcrWord[] = [
+      { text: 'Phone', x: 66, y: 247, w: 39, h: 10 },
+      { text: '(555)', x: 120, y: 247, w: 31, h: 14 },
+      { text: '555-4488', x: 155, y: 247, w: 58, h: 11 }
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, locationRow, strayPhoneShapedRow, phoneRow]);
+    const record = parseEscriptOcr(ocr);
+
+    // Documents current (accepted) behavior: the stray row is swept in,
+    // and — since it doesn't match the trailing "<state><zip>" shape
+    // parseAddressBlob requires — the whole value falls back to a
+    // street-only Address with no city/state/zip parsed out of it.
+    expect(record.prescriber?.address).toEqual({ street: '4930 Overland Drive 555-0001' });
+    // The real Phone field, on its own recognized row further down,
+    // still resolves correctly and independently.
+    expect(record.prescriber?.phone).toBe('(555) 555-4488');
+  });
+
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
     it('renders a resolved field with label/value position and strategy', () => {
       const entries: FieldDiagnostic[] = [

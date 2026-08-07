@@ -104,6 +104,18 @@ function levenshtein(a: string, b: string): number {
 }
 
 /**
+ * INVARIANT: this comparator may only ever fail toward MORE yellow, never
+ * produce a false GREEN on two addresses that are actually different (the
+ * same stated philosophy as src/drug/index.ts). Every tolerance below is a
+ * single, narrow, DOCUMENTED exception to that invariant, not a general
+ * fuzzy-match — see the review history in this function's own git blame
+ * (round 1 shipped a plain <=1-edit-distance tolerance with no length
+ * constraint, which a review then caught actually producing false GREENs
+ * on real address pairs like "100 Meadow Ln" vs "100 Meadows Ln" and "400
+ * Wilson St" vs "400 Wilton St" — an insertion/deletion is a much more
+ * common way for two DIFFERENT street names to collide than a same-length
+ * substitution is).
+ *
  * True if two ALREADY street-suffix/directional-normalized street tokens
  * should be treated as the same word. Exact match always passes. Beyond
  * that, tolerance is intentionally narrow and asymmetric by token shape:
@@ -114,24 +126,41 @@ function levenshtein(a: string, b: string): number {
  *    identity-critical value): a single-character edit-distance pass on
  *    "4930" vs "4931" would silently treat two different house numbers
  *    as the same address.
- *  - Alphabetic-only tokens of length >=5 tolerate a Levenshtein distance
- *    of <=1 — covers real single-character OCR misreads (live-test bug:
- *    source "overtand" vs entered "Overland", 1 substitution) without
- *    opening the door on short words (directionals like "n"/"s", or
- *    short suffix-adjacent tokens) where a 1-edit fuzz would blur
- *    genuinely different words. A single uniform <=1 threshold is used
- *    at every length (rather than widening to <=2 for very long tokens)
- *    to keep the tolerance easy to reason about and equally conservative
- *    everywhere.
- *  - Anything else (mixed alnum, short tokens, differing shapes) falls
- *    back to exact match.
+ *  - Alphabetic-only tokens of length >=5, THE SAME LENGTH AS EACH OTHER,
+ *    tolerate a Levenshtein distance of exactly 1 — which, for two
+ *    EQUAL-length strings, can only ever be a single-character
+ *    SUBSTITUTION (an edit distance of 1 between equal-length strings is
+ *    never reachable via an insert or delete alone — either one changes
+ *    the length). This covers the real, reported single-character OCR
+ *    misread (live-test bug: source "overtand" vs entered "Overland" —
+ *    same length, one substitution) while deliberately EXCLUDING the
+ *    insertion/deletion class entirely: "meadow"(6) vs "meadows"(7) or
+ *    "parkway"(7) vs "parkways"(8) now fail the length check up front and
+ *    fall through to exact-match, because those are a much more common
+ *    and much more dangerous way for two genuinely different street names
+ *    to look almost identical than a same-length substitution is.
+ *  - RESIDUAL, KNOWINGLY ACCEPTED RISK: a substitution-only tolerance
+ *    still can't distinguish an OCR misread from an equal-length, one-
+ *    letter-different DIFFERENT street name — e.g. "Wilson" vs "Wilton"
+ *    (both real, plausible street names) still matches under this rule;
+ *    see the explicit test asserting that behavior in
+ *    tests/normalize-address.test.ts for the reasoning: address is a
+ *    yellow-tier, "patients move"/never-blocks-dispensing field with
+ *    patient identity actually carried by name+DOB elsewhere in the
+ *    engine, and the alternative (no street-name tolerance at all)
+ *    reproduces the exact daily false-yellow alarm fatigue this fix
+ *    exists to fix (the live-reported "overtand"/"Overland" bug). Zero
+ *    tolerance trades a rare false GREEN for a routine false YELLOW on
+ *    a field the product treats as advisory, not a hard identity check.
+ *  - Anything else (mixed alnum, short tokens, differing lengths,
+ *    differing shapes) falls back to exact match.
  */
 function streetTokensMatch(a: string, b: string): boolean {
   if (a === b) return true;
   const isNumeric = (t: string) => /^\d+$/.test(t);
   if (isNumeric(a) || isNumeric(b)) return false;
   const isAlpha = (t: string) => /^[a-z]+$/.test(t);
-  if (isAlpha(a) && isAlpha(b) && a.length >= 5 && b.length >= 5) {
+  if (isAlpha(a) && isAlpha(b) && a.length >= 5 && a.length === b.length) {
     return levenshtein(a, b) <= 1;
   }
   return false;
@@ -395,15 +424,23 @@ export function compareAddresses(
   // Street NAME text gets a NARROW edit-distance tolerance too (live-test
   // bug: source "overtand" vs entered "Overland" — a single-character OCR
   // misread — read as address_differs): alphabetic street-core tokens of
-  // length >=5 match if they're <=1 Levenshtein edit apart (see
-  // streetTokensMatch/streetBaseDiffers). Per this engine's stated
-  // philosophy elsewhere (see src/drug/index.ts's "can only ever fail
-  // toward MORE yellow, never a false green"), this tolerance is
-  // DELIBERATELY narrow and asymmetric: numeric tokens (house numbers,
-  // unit numbers, ZIPs already handled below) and state codes are never
-  // fuzzed — only alphabetic street-name words get the 1-edit allowance,
-  // so a permissive match can blur "Overland"/"overtand" but can never
-  // treat two different house numbers, unit numbers, or states as the
+  // length >=5, THE SAME LENGTH, match if they're <=1 Levenshtein edit
+  // apart — which for equal-length strings can only be a single-character
+  // SUBSTITUTION, never an insertion/deletion (see streetTokensMatch/
+  // streetBaseDiffers for the full invariant + accepted-risk writeup — an
+  // earlier, unconstrained (no length check) version of this tolerance
+  // was caught by review producing a false GREEN on "Meadow"/"Meadows";
+  // requiring equal length closes that insertion/deletion class entirely.
+  // A same-length, one-substitution collision like "Wilson"/"Wilton"
+  // remains a knowingly accepted residual risk — see streetTokensMatch).
+  // Per this engine's stated philosophy elsewhere (see src/drug/index.ts's
+  // "can only ever fail toward MORE yellow, never a false green"), this
+  // tolerance is DELIBERATELY narrow and asymmetric: numeric tokens (house
+  // numbers, unit numbers, ZIPs already handled below) and state codes
+  // are never fuzzed — only alphabetic street-name words get the
+  // 1-substitution allowance, so a permissive match can blur
+  // "Overland"/"overtand" but can never treat two different house
+  // numbers, unit numbers, or states as the
   // same one.
   const srcComponents = resolveComponents(src);
   const entComponents = resolveComponents(ent);
