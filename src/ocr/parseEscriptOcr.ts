@@ -1149,6 +1149,103 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       }
     }
 
+    // ---- Prescriber address wrapped continuation line(s) (branch brief
+    // bug 2 "right-column contamination of line reconstruction" and bug 4
+    // "prescriber address multi-line inconsistency") ----
+    // groupLines splits rows on a Y gap beyond ~avgH*0.6, so a wrapped
+    // "city, state zip" continuation (and, on some captures, a further
+    // wrapped row below THAT) below the "Prescriber Location:" value
+    // lands as its own leftover line(s), never consumed by Pass A/B on
+    // their own. Mirrors the sig-continuation gather immediately above —
+    // same ordering (run BEFORE Pass B, reserve consumedLeftover
+    // immediately) and same bound shape (label's own row Y .. next
+    // recognized label's row Y, same left-x column) — deliberately
+    // SCOPED to the 'location' key only (not applied to patientAddress,
+    // which the real capture never wraps).
+    //
+    // BUG 4 FIX: this block used to run AFTER Pass B (with a single-row,
+    // regex-gated lookup). Whenever some OTHER label on the same capture
+    // had no inline value of its own (e.g. a bare "Note" row), Pass B's
+    // pickFallback (grabs "next remaining leftover line, any column"
+    // once every label's own column-matched attempt has run) could steal
+    // the still-unclaimed city/state/zip continuation row for that
+    // unrelated field before this block ever got a turn — a real
+    // live-test capture reproduced exactly this (street line captured,
+    // city line silently dropped) even though the geometry was
+    // near-identical to a capture that worked fine. Running first and
+    // reserving consumedLeftover immediately (same fix already applied
+    // to sig above) makes the outcome deterministic regardless of what
+    // else on the capture is missing a value — this also means the
+    // continuation no longer needs the old "looks like an address tail"
+    // regex gate (state abbreviation + ZIP) to protect itself from Pass
+    // B: the Y-bound (next recognized label) and x-bound (same column as
+    // the location value) are the same protection sig's own continuation
+    // gather already relies on above.
+    //
+    // BUG 2 FIX: each candidate row is passed through trimColumnGap (the
+    // same generic MAX_VALUE_WORD_GAP_PX threshold used everywhere else
+    // in this module) BEFORE its text is read — previously this used the
+    // row's raw, untrimmed word list, so a continuation row whose Y band
+    // also happened to carry an unrelated right-column value (e.g. a
+    // wrapped "Agent name" value landing on the exact same OCR row as the
+    // address continuation — a real live-test capture, gap ~340px, well
+    // past the 150px threshold) had that far-column text appended
+    // straight into prescriberAddress. trimColumnGap truncates the row at
+    // the first oversized gap, so only the left-column segment (already
+    // confirmed, below, to start in the location value's own x column) is
+    // ever read; the far-column text is left behind as its own leftover
+    // line for whatever field (if any) actually owns it.
+    //
+    // KNOWN, ACCEPTED SCOPE LIMIT (mirrors the sig-continuation block
+    // immediately above, same constraint): this runs BEFORE Pass B, so
+    // `raw.location` is only set here when Pass A already resolved the
+    // location's own row INLINE (label + street value on the same
+    // physical OCR row). If a capture instead needs Pass B's block-
+    // column pairing to resolve "Location:" in the first place (a
+    // labels-block-then-values-block layout where the label and its
+    // value are NOT on the same row), raw.location is still undefined at
+    // this point and this whole block is a no-op for that capture — any
+    // wrapped 2nd/3rd address line on such a capture is not gathered.
+    // Every real live-test capture this branch was tuned against has
+    // "Location:" resolved inline (same shape sig always resolves in),
+    // so this hasn't been a reported gap; flagging it here rather than
+    // silently relying on that.
+    if (raw.location) {
+      const locationIdx = labelOrder.findIndex((k) => k === 'location');
+      const locationMeta = resolutionMeta.location;
+      if (locationIdx !== -1 && locationMeta) {
+        const locationRowY = (labelPositions[locationIdx] as { x: number; y: number; text: string }).y;
+        const valueX = (locationMeta.words[0] as OcrWord).x;
+        let nextLabelY = Number.POSITIVE_INFINITY;
+        for (const p of labelPositions) {
+          if (p.y > locationRowY + 1 && p.y < nextLabelY) nextLabelY = p.y;
+        }
+        const continuationTexts: string[] = [];
+        const continuationWordsAll: OcrWord[] = [];
+        for (let i = 0; i < leftoverLines.length; i++) {
+          if (consumedLeftover.has(i)) continue;
+          const line = leftoverLines[i] as OcrWord[];
+          const first = line[0] as OcrWord;
+          if (first.y <= locationRowY + 1 || first.y >= nextLabelY) continue;
+          if (Math.abs(first.x - valueX) > MAX_VALUE_WORD_GAP_PX / 2) continue;
+          consumedLeftover.add(i);
+          const trimmedLine = trimColumnGap(line);
+          const text = wordsToText(trimmedLine);
+          if (text) {
+            continuationTexts.push(text);
+            continuationWordsAll.push(...trimmedLine);
+          }
+        }
+        if (continuationTexts.length > 0) {
+          raw.location = [raw.location, ...continuationTexts].join(' ');
+          resolutionMeta.location = {
+            strategy: locationMeta.strategy,
+            words: [...locationMeta.words, ...continuationWordsAll]
+          };
+        }
+      }
+    }
+
     // ---- Pass B: labels-block-then-values-block fallback ----
     // Any label that had no inline value (a label-only line) is resolved
     // by GEOMETRY, not by ordinal position in a shared list — see class
@@ -1319,59 +1416,6 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     for (const group of unresolvedGroups) {
       const lineIdx = pickFallback();
       if (lineIdx !== null) assignGroup(group.groupKeys, lineIdx, group.groupIdxs);
-    }
-
-    // ---- Prescriber address wrapped 2nd line (branch brief "OCR address
-    // extraction", bug 2) ----
-    // groupLines splits rows on a Y gap beyond ~avgH*0.6, so a wrapped
-    // "city, state zip" continuation line rendered a row or two below the
-    // "Prescriber Location:" value (e.g. "4477 MOCKAVE PL" / "FAKEVILLE, KS
-    // 990047213") lands as its own leftover line, never consumed by Pass
-    // A/B. Deliberately SCOPED to the 'location' key only (not applied to
-    // patientAddress, which the real capture never wraps) and GEOMETRIC/
-    // PATTERN-based, not layout-hardcoded: bounded purely by (1) the
-    // location label's own row Y, (2) the next recognized label's row Y
-    // (whatever it happens to be — "Phone" here, but nothing about this
-    // logic assumes that literal label), (3) the continuation line sitting
-    // in the same left-x column as the location value, and (4) the
-    // continuation line's text itself looking like an address tail (a
-    // state abbreviation AND a 5- or 9-digit ZIP), not just any nearby
-    // line — a Note/Substitutions row two lines down must never be
-    // mistaken for an address continuation.
-    const ADDRESS_CONTINUATION_RE = /\b[A-Z]{2}\b/;
-    const ZIP_TAIL_RE = /\b\d{5}(\d{4})?\b/;
-    if (raw.location) {
-      const locationIdx = labelOrder.findIndex((k) => k === 'location');
-      const locationMeta = resolutionMeta.location;
-      if (locationIdx !== -1 && locationMeta) {
-        const locationRowY = (labelPositions[locationIdx] as { x: number; y: number; text: string }).y;
-        const valueX = (locationMeta.words[0] as OcrWord).x;
-        let nextLabelY = Number.POSITIVE_INFINITY;
-        for (const p of labelPositions) {
-          if (p.y > locationRowY + 1 && p.y < nextLabelY) nextLabelY = p.y;
-        }
-        let bestIdx = -1;
-        for (let i = 0; i < leftoverLines.length; i++) {
-          if (consumedLeftover.has(i)) continue;
-          const line = leftoverLines[i] as OcrWord[];
-          const first = line[0] as OcrWord;
-          if (first.y <= locationRowY + 1 || first.y >= nextLabelY) continue;
-          if (Math.abs(first.x - valueX) > MAX_VALUE_WORD_GAP_PX / 2) continue;
-          const text = wordsToText(line);
-          if (!ADDRESS_CONTINUATION_RE.test(text) || !ZIP_TAIL_RE.test(text)) continue;
-          bestIdx = i;
-          break;
-        }
-        if (bestIdx !== -1) {
-          consumedLeftover.add(bestIdx);
-          const continuationWords = leftoverLines[bestIdx] as OcrWord[];
-          raw.location = `${raw.location} ${wordsToText(continuationWords)}`;
-          resolutionMeta.location = {
-            strategy: locationMeta.strategy,
-            words: [...locationMeta.words, ...continuationWords]
-          };
-        }
-      }
     }
 
     // ---- Pattern anchors: NPI / NDC, independent of any label ----

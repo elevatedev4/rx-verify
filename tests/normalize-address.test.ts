@@ -203,4 +203,131 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('address_differs');
     });
   });
+
+  describe('glued OCR tokens (live-test bug: "suite205" vs "Suite 205")', () => {
+    it('is GREEN when the source has a glued letter+digit unit token and the entered side has it split', () => {
+      const r = compareAddresses(
+        { street: '330 Arkansas Blvd suite205', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '330 Arkansas Blvd Suite 205', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN for the exact live-test freeform repro: "...suite205..." vs "...Suite 205..."', () => {
+      const r = compareAddresses(
+        { street: '330 Arkansas Blvd suite205 Testville, KS 66049' },
+        { street: '330 Arkansas Blvd Suite 205 Testville, KS 66049' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('splits "apt3b" the same way ("apt 3b")', () => {
+      const r = compareAddresses(
+        { street: '42 Fictional Wells Ct apt3b', city: 'Sampleville', state: 'KS', zip: '54321' },
+        { street: '42 Fictional Wells Ct Apt 3b', city: 'Sampleville', state: 'KS', zip: '54321' }
+      );
+      expect(r.status).toBe('green');
+    });
+  });
+
+  describe('single-character street-name OCR misreads (live-test bug: "overtand" vs "Overland")', () => {
+    it('is GREEN for "4930 overtand Drive" vs "4930 Overland Dr" (1-edit street-name tolerance)', () => {
+      const r = compareAddresses(
+        { street: '4930 overtand Drive', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+
+    it('is GREEN for the exact live-test freeform repro', () => {
+      const r = compareAddresses(
+        { street: '4930 overtand Drive Testville, KS 66049' },
+        { street: '4930 Overland Dr Testville, KS 66049' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('SAFETY BOUND: house number is never fuzzed — "4930" vs "4931" still differs', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4931 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('SAFETY BOUND: state code is never fuzzed — "KS" vs "MO" still differs even with an otherwise-identical street', () => {
+      const r = compareAddresses(
+        { street: '4930 Overland Dr', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '4930 Overland Dr', city: 'Testville', state: 'MO', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('does not fuzz short (<5 char) alphabetic tokens — a genuinely different short street name still differs', () => {
+      const r = compareAddresses({ street: '10 Elm St' }, { street: '10 Elk St' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('does not fuzz two street names that are >1 edit apart', () => {
+      const r = compareAddresses({ street: '100 Fictional Rd' }, { street: '100 Completely Rd' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // BLOCKER FIX (reviewer round 1): the initial <=1-edit-distance
+    // tolerance had no length constraint, so it also matched an
+    // INSERTION/DELETION away, not just a same-length substitution —
+    // verified by the reviewer to produce a false GREEN on real,
+    // realistic street-name collisions ("Meadow"/"Meadows",
+    // "Wilson"/"Wilton"-shaped pairs are both common). Restricting the
+    // tolerance to SAME-LENGTH tokens closes the insertion/deletion class
+    // entirely (an edit distance of 1 between equal-length strings can
+    // only ever be a single-character substitution) while still fixing
+    // the originally reported bug ("overtand"/"Overland" — same length,
+    // one substitution). See streetTokensMatch's doc comment for the full
+    // invariant + residual-risk writeup.
+    it('does NOT fuzz an insertion/deletion — "Meadow" vs "Meadows" (different length) still differs', () => {
+      const r = compareAddresses(
+        { street: '100 Meadow Ln', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '100 Meadows Ln', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('does NOT fuzz an insertion/deletion — "Parkway" vs "Parkways" (different length) still differs', () => {
+      const r = compareAddresses({ street: '200 Fictional Parkway' }, { street: '200 Fictional Parkways' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // KNOWINGLY ACCEPTED TRADEOFF (documented, not a bug): a same-length,
+    // one-substitution collision between two DIFFERENT real street names
+    // ("Wilson" vs "Wilton") still matches under this tolerance — a
+    // substitution-only rule can't distinguish that shape from the
+    // "overtand"/"Overland" OCR-misread shape it exists to fix; they're
+    // the same edit. This is accepted rather than closed because: (1)
+    // address is a yellow-tier field that never blocks dispensing
+    // ("patients move" — see this file's top-of-module verdict
+    // philosophy) and never carries patient identity on its own (name +
+    // DOB do); (2) the alternative — zero street-name tolerance at all —
+    // regenerates the exact daily false-yellow alarm fatigue the
+    // "overtand"/"Overland" live-test bug this fix exists to stop. If
+    // this test ever needs to flip to yellow (i.e. the tolerance gets
+    // tightened further), that's a deliberate product decision to make,
+    // not an accidental regression — update this comment alongside it.
+    it('ACCEPTED TRADEOFF: same-length 1-substitution collision between two different real street names still matches — "Wilson" vs "Wilton"', () => {
+      const r = compareAddresses(
+        { street: '400 Wilson St', city: 'Testville', state: 'KS', zip: '66049' },
+        { street: '400 Wilton St', city: 'Testville', state: 'KS', zip: '66049' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match');
+    });
+  });
 });

@@ -39,11 +39,33 @@ export interface CompareResult {
   explanation: string;
 }
 
+/**
+ * Live-test bug (Will): source "42.5000 Grams" vs entered 42.5 "gm" read
+ * as a false RED unit_mismatch — "gm" (a real PioneerRx-side abbreviation
+ * for grams) wasn't in this table at all, so it fell through to being
+ * compared as its own literal unit "gm" against the source's normalized
+ * "g", even though the NUMERIC quantity matched exactly. Added "gm" as a
+ * gram synonym below; also added "mcg"/"microgram"/"micrograms" (the
+ * other common weight unit missing from this table entirely) while
+ * auditing for the same class of gap. Left OUT (per the "only
+ * unambiguous synonyms" instruction, when in doubt leave it out):
+ *  - "l"/"liter"/"liters" — not reported as a live bug and not audited
+ *    here; adding a new unit family isn't "closing a gap in an existing
+ *    one", so it's out of scope for this fix rather than a judgment call.
+ *  - "kg" — no live report, and folding it into "g" would be a real UNIT
+ *    conversion (x1000), not a spelling synonym; that's a different kind
+ *    of fix than this table performs anywhere else (every existing
+ *    mapping here is spelling-only, e.g. "tablet"->"tab", never a scaled
+ *    conversion like "kg"->"g"), so it's deliberately excluded.
+ *  - ea/each: already handled (folds to null / "no unit check at all",
+ *    not into this table) by EACH_UNITS below — not duplicated here.
+ */
 const UNIT_ALIASES: Record<string, string> = {
   tablet: 'tab', tablets: 'tab', tab: 'tab', tabs: 'tab',
   capsule: 'cap', capsules: 'cap', cap: 'cap', caps: 'cap',
   ml: 'ml', milliliter: 'ml', milliliters: 'ml',
-  g: 'g', gram: 'g', grams: 'g',
+  g: 'g', gram: 'g', grams: 'g', gm: 'g',
+  mcg: 'mcg', microgram: 'mcg', micrograms: 'mcg',
   gtt: 'gtt', gtts: 'gtt', drop: 'gtt', drops: 'gtt'
 };
 
