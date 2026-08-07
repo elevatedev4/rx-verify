@@ -519,7 +519,21 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         {
             _excludedFromCapture = false;
         }
+
+        // DIAGNOSTIC VISIBILITY (post-review fix): whether the exclusion
+        // actually took effect on THIS machine is exactly the thing a
+        // silent failure would hide — logged once at startup, unconditionally,
+        // so it's in every %TEMP%\VerifyOCR\ocr-*.log file regardless of
+        // whether anyone remembers to check. See IsExcludedFromCapture doc
+        // and RxLogFormatter's "Capture exclusion" line (surfaced again,
+        // per-refresh, in the "Copy logs" blob) for the other half of this.
+        OcrLogger.LogTiming(_excludedFromCapture
+            ? "Capture exclusion: active (WDA_EXCLUDEFROMCAPTURE)"
+            : "Capture exclusion: unavailable — using hide/show fallback");
     }
+
+    /// <summary>See IOverlayVisibilityController.IsExcludedFromCapture.</summary>
+    public bool IsExcludedFromCapture => _excludedFromCapture;
 
     /// <summary>
     /// Hides this window (Window.Hide() — Visibility=Hidden, same

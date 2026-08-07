@@ -32,4 +32,24 @@ public interface IOverlayVisibilityController
 
     /// <summary>Restores the overlay's visibility — always call this in a finally, even if the capture in between threw.</summary>
     void RestoreAfterCapture();
+
+    /// <summary>
+    /// True once SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) has
+    /// been applied to the overlay's HWND and confirmed successful — in
+    /// that state HideForCaptureAsync/RestoreAfterCapture are no-ops
+    /// (Windows itself omits the overlay from any GDI capture, so there's
+    /// nothing to hide/show), which is exactly the "freely-dragged
+    /// Topmost overlay overlapping the capture region" scenario this
+    /// class's doc above warns about — see MainWindow.xaml.cs
+    /// OnSourceInitialized. False means the hide/show fallback above is
+    /// the one actually running. Surfaced (not just an internal detail)
+    /// so OverlayViewModel can log/report which capture path was live —
+    /// see Ocr/OcrLogger.cs's startup log line and RxLogFormatter's
+    /// "Capture exclusion" line in the "Copy logs" blob, both added
+    /// specifically because a silent WDA_EXCLUDEFROMCAPTURE failure with
+    /// no visibility would let the overlay's own UI feed the OCR pass
+    /// with no obvious explanation — the same failure mode the class doc
+    /// above already calls out for the un-guarded case.
+    /// </summary>
+    bool IsExcludedFromCapture { get; }
 }

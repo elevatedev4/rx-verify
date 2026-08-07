@@ -219,6 +219,20 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     private readonly OcrFieldReader _ocrFieldReader;
     private readonly IOverlayVisibilityController? _overlayVisibilityController;
 
+    /// <summary>
+    /// Post-review diagnostic-visibility fix: whether SetWindowDisplayAffinity
+    /// (WDA_EXCLUDEFROMCAPTURE) is actually active on the live overlay
+    /// window right now — see IOverlayVisibilityController.
+    /// IsExcludedFromCapture. Read live (not cached) so it always
+    /// reflects MainWindow's current state; null only when no controller
+    /// is wired up at all (e.g. a test host with no live WPF window).
+    /// Threaded into every Timing: log line (RxLogFormatter.
+    /// FormatTimingLine) and the "Copy logs" blob so a troubleshoot
+    /// report always says which capture path (OS-level exclusion vs.
+    /// hide/show fallback) was actually live for that read.
+    /// </summary>
+    private bool? CurrentCaptureExclusionActive => _overlayVisibilityController?.IsExcludedFromCapture;
+
     /// <summary>The 3 categories, always in FieldCategories.Order — MainWindow.xaml binds directly to this.</summary>
     public ObservableCollection<CategoryViewModel> Categories { get; } = new();
 
@@ -437,7 +451,6 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // ocrResult already carries Stopwatch-timed capture/OCR splits
         // (see Uia/OcrFieldReader.cs ReadSourceFromOcrAsync) — feed them
         // into this refresh's timing breakdown rather than re-timing.
-        timing.CaptureMs = ocrResult.CaptureMs;
         timing.CaptureRegionResolveMs = ocrResult.CaptureRegionResolveMs;
         timing.CaptureHideWaitMs = ocrResult.CaptureHideWaitMs;
         timing.CaptureBlitMs = ocrResult.CaptureBlitMs;
@@ -499,7 +512,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         timing.RenderMs = renderStopwatch.ElapsedMilliseconds;
 
         StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt} ({timing.Phase1TotalMs}ms). Drug lookup running…";
-        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing));
+        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing, CurrentCaptureExclusionActive));
 
         // Phase 2: NOT awaited — runs in the background so this method
         // (and whatever caller triggered it, e.g. the Refresh button
@@ -566,7 +579,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         timing.RenderMs = renderStopwatch.ElapsedMilliseconds;
 
         StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt} ({timing.Phase1TotalMs}ms). Drug lookup running…";
-        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing));
+        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing, CurrentCaptureExclusionActive));
 
         // Phase 2: NOT awaited — see RefreshFromOcrAsync's identical note.
         _ = RefreshDrugFieldAsync(source, entered, generation, timing);
@@ -790,7 +803,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // RxLogFormatter.FormatTimingLine's "- phase2 +Nms" suffix).
         timing.Phase2Ms = phase2Ms;
         StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt}.";
-        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing));
+        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing, CurrentCaptureExclusionActive));
     }
 
     /// <summary>
@@ -881,6 +894,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             RawOcrText = LastOcrRawText,
             OcrWords = _lastOcrWords,
             Timing = _lastTiming,
+            CaptureExclusionActive = CurrentCaptureExclusionActive,
             Categories = Categories
                 .Select(c => new RxLogCategorySnapshot(
                     c.Name,

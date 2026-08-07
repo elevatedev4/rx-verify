@@ -33,6 +33,19 @@ public sealed class RxLogSnapshot
     /// <summary>Latency fix instrumentation (see RefreshTiming) — null before the first successful refresh, or once ClearCategories resets it. See RxLogFormatter.FormatTimingLine.</summary>
     public RefreshTiming? Timing { get; init; }
 
+    /// <summary>
+    /// Post-review diagnostic-visibility fix: whether SetWindowDisplayAffinity
+    /// (WDA_EXCLUDEFROMCAPTURE) is active on the live overlay right now —
+    /// see IOverlayVisibilityController.IsExcludedFromCapture and
+    /// OverlayViewModel.CurrentCaptureExclusionActive. Null only when no
+    /// visibility controller is wired up at all (e.g. a test host with no
+    /// live WPF window). Rendered next to the Timing line via
+    /// RxLogFormatter.FormatTimingLine so every "Copy logs" report says
+    /// which capture path (OS-level exclusion vs. the hide/show fallback)
+    /// was actually live.
+    /// </summary>
+    public bool? CaptureExclusionActive { get; init; }
+
     public IReadOnlyList<RxLogCategorySnapshot> Categories { get; init; } = Array.Empty<RxLogCategorySnapshot>();
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
 

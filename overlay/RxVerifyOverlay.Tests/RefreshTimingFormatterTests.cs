@@ -14,11 +14,15 @@ namespace RxVerifyOverlay.Tests;
 /// </summary>
 public class RefreshTimingFormatterTests
 {
+    // CaptureMs is NOT set here — it's a computed property (post-review
+    // fix: mirrors Phase1TotalMs, always CaptureRegionResolveMs +
+    // CaptureHideWaitMs + CaptureBlitMs = 3 + 0 + 53 = 56 below) so it
+    // can never drift from the three sub-parts. See
+    // CaptureMsIsAlwaysTheSumOfItsThreeSubParts.
     private static RefreshTiming MakeTiming(long? phase2Ms = null) => new()
     {
         AttachMs = 40,
         UiaMs = 55,
-        CaptureMs = 56,
         CaptureRegionResolveMs = 3,
         CaptureHideWaitMs = 0,
         CaptureBlitMs = 53,
@@ -80,19 +84,82 @@ public class RefreshTimingFormatterTests
     }
 
     [Fact]
-    public void CaptureMsSubPartsAreExposedIndependentlyOfTheAggregate()
+    public void CaptureMsSubPartsRoundTripIndependently()
     {
-        // CaptureMs is set independently by OcrFieldReader (region-resolve
-        // + hide-wait + blit summed there — see Uia/OcrFieldReader.cs
-        // ReadSourceFromOcrAsync), not derived from the sub-parts here, so
-        // RefreshTiming itself doesn't enforce the sum — this just proves
-        // the three sub-part properties round-trip independently of
-        // CaptureMs and of each other, which is what FormatTimingLine
-        // relies on to render the "[region + hidewait + blit]" breakdown.
         var timing = MakeTiming();
 
         Assert.Equal(3, timing.CaptureRegionResolveMs);
         Assert.Equal(0, timing.CaptureHideWaitMs);
         Assert.Equal(53, timing.CaptureBlitMs);
+    }
+
+    [Fact]
+    public void CaptureMsIsAlwaysTheSumOfItsThreeSubParts()
+    {
+        // Post-review fix: CaptureMs is a computed property (mirroring
+        // Phase1TotalMs) instead of a separately-set field, specifically
+        // so it can never drift from CaptureRegionResolveMs +
+        // CaptureHideWaitMs + CaptureBlitMs.
+        var timing = MakeTiming();
+
+        Assert.Equal(3 + 0 + 53, timing.CaptureMs);
+
+        timing.CaptureBlitMs = 999;
+
+        Assert.Equal(3 + 0 + 999, timing.CaptureMs);
+    }
+
+    [Fact]
+    public void FormatTimingLineAppendsExclusionOnWhenCaptureExclusionActiveIsTrue()
+    {
+        var timing = MakeTiming();
+
+        var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: true);
+
+        Assert.Equal(
+            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) · exclusion on",
+            line);
+    }
+
+    [Fact]
+    public void FormatTimingLineAppendsExclusionOffWhenCaptureExclusionActiveIsFalse()
+    {
+        var timing = MakeTiming();
+
+        var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: false);
+
+        Assert.Equal(
+            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) · exclusion off",
+            line);
+    }
+
+    [Fact]
+    public void FormatTimingLineOmitsExclusionTokenWhenCaptureExclusionActiveIsNull()
+    {
+        // Null means "no visibility controller wired up at all" (e.g. a
+        // test host with no live WPF window) — must NOT print a
+        // misleading "exclusion off", since that would read as "the
+        // fallback ran" when really nothing about capture-exclusion is
+        // known at all. This is also the default (all the other tests in
+        // this file call FormatTimingLine(timing) with no second arg),
+        // so it doubles as regression coverage that the parameter stays
+        // opt-in.
+        var timing = MakeTiming();
+
+        var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: null);
+
+        Assert.DoesNotContain("exclusion", line);
+    }
+
+    [Fact]
+    public void FormatTimingLineWithPhase2AndExclusionOrdersThePhase2SuffixFirst()
+    {
+        var timing = MakeTiming(phase2Ms: 240);
+
+        var line = RxLogFormatter.FormatTimingLine(timing, captureExclusionActive: true);
+
+        Assert.Equal(
+            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) - phase2 +240ms · exclusion on",
+            line);
     }
 }

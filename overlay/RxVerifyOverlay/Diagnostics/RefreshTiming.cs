@@ -22,9 +22,6 @@ public sealed class RefreshTiming
     /// <summary>Time to read the ENTERED-side fields via UIA (FieldReader.ReadEntered) — always UIA regardless of source method (Ocr vs Uia), see OverlayViewModel.RefreshAsync doc.</summary>
     public long UiaMs { get; set; }
 
-    /// <summary>Screen-region capture time (Ocr/EscriptImageCapture.cs, via OcrFieldReader) — the sum of CaptureRegionResolveMs + CaptureHideWaitMs + CaptureBlitMs. Zero on the Uia verification method, which never captures a screenshot.</summary>
-    public long CaptureMs { get; set; }
-
     /// <summary>
     /// Sub-part of CaptureMs (latency-fix diagnosis, branch brief item 2):
     /// time to resolve the screen rectangle to capture — a UIA tree walk
@@ -40,6 +37,17 @@ public sealed class RefreshTiming
 
     /// <summary>Sub-part of CaptureMs: the GDI Graphics.CopyFromScreen blit itself.</summary>
     public long CaptureBlitMs { get; set; }
+
+    /// <summary>
+    /// Screen-region capture time (Ocr/EscriptImageCapture.cs, via
+    /// OcrFieldReader). Post-review fix: computed (mirroring
+    /// Phase1TotalMs below) instead of separately set from
+    /// OcrCaptureResult.CaptureMs, so this can never drift from the sum
+    /// of the three sub-parts above. Zero on the Uia verification
+    /// method, which never captures a screenshot (all three sub-parts
+    /// stay at their default 0 in that path).
+    /// </summary>
+    public long CaptureMs => CaptureRegionResolveMs + CaptureHideWaitMs + CaptureBlitMs;
 
     /// <summary>Windows OCR recognition time (OcrFieldReader). Zero on the Uia verification method.</summary>
     public long OcrMs { get; set; }

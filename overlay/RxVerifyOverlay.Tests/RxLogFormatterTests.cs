@@ -58,7 +58,7 @@ public class RxLogFormatterTests
     [Fact]
     public void IncludesTimingLineWhenTimingWasCaptured()
     {
-        var timing = new RefreshTiming { AttachMs = 40, UiaMs = 55, CaptureMs = 56, OcrMs = 105, EngineMs = 180, RenderMs = 8, Phase2Ms = 240 };
+        var timing = new RefreshTiming { AttachMs = 40, UiaMs = 55, CaptureRegionResolveMs = 3, CaptureHideWaitMs = 0, CaptureBlitMs = 53, OcrMs = 105, EngineMs = 180, RenderMs = 8, Phase2Ms = 240 };
 
         var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(timing: timing));
 
@@ -295,7 +295,7 @@ public class RxLogFormatterTests
                 new("patientAddress", "Address", "Green", "100 SYNTH LN SPRINGFIELD IL", "100 Synth Ln Springfield, IL", "exact_match", "Address matches.")
             })
         };
-        var timing = new RefreshTiming { AttachMs = 100, UiaMs = 55, CaptureMs = 56, OcrMs = 105, EngineMs = 180, RenderMs = 8 };
+        var timing = new RefreshTiming { AttachMs = 100, UiaMs = 55, CaptureRegionResolveMs = 3, CaptureHideWaitMs = 0, CaptureBlitMs = 53, OcrMs = 105, EngineMs = 180, RenderMs = 8 };
 
         var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(categories: categories, timing: timing), redactPatient: true);
 

@@ -44,20 +44,35 @@ public static class RxLogFormatter
     /// out where a refresh's time actually went, e.g.
     /// "Timing: detect-&gt;render 612ms (attach 40 + uia 55 + capture 56
     /// [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render
-    /// 8) - phase2 +240ms". The bracketed region/hidewait/blit breakdown
-    /// of "capture" is a follow-up latency-fix diagnosis (branch brief
-    /// item 2): a >1000ms capture bucket on its own didn't say WHICH of
-    /// region-resolve (UIA walk), hide-wait (overlay hide + repaint
-    /// settle), or the GDI blit was the culprit — see
+    /// 8) - phase2 +240ms · exclusion on". The bracketed region/hidewait/
+    /// blit breakdown of "capture" is a follow-up latency-fix diagnosis
+    /// (branch brief item 2): a >1000ms capture bucket on its own didn't
+    /// say WHICH of region-resolve (UIA walk), hide-wait (overlay hide +
+    /// repaint settle), or the GDI blit was the culprit — see
     /// Ocr/EscriptImageCapture.cs / Uia/OcrFieldReader.cs / MainWindow.
     /// xaml.cs for the region-cache and SetWindowDisplayAffinity fixes
-    /// that target the first two. Shared by Ocr/OcrLogger.cs's per-day
-    /// log file and the "Copy logs" blob (BuildLogBlob below) so the two
-    /// surfaces can never drift on format. No patient/prescriber/drug
-    /// content — pure millisecond counts — so unlike the rest of this
-    /// file's redaction machinery, this needs none.
+    /// that target the first two.
+    ///
+    /// The trailing "· exclusion on|off" (post-review diagnostic-
+    /// visibility fix, <paramref name="captureExclusionActive"/>, omitted
+    /// entirely when null) says whether SetWindowDisplayAffinity(
+    /// WDA_EXCLUDEFROMCAPTURE) is the reason hide-wait is ~0, or whether
+    /// the hide/show fallback ran instead — see
+    /// IOverlayVisibilityController.IsExcludedFromCapture. This exists
+    /// because a SILENT exclusion failure, combined with the
+    /// documented "pharmacist drags the Topmost overlay over the capture
+    /// region" scenario (see Ocr/IOverlayVisibilityController.cs class
+    /// doc), would feed the overlay's own UI into OCR with no obvious
+    /// explanation — this line is what lets a troubleshoot report prove
+    /// which capture path was actually live for that read.
+    ///
+    /// Shared by Ocr/OcrLogger.cs's per-day log file and the "Copy logs"
+    /// blob (BuildLogBlob below) so the two surfaces can never drift on
+    /// format. No patient/prescriber/drug content — pure millisecond
+    /// counts and an on/off flag — so unlike the rest of this file's
+    /// redaction machinery, this needs none.
     /// </summary>
-    public static string FormatTimingLine(RefreshTiming timing)
+    public static string FormatTimingLine(RefreshTiming timing, bool? captureExclusionActive = null)
     {
         var line = $"Timing: detect->render {timing.Phase1TotalMs}ms " +
                    $"(attach {timing.AttachMs} + uia {timing.UiaMs} + capture {timing.CaptureMs} " +
@@ -67,6 +82,11 @@ public static class RxLogFormatter
         if (timing.Phase2Ms is { } phase2Ms)
         {
             line += $" - phase2 +{phase2Ms}ms";
+        }
+
+        if (captureExclusionActive is { } exclusionActive)
+        {
+            line += $" · exclusion {(exclusionActive ? "on" : "off")}";
         }
 
         return line;
@@ -96,7 +116,7 @@ public static class RxLogFormatter
         sb.AppendLine($"Status: {s.StatusMessage}");
         if (s.Timing is not null)
         {
-            sb.AppendLine(FormatTimingLine(s.Timing));
+            sb.AppendLine(FormatTimingLine(s.Timing, s.CaptureExclusionActive));
         }
         sb.AppendLine();
 
