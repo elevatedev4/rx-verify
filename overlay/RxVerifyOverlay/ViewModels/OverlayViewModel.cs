@@ -438,6 +438,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // (see Uia/OcrFieldReader.cs ReadSourceFromOcrAsync) — feed them
         // into this refresh's timing breakdown rather than re-timing.
         timing.CaptureMs = ocrResult.CaptureMs;
+        timing.CaptureRegionResolveMs = ocrResult.CaptureRegionResolveMs;
+        timing.CaptureHideWaitMs = ocrResult.CaptureHideWaitMs;
+        timing.CaptureBlitMs = ocrResult.CaptureBlitMs;
         timing.OcrMs = ocrResult.OcrMs;
 
         LastOcrRawText = ocrResult.RawText;

@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using RxVerifyOverlay.Engine;
@@ -37,6 +39,23 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // poll timer above is unchanged and remains the safety net if this
     // hook fails to install (TryStart() returns false) or never fires.
     private readonly TitleChangeWatcher _titleChangeWatcher;
+
+    // CAPTURE-EXCLUSION (latency fix — see HideForCaptureAsync/
+    // RestoreAfterCapture below). True once SetWindowDisplayAffinity(
+    // WDA_EXCLUDEFROMCAPTURE) has been applied to this window's HWND and
+    // returned success, meaning Windows itself now omits this window
+    // from any GDI screen capture (Graphics.CopyFromScreen included) —
+    // so the hide -&gt; wait -&gt; capture -&gt; show round-trip is no longer
+    // needed at all. Starts false (the safe default: behave exactly like
+    // before) until OnSourceInitialized runs and either confirms it or
+    // leaves this false as the fallback for an unsupported OS.
+    private bool _excludedFromCapture;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+
+    /// <summary>Requires Windows 10 2004+ (build 19041) — this project already targets 10.0.19041 (see the .csproj TargetFramework), so any machine that can run this build supports it. OnSourceInitialized still treats a false/failed call as "unsupported" and falls back to the hide/show path, in case a future build ever targets an older OS.</summary>
+    private const uint WdaExcludeFromCapture = 0x00000011;
 
     // Defensive suppression flag, same pattern as _autoRefreshTimer's
     // null guard below: InitializeComponent() can raise Checked for the
@@ -175,6 +194,13 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // treated as an error condition.
         _titleChangeWatcher = new TitleChangeWatcher(() => _ = SafeWatchAsync());
         _titleChangeWatcher.TryStart();
+
+        // CAPTURE-EXCLUSION (latency fix, branch brief item 4): applied
+        // as soon as the window's native HWND exists (SourceInitialized,
+        // which WPF always raises before Loaded — see the ordering this
+        // relies on below), so it's active before the very first
+        // SafeRefreshAsync call from Loaded can run a capture.
+        SourceInitialized += OnSourceInitialized;
 
         // First read on launch so the panel isn't empty while the
         // pharmacist decides whether to enable auto-watch.
@@ -464,6 +490,38 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // ------------------------------------------------------------------
 
     /// <summary>
+    /// Latency-fix diagnosis (branch brief item 4): live captures showed
+    /// the "capture" timing bucket occasionally spiking past 1000ms, and
+    /// this hide/show round-trip was the prime suspect — Hide()/Show()
+    /// on a Topmost window aren't guaranteed cheap or fast, especially
+    /// when the event-driven TitleChangeWatcher can trigger refreshes
+    /// back-to-back faster than the old 250ms poll ever could, queuing
+    /// up overlapping hide/show cycles on the Dispatcher. Applies
+    /// SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) to this window's
+    /// HWND as soon as it exists (SourceInitialized — Loaded, which
+    /// triggers the first capture, always fires after this per WPF's
+    /// documented lifecycle order) so Windows itself omits this window
+    /// from any GDI capture going forward; HideForCaptureAsync/
+    /// RestoreAfterCapture below then skip the round-trip entirely
+    /// rather than needing it at all. Any failure (unsupported OS — pre
+    /// Windows 10 2004, see WdaExcludeFromCapture's doc) leaves
+    /// _excludedFromCapture false, and the existing hide/show path below
+    /// runs completely unchanged as the fallback.
+    /// </summary>
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            _excludedFromCapture = SetWindowDisplayAffinity(hwnd, WdaExcludeFromCapture);
+        }
+        catch
+        {
+            _excludedFromCapture = false;
+        }
+    }
+
+    /// <summary>
     /// Hides this window (Window.Hide() — Visibility=Hidden, same
     /// mechanism WPF already uses, so no new behavior to reason about)
     /// and then waits for the screen area it was covering to actually
@@ -475,17 +533,25 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// overlay's own UI still being on screen when CaptureRegion runs,
     /// short enough (~30ms) that the hide/show round-trip isn't a
     /// noticeable flicker to the pharmacist.
+    ///
+    /// A no-op when _excludedFromCapture is true (see OnSourceInitialized)
+    /// — Windows already omits this window from the capture, so there's
+    /// nothing to hide.
     /// </summary>
     public async Task HideForCaptureAsync()
     {
+        if (_excludedFromCapture) return;
+
         Hide();
         await Dispatcher.Yield(DispatcherPriority.Render);
         await Task.Delay(30);
     }
 
-    /// <summary>Restores the overlay after a capture — called from OcrFieldReader's finally, so this always runs even if the capture itself threw.</summary>
+    /// <summary>Restores the overlay after a capture — called from OcrFieldReader's finally, so this always runs even if the capture itself threw. A no-op when _excludedFromCapture is true (HideForCaptureAsync never hid the window in the first place).</summary>
     public void RestoreAfterCapture()
     {
+        if (_excludedFromCapture) return;
+
         Show();
     }
 }

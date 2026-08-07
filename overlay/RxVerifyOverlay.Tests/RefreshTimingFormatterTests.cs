@@ -19,6 +19,9 @@ public class RefreshTimingFormatterTests
         AttachMs = 40,
         UiaMs = 55,
         CaptureMs = 56,
+        CaptureRegionResolveMs = 3,
+        CaptureHideWaitMs = 0,
+        CaptureBlitMs = 53,
         OcrMs = 105,
         EngineMs = 180,
         RenderMs = 8,
@@ -48,7 +51,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 + ocr 105 + engine 180 + render 8)",
+            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8)",
             line);
     }
 
@@ -60,7 +63,7 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing);
 
         Assert.Equal(
-            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 + ocr 105 + engine 180 + render 8) - phase2 +240ms",
+            "Timing: detect->render 444ms (attach 40 + uia 55 + capture 56 [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render 8) - phase2 +240ms",
             line);
     }
 
@@ -72,7 +75,24 @@ public class RefreshTimingFormatterTests
         var line = RxLogFormatter.FormatTimingLine(timing);
 
         Assert.Equal(
-            "Timing: detect->render 0ms (attach 0 + uia 0 + capture 0 + ocr 0 + engine 0 + render 0)",
+            "Timing: detect->render 0ms (attach 0 + uia 0 + capture 0 [region 0 + hidewait 0 + blit 0] + ocr 0 + engine 0 + render 0)",
             line);
+    }
+
+    [Fact]
+    public void CaptureMsSubPartsAreExposedIndependentlyOfTheAggregate()
+    {
+        // CaptureMs is set independently by OcrFieldReader (region-resolve
+        // + hide-wait + blit summed there — see Uia/OcrFieldReader.cs
+        // ReadSourceFromOcrAsync), not derived from the sub-parts here, so
+        // RefreshTiming itself doesn't enforce the sum — this just proves
+        // the three sub-part properties round-trip independently of
+        // CaptureMs and of each other, which is what FormatTimingLine
+        // relies on to render the "[region + hidewait + blit]" breakdown.
+        var timing = MakeTiming();
+
+        Assert.Equal(3, timing.CaptureRegionResolveMs);
+        Assert.Equal(0, timing.CaptureHideWaitMs);
+        Assert.Equal(53, timing.CaptureBlitMs);
     }
 }

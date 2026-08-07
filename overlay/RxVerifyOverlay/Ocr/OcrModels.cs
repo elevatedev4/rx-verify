@@ -66,7 +66,19 @@ public sealed class OcrCaptureResult
 {
     public IReadOnlyList<OcrWord> Words { get; init; } = Array.Empty<OcrWord>();
     public string RawText { get; init; } = "";
+
+    /// <summary>Sum of CaptureRegionResolveMs + CaptureHideWaitMs + CaptureBlitMs — see those three for the breakdown (latency-fix diagnosis: this used to be the ONLY capture number, and only covered hide-wait+blit, silently excluding region-resolve — see OcrFieldReader.ReadSourceFromOcrAsync).</summary>
     public long CaptureMs { get; init; }
+
+    /// <summary>Time to resolve the screen rectangle to capture (Ocr/EscriptImageCapture.cs ResolveCaptureRegion) — a UIA tree walk on a cache miss, near-zero on a cache hit (see Ocr/CaptureRegionCache.cs).</summary>
+    public long CaptureRegionResolveMs { get; init; }
+
+    /// <summary>Time spent in IOverlayVisibilityController.HideForCaptureAsync — the overlay's hide + repaint-settle wait before the screen blit. Zero when the overlay was excluded from capture at the OS level (SetWindowDisplayAffinity) and the hide/show round-trip was skipped entirely — see MainWindow.xaml.cs.</summary>
+    public long CaptureHideWaitMs { get; init; }
+
+    /// <summary>Time for the actual GDI Graphics.CopyFromScreen blit (Ocr/EscriptImageCapture.cs CaptureRegion).</summary>
+    public long CaptureBlitMs { get; init; }
+
     public long OcrMs { get; init; }
     public long TotalMs { get; init; }
     public int CharCount { get; init; }

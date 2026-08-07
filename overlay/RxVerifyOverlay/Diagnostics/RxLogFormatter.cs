@@ -42,18 +42,26 @@ public static class RxLogFormatter
     /// Latency fix (Will's field report — verdicts noticeably slower
     /// than the OCR pipeline alone suggested): one compact line spelling
     /// out where a refresh's time actually went, e.g.
-    /// "Timing: detect-&gt;render 612ms (attach 40 + uia 55 + capture 56 +
-    /// ocr 105 + engine 180 + render 8) - phase2 +240ms". Shared by
-    /// Ocr/OcrLogger.cs's per-day log file and the "Copy logs" blob
-    /// (BuildLogBlob below) so the two surfaces can never drift on
-    /// format. No patient/prescriber/drug content — pure millisecond
-    /// counts — so unlike the rest of this file's redaction machinery,
-    /// this needs none.
+    /// "Timing: detect-&gt;render 612ms (attach 40 + uia 55 + capture 56
+    /// [region 3 + hidewait 0 + blit 53] + ocr 105 + engine 180 + render
+    /// 8) - phase2 +240ms". The bracketed region/hidewait/blit breakdown
+    /// of "capture" is a follow-up latency-fix diagnosis (branch brief
+    /// item 2): a >1000ms capture bucket on its own didn't say WHICH of
+    /// region-resolve (UIA walk), hide-wait (overlay hide + repaint
+    /// settle), or the GDI blit was the culprit — see
+    /// Ocr/EscriptImageCapture.cs / Uia/OcrFieldReader.cs / MainWindow.
+    /// xaml.cs for the region-cache and SetWindowDisplayAffinity fixes
+    /// that target the first two. Shared by Ocr/OcrLogger.cs's per-day
+    /// log file and the "Copy logs" blob (BuildLogBlob below) so the two
+    /// surfaces can never drift on format. No patient/prescriber/drug
+    /// content — pure millisecond counts — so unlike the rest of this
+    /// file's redaction machinery, this needs none.
     /// </summary>
     public static string FormatTimingLine(RefreshTiming timing)
     {
         var line = $"Timing: detect->render {timing.Phase1TotalMs}ms " +
-                   $"(attach {timing.AttachMs} + uia {timing.UiaMs} + capture {timing.CaptureMs} + " +
+                   $"(attach {timing.AttachMs} + uia {timing.UiaMs} + capture {timing.CaptureMs} " +
+                   $"[region {timing.CaptureRegionResolveMs} + hidewait {timing.CaptureHideWaitMs} + blit {timing.CaptureBlitMs}] + " +
                    $"ocr {timing.OcrMs} + engine {timing.EngineMs} + render {timing.RenderMs})";
 
         if (timing.Phase2Ms is { } phase2Ms)

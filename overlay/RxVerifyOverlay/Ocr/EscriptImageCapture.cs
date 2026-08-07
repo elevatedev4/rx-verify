@@ -60,26 +60,49 @@ namespace RxVerifyOverlay.Ocr;
 public static class EscriptImageCapture
 {
     /// <summary>
+    /// REGION CACHE (latency fix, branch brief item 3): auto-detection
+    /// (steps 2-4 below) walks the UIA tree, which is real work — caching
+    /// its result per (window handle + Rx + window bounds) means only
+    /// the FIRST refresh after attaching a given Rx pays that cost;
+    /// every subsequent refresh of the same on-screen Rx (the common
+    /// case under auto-watch, which can now fire far more often than the
+    /// old 250ms poll — see Uia/TitleChangeWatcher.cs) reuses the cached
+    /// rect instead. See Ocr/CaptureRegionCache.cs for the invalidation
+    /// rule and its one documented gap. Deliberately a single static
+    /// instance: this overlay only ever tracks one attached PioneerRx
+    /// window at a time, so there's nothing to key beyond the signature
+    /// itself.
+    /// </summary>
+    private static readonly CaptureRegionCache RegionCache = new();
+
+    /// <summary>
     /// Resolves the screen rectangle to capture, in this priority order:
     ///   1. settings.UseExplicitCaptureRegion — an explicit L/T/W/H the
     ///      owner typed into Engine settings, used verbatim. This remains
     ///      the reliable escape hatch if auto-detection (steps 2-3) still
     ///      includes chrome, or ever mis-detects, on Will's actual screen.
-    ///   2. The Escript tree control's live BoundingRectangle
+    ///      Never cached (already O(1), and settings can change live).
+    ///   2. REGION CACHE hit (see RegionCache field doc) — same window
+    ///      handle + Rx number + window bounds as the last resolve, so
+    ///      the UIA walk below is skipped entirely and the previously
+    ///      resolved rect is reused as-is.
+    ///   3. The Escript tree control's live BoundingRectangle
     ///      (FieldMap.EscriptTreeAutomationId, "ux10Dot6Escript") — the
     ///      DATA pane only, no tab strip. Only usable if that tab has
     ///      been opened at least once (so the control exists in the UIA
     ///      tree) AND is genuinely the on-screen tab right now — see
     ///      class doc "OFFSCREEN GUARD".
-    ///   3. The center Escript pane's live BoundingRectangle
+    ///   4. The center Escript pane's live BoundingRectangle
     ///      (cntTabControl) — v0's default, INCLUDES the tab strip/
-    ///      toolbar row; kept as the fallback for step 2's gap (control
+    ///      toolbar row; kept as the fallback for step 3's gap (control
     ///      not found, OR found but offscreen/unverifiable).
-    ///   4. window.WindowBounds (the whole PioneerRx window) as a last
+    ///   5. window.WindowBounds (the whole PioneerRx window) as a last
     ///      resort if neither control can be found this call.
     /// Never throws — a UIA read failure at any step just falls through
     /// to the next, since a stale/wider region is a much less confusing
-    /// failure mode than crashing the refresh.
+    /// failure mode than crashing the refresh. A freshly-resolved,
+    /// non-empty rect from steps 3-5 is cached (keyed on the signature
+    /// current at call time) before being returned.
     /// </summary>
     public static Rectangle ResolveCaptureRegion(PioneerRxWindow window, OverlaySettings settings)
     {
@@ -89,6 +112,24 @@ public static class EscriptImageCapture
                 settings.CaptureRegionWidth, settings.CaptureRegionHeight);
         }
 
+        var signature = new CaptureWindowSignature(window.NativeWindowHandle, window.RxNumber, window.WindowBounds);
+        if (RegionCache.TryGet(signature, out var cachedRegion))
+        {
+            return cachedRegion;
+        }
+
+        var resolved = ResolveCaptureRegionUncached(window);
+        if (resolved.Width > 0 && resolved.Height > 0)
+        {
+            RegionCache.Set(signature, resolved);
+        }
+
+        return resolved;
+    }
+
+    /// <summary>The actual UIA-walk-based auto-detection (steps 3-5 of ResolveCaptureRegion's doc) — factored out so the cache check/populate above stays easy to read.</summary>
+    private static Rectangle ResolveCaptureRegionUncached(PioneerRxWindow window)
+    {
         var walker = new UiaTreeWalker(window.WindowElement);
 
         // requireOnscreen: true — see class doc "OFFSCREEN GUARD". Only

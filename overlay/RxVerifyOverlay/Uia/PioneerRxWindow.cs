@@ -31,12 +31,38 @@ public sealed class PioneerRxWindow : IDisposable
     public AutomationElement WindowElement { get; }
     public Rectangle WindowBounds { get; }
 
+    /// <summary>
+    /// Native HWND of this window, or IntPtr.Zero if it couldn't be read
+    /// (mirrors SafeNativeHandle's existing best-effort pattern below).
+    /// Read once at attach time — combined with <see cref="RxNumber"/>
+    /// and WindowBounds, this is the cache key EscriptImageCapture.
+    /// ResolveCaptureRegion uses to avoid re-walking the UIA tree on
+    /// every refresh (see Ocr/CaptureRegionCache.cs).
+    /// </summary>
+    public IntPtr NativeWindowHandle { get; }
+
+    /// <summary>
+    /// The same title-derived Rx identifier ScreenSignature/
+    /// ExtractRxNumber compute below, captured once at attach time so
+    /// callers (EscriptImageCapture's region cache) don't need a second
+    /// UIA title read of their own.
+    /// </summary>
+    public string? RxNumber { get; }
+
     private PioneerRxWindow(AutomationBase automation, AutomationElement windowElement, Application? application)
     {
         _automation = automation;
         WindowElement = windowElement;
         _application = application;
         WindowBounds = SafeBounds(windowElement);
+        NativeWindowHandle = SafeNativeHandle(windowElement);
+        RxNumber = ExtractRxNumber(SafeName(windowElement));
+    }
+
+    private static string SafeName(AutomationElement el)
+    {
+        try { return el.Name ?? ""; }
+        catch { return ""; }
     }
 
     private static Rectangle SafeBounds(AutomationElement el)

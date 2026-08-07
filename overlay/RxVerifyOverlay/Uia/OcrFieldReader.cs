@@ -68,7 +68,9 @@ public sealed class OcrFieldReader
         var totalStopwatch = Stopwatch.StartNew();
         try
         {
+            var regionResolveStopwatch = Stopwatch.StartNew();
             var region = EscriptImageCapture.ResolveCaptureRegion(window, settings);
+            var regionResolveMs = regionResolveStopwatch.ElapsedMilliseconds;
             if (region.Width <= 0 || region.Height <= 0)
             {
                 return new OcrCaptureResult
@@ -78,9 +80,9 @@ public sealed class OcrFieldReader
                 };
             }
 
-            var captureStopwatch = Stopwatch.StartNew();
-            using var bitmap = await CaptureRegionGuardedAsync(region, overlayVisibilityController);
-            var captureMs = captureStopwatch.ElapsedMilliseconds;
+            var (bitmapResult, hideWaitMs, blitMs) = await CaptureRegionGuardedAsync(region, overlayVisibilityController);
+            using var bitmap = bitmapResult;
+            var captureMs = regionResolveMs + hideWaitMs + blitMs;
 
             var ocrStopwatch = Stopwatch.StartNew();
             var ocrText = await _ocrEngine.RecognizeAsync(bitmap);
@@ -97,6 +99,9 @@ public sealed class OcrFieldReader
                 Words = ocrText.Words,
                 RawText = ocrText.Text,
                 CaptureMs = captureMs,
+                CaptureRegionResolveMs = regionResolveMs,
+                CaptureHideWaitMs = hideWaitMs,
+                CaptureBlitMs = blitMs,
                 OcrMs = ocrMs,
                 TotalMs = totalMs,
                 CharCount = ocrText.Text.Length
@@ -118,18 +123,34 @@ public sealed class OcrFieldReader
     /// inlined in ReadSourceFromOcrAsync) so the finally/restore-even-on-
     /// exception guarantee is easy to see is unconditional, mirroring
     /// Uia/FieldReader.cs ReadSource's tab select/read/restore pattern.
+    ///
+    /// Returns hide-wait and blit elapsed time separately (latency-fix
+    /// diagnosis, branch brief item 2) so ReadSourceFromOcrAsync can log
+    /// them as distinct sub-parts of the "capture" bucket instead of one
+    /// opaque number. HideWaitMs is 0 when overlayVisibilityController is
+    /// null (no guard requested) OR when MainWindow's
+    /// SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) succeeded at
+    /// startup, in which case HideForCaptureAsync/RestoreAfterCapture are
+    /// no-ops — see MainWindow.xaml.cs.
     /// </summary>
-    private static async Task<Bitmap> CaptureRegionGuardedAsync(Rectangle region, IOverlayVisibilityController? overlayVisibilityController)
+    private static async Task<(Bitmap Bitmap, long HideWaitMs, long BlitMs)> CaptureRegionGuardedAsync(Rectangle region, IOverlayVisibilityController? overlayVisibilityController)
     {
         if (overlayVisibilityController is null)
         {
-            return EscriptImageCapture.CaptureRegion(region);
+            var unguardedStopwatch = Stopwatch.StartNew();
+            var unguardedBitmap = EscriptImageCapture.CaptureRegion(region);
+            return (unguardedBitmap, 0, unguardedStopwatch.ElapsedMilliseconds);
         }
 
+        var hideWaitStopwatch = Stopwatch.StartNew();
         await overlayVisibilityController.HideForCaptureAsync();
+        var hideWaitMs = hideWaitStopwatch.ElapsedMilliseconds;
+
+        var blitStopwatch = Stopwatch.StartNew();
         try
         {
-            return EscriptImageCapture.CaptureRegion(region);
+            var bitmap = EscriptImageCapture.CaptureRegion(region);
+            return (bitmap, hideWaitMs, blitStopwatch.ElapsedMilliseconds);
         }
         finally
         {
