@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
@@ -310,6 +311,19 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private IReadOnlyList<OcrWord> _lastOcrWords = Array.Empty<OcrWord>();
 
+    /// <summary>
+    /// Latency fix instrumentation (see Diagnostics/RefreshTiming.cs) for
+    /// the most recent refresh — null before the first successful
+    /// refresh, or after ClearCategories resets it. Read by
+    /// BuildCurrentLogBlob for the "Copy logs" blob; the OcrLogger.
+    /// LogTiming call happens as each phase completes (see
+    /// RefreshFromOcrAsync/RefreshFromUiaAsync/ApplyDrugResult) rather
+    /// than reading this field, since the persistent log is append-only
+    /// and this field mutates in place (Phase 2 fills in Phase2Ms on the
+    /// SAME instance Phase 1 already logged from).
+    /// </summary>
+    private RefreshTiming? _lastTiming;
+
     public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
     {
         _engineClient = engineClient;
@@ -356,7 +370,18 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     {
         var generation = ++_refreshGeneration;
 
+        // Latency fix: end-to-end timing breakdown for this refresh (see
+        // Diagnostics/RefreshTiming.cs). One instance per refresh,
+        // mutated in place as each stage completes, and later mutated
+        // AGAIN (Phase2Ms) by ApplyDrugResult once the background drug
+        // lookup resolves — see that method's doc.
+        var timing = new RefreshTiming();
+        _lastTiming = timing;
+
+        var attachStopwatch = Stopwatch.StartNew();
         using var window = PioneerRxWindow.TryAttach();
+        timing.AttachMs = attachStopwatch.ElapsedMilliseconds;
+
         if (window is null)
         {
             _lastRxWindowTitle = null;
@@ -375,8 +400,10 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             // ENTERED side unchanged regardless of Method: still
             // UIA/AutomationId via FieldReader (see Uia/FieldReader.cs
             // ReadEntered).
+            var uiaStopwatch = Stopwatch.StartNew();
             reader = new FieldReader(window);
             entered = reader.ReadEntered();
+            timing.UiaMs = uiaStopwatch.ElapsedMilliseconds;
         }
         catch (Exception ex)
         {
@@ -392,20 +419,26 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // behavior, pre-VerifyOCR).
         if (_settings.Method == VerificationMethod.Uia)
         {
-            await RefreshFromUiaAsync(reader, entered, generation);
+            await RefreshFromUiaAsync(reader, entered, generation, timing);
         }
         else
         {
-            await RefreshFromOcrAsync(window, entered, generation);
+            await RefreshFromOcrAsync(window, entered, generation, timing);
         }
     }
 
     /// <summary>OCR source path — screen-region capture + local OCR, NO tab switch. Replaces FieldReader.ReadSource()'s Escript-tab UIA-tree walk entirely. See Uia/OcrFieldReader.cs.</summary>
-    private async Task RefreshFromOcrAsync(PioneerRxWindow window, PrescriptionRecord entered, int generation)
+    private async Task RefreshFromOcrAsync(PioneerRxWindow window, PrescriptionRecord entered, int generation, RefreshTiming timing)
     {
         var ocrResult = await _ocrFieldReader.ReadSourceFromOcrAsync(window, _settings, _overlayVisibilityController);
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting OCR
+
+        // ocrResult already carries Stopwatch-timed capture/OCR splits
+        // (see Uia/OcrFieldReader.cs ReadSourceFromOcrAsync) — feed them
+        // into this refresh's timing breakdown rather than re-timing.
+        timing.CaptureMs = ocrResult.CaptureMs;
+        timing.OcrMs = ocrResult.OcrMs;
 
         LastOcrRawText = ocrResult.RawText;
         OcrStatusText = ocrResult.Error is not null
@@ -445,7 +478,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // Phase 1: fast pass, skips the drug lookup entirely. Sends the
         // raw OCR words straight to the engine (v1) — see
         // Engine/EngineClient.cs VerifyAsync(IReadOnlyList&lt;OcrWord&gt;, ...).
+        var engineStopwatch = Stopwatch.StartNew();
         var fastResult = await _engineClient.VerifyAsync(ocrWords, entered, skipDrugLookup: true);
+        timing.EngineMs = engineStopwatch.ElapsedMilliseconds;
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
 
@@ -455,20 +490,24 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
+        var renderStopwatch = Stopwatch.StartNew();
         PopulateRows(fastResult);
         UpdateSummary(fastResult.Summary);
-        StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}. Drug lookup running…";
+        timing.RenderMs = renderStopwatch.ElapsedMilliseconds;
+
+        StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt} ({timing.Phase1TotalMs}ms). Drug lookup running…";
+        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing));
 
         // Phase 2: NOT awaited — runs in the background so this method
         // (and whatever caller triggered it, e.g. the Refresh button
         // click handler) returns immediately. See RefreshDrugFieldAsync
         // for the staleness guard against a newer refresh superseding
         // this one before it resolves.
-        _ = RefreshDrugFieldAsync(ocrWords, entered, generation);
+        _ = RefreshDrugFieldAsync(ocrWords, entered, generation, timing);
     }
 
     /// <summary>UIA source path — reads the Escript tab's structured UIA tree directly via FieldReader.ReadSource() (the original "Verify" behavior). No OCR/screen capture involved.</summary>
-    private async Task RefreshFromUiaAsync(FieldReader reader, PrescriptionRecord entered, int generation)
+    private async Task RefreshFromUiaAsync(FieldReader reader, PrescriptionRecord entered, int generation, RefreshTiming timing)
     {
         // OCR is inert in this mode — no capture/OCR ever runs, so this
         // just tells the pharmacist which mode is active instead of
@@ -506,7 +545,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // two-phase shape as the OCR path, just with a PrescriptionRecord
         // source instead of raw OCR words (see Engine/EngineClient.cs
         // VerifyAsync(PrescriptionRecord, ...)).
+        var engineStopwatch = Stopwatch.StartNew();
         var fastResult = await _engineClient.VerifyAsync(source, entered, skipDrugLookup: true);
+        timing.EngineMs = engineStopwatch.ElapsedMilliseconds;
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
 
@@ -516,12 +557,16 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
+        var renderStopwatch = Stopwatch.StartNew();
         PopulateRows(fastResult);
         UpdateSummary(fastResult.Summary);
-        StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}. Drug lookup running…";
+        timing.RenderMs = renderStopwatch.ElapsedMilliseconds;
+
+        StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt} ({timing.Phase1TotalMs}ms). Drug lookup running…";
+        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing));
 
         // Phase 2: NOT awaited — see RefreshFromOcrAsync's identical note.
-        _ = RefreshDrugFieldAsync(source, entered, generation);
+        _ = RefreshDrugFieldAsync(source, entered, generation, timing);
     }
 
     /// <summary>
@@ -653,8 +698,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// untouched, so the pharmacist never sees the rest of the panel
     /// flicker or reset while this runs.
     /// </summary>
-    private async Task RefreshDrugFieldAsync(IReadOnlyList<OcrWord> ocr, PrescriptionRecord entered, int generation)
+    private async Task RefreshDrugFieldAsync(IReadOnlyList<OcrWord> ocr, PrescriptionRecord entered, int generation, RefreshTiming timing)
     {
+        var phase2Stopwatch = Stopwatch.StartNew();
         VerifyResult result;
         try
         {
@@ -666,7 +712,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
-        ApplyDrugResult(result, generation);
+        ApplyDrugResult(result, generation, timing, phase2Stopwatch.ElapsedMilliseconds);
     }
 
     /// <summary>
@@ -678,8 +724,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// paths can never drift on how a VerifyResult becomes the updated
     /// drug row.
     /// </summary>
-    private async Task RefreshDrugFieldAsync(PrescriptionRecord source, PrescriptionRecord entered, int generation)
+    private async Task RefreshDrugFieldAsync(PrescriptionRecord source, PrescriptionRecord entered, int generation, RefreshTiming timing)
     {
+        var phase2Stopwatch = Stopwatch.StartNew();
         VerifyResult result;
         try
         {
@@ -691,7 +738,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             return;
         }
 
-        ApplyDrugResult(result, generation);
+        ApplyDrugResult(result, generation, timing, phase2Stopwatch.ElapsedMilliseconds);
     }
 
     /// <summary>
@@ -701,7 +748,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// the result entirely if a newer refresh has since superseded this
     /// one (see _refreshGeneration doc).
     /// </summary>
-    private void ApplyDrugResult(VerifyResult result, int generation)
+    private void ApplyDrugResult(VerifyResult result, int generation, RefreshTiming timing, long phase2Ms)
     {
         if (generation != _refreshGeneration) return; // a newer refresh superseded this one — drop the stale result
 
@@ -733,7 +780,14 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         RollUpCategory(drugCategory);
         UpdateSummary(result.Summary);
-        StatusMessage = $"Last checked {DateTime.Now:h:mm:ss tt}.";
+
+        // Same RefreshTiming instance Phase 1 already logged from (see
+        // RefreshAsync) — mutate it in place and log a follow-up line
+        // carrying the full breakdown PLUS the phase2 add-on (see
+        // RxLogFormatter.FormatTimingLine's "- phase2 +Nms" suffix).
+        timing.Phase2Ms = phase2Ms;
+        StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt}.";
+        OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing));
     }
 
     /// <summary>
@@ -762,6 +816,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         _lastOcrWords = Array.Empty<OcrWord>();
         OcrStatusText = "OCR: not read yet.";
         LastOcrRawText = "";
+        _lastTiming = null;
     }
 
     /// <summary>Replaces Notes' contents and recomputes HasNotes — shared by RefreshAsync's ReadSource call and every ClearCategories early-return.</summary>
@@ -822,6 +877,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             OcrStatusText = OcrStatusText,
             RawOcrText = LastOcrRawText,
             OcrWords = _lastOcrWords,
+            Timing = _lastTiming,
             Categories = Categories
                 .Select(c => new RxLogCategorySnapshot(
                     c.Name,

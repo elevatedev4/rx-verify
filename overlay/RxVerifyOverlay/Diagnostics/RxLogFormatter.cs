@@ -38,6 +38,32 @@ public static class RxLogFormatter
         "patientName", "patientDOB", "patientAddress"
     };
 
+    /// <summary>
+    /// Latency fix (Will's field report — verdicts noticeably slower
+    /// than the OCR pipeline alone suggested): one compact line spelling
+    /// out where a refresh's time actually went, e.g.
+    /// "Timing: detect-&gt;render 612ms (attach 40 + uia 55 + capture 56 +
+    /// ocr 105 + engine 180 + render 8) - phase2 +240ms". Shared by
+    /// Ocr/OcrLogger.cs's per-day log file and the "Copy logs" blob
+    /// (BuildLogBlob below) so the two surfaces can never drift on
+    /// format. No patient/prescriber/drug content — pure millisecond
+    /// counts — so unlike the rest of this file's redaction machinery,
+    /// this needs none.
+    /// </summary>
+    public static string FormatTimingLine(RefreshTiming timing)
+    {
+        var line = $"Timing: detect->render {timing.Phase1TotalMs}ms " +
+                   $"(attach {timing.AttachMs} + uia {timing.UiaMs} + capture {timing.CaptureMs} + " +
+                   $"ocr {timing.OcrMs} + engine {timing.EngineMs} + render {timing.RenderMs})";
+
+        if (timing.Phase2Ms is { } phase2Ms)
+        {
+            line += $" - phase2 +{phase2Ms}ms";
+        }
+
+        return line;
+    }
+
     public static string BuildLogBlob(RxLogSnapshot s) => BuildLogBlob(s, redactPatient: false);
 
     public static string BuildLogBlob(RxLogSnapshot s, bool redactPatient)
@@ -60,6 +86,10 @@ public static class RxLogFormatter
             sb.AppendLine($"Rx window: {titleLine}");
         }
         sb.AppendLine($"Status: {s.StatusMessage}");
+        if (s.Timing is not null)
+        {
+            sb.AppendLine(FormatTimingLine(s.Timing));
+        }
         sb.AppendLine();
 
         sb.AppendLine("--- Verdicts ---");
@@ -132,11 +162,17 @@ public static class RxLogFormatter
         // source/entered), but a label word like "DOB" or "Phone" can
         // collide with a patient token absorbed from the Rx-window
         // title's own "DOB: ..." / "Phone: ..." labels.
+        // Also protects the latency-fix "Timing: ..." line (see
+        // FormatTimingLine above) — it's pure millisecond counts, never
+        // PHI, but a 3+ digit ms value could coincidentally match a
+        // patient digit token (e.g. a street number) and get blanked out
+        // for no reason, which would defeat the whole point of the line.
         var protectedPattern = new Regex(
             @"@ \([^)]*\)" +
             @"|^\[.+? — .+?\]$" +
             @"|^  .+? \([A-Za-z0-9]+\): \w+$" +
-            @"|^    reason=\[[^\]]*\].*$",
+            @"|^    reason=\[[^\]]*\].*$" +
+            @"|^Timing: .*$",
             RegexOptions.Multiline);
 
         var protectedSpans = new List<string>();

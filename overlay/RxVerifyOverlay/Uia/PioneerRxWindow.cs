@@ -49,6 +49,29 @@ public sealed class PioneerRxWindow : IDisposable
     /// throw) if none is currently open — callers should show "waiting
     /// for PioneerRx..." rather than crash, since the pharmacist may be
     /// on an unrelated screen at any given moment.
+    ///
+    /// FLAGGED, NOT FIXED — POSSIBLE MISSED (not just delayed)
+    /// TRANSITION: if MORE THAN ONE target-prefixed window is open at
+    /// once (e.g. an older "Pre-Check Rx" window Will hasn't closed yet,
+    /// behind a newly-opened one for a different Rx), this always
+    /// returns the FIRST one FindAllChildren() happens to enumerate.
+    /// UIA's top-level enumeration order is NOT documented as
+    /// z-order/foreground-first, so that could keep being the SAME
+    /// (stale, backgrounded) window on every call — meaning
+    /// GetScreenSignature (below) would never observe the new window's
+    /// title at all, not merely late. This is a plausible root cause for
+    /// a report of an auto-watch transition being missed for tens of
+    /// seconds (as opposed to the ~250ms/poll-interval delay that's
+    /// otherwise expected). SUGGESTED FIX (not applied here — this repo
+    /// has no way to `dotnet build` this Windows-only WPF project to
+    /// verify a change compiles, so a fix risking the whole build wasn't
+    /// made blind): among all target-prefixed matches, prefer whichever
+    /// one is the current OS foreground window (P/Invoke
+    /// GetForegroundWindow, compared against each candidate's
+    /// window.Properties.NativeWindowHandle), falling back to today's
+    /// first-match behavior only when none of the matches are
+    /// foreground. Needs a real build+run to confirm the FlaUI property
+    /// name/shape before shipping.
     /// </summary>
     public static PioneerRxWindow? TryAttach()
     {

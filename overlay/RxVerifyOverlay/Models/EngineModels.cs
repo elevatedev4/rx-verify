@@ -106,6 +106,19 @@ public sealed class OcrWord
 /// <summary>Request body sent to verify-cli on stdin: { source, entered, skipDrugLookup }.</summary>
 public sealed class VerifyCliRequest
 {
+    /// <summary>
+    /// Latency fix (persistent engine process): required by verify-cli's
+    /// --serve mode (see rx-verify src/cli.ts ServeRequest) so
+    /// EngineClient can correlate this request to its response line on
+    /// the shared stdin/stdout pipe. Ignored by one-shot mode (the
+    /// default when --serve isn't passed), so this field being present
+    /// is harmless there too — left blank ("") is never sent by
+    /// EngineClient itself (it always assigns a real id before
+    /// serializing), but a stray blank wouldn't break one-shot mode
+    /// either way.
+    /// </summary>
+    public string Id { get; set; } = "";
+
     public PrescriptionRecord Source { get; set; } = new();
     public PrescriptionRecord Entered { get; set; } = new();
 
@@ -133,6 +146,9 @@ public sealed class VerifyCliRequest
 /// </summary>
 public sealed class VerifyOcrCliRequest
 {
+    /// <summary>See VerifyCliRequest.Id above — same --serve correlation id.</summary>
+    public string Id { get; set; } = "";
+
     public List<OcrWord> Ocr { get; set; } = new();
     public PrescriptionRecord Entered { get; set; } = new();
 

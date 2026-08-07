@@ -30,6 +30,9 @@ public sealed class RxLogSnapshot
     public string? RawOcrText { get; init; }
     public IReadOnlyList<OcrWord>? OcrWords { get; init; }
 
+    /// <summary>Latency fix instrumentation (see RefreshTiming) — null before the first successful refresh, or once ClearCategories resets it. See RxLogFormatter.FormatTimingLine.</summary>
+    public RefreshTiming? Timing { get; init; }
+
     public IReadOnlyList<RxLogCategorySnapshot> Categories { get; init; } = Array.Empty<RxLogCategorySnapshot>();
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
 

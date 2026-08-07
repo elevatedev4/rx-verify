@@ -24,7 +24,8 @@ public class RxLogFormatterTests
         string? ocrStatusText = "OCR: 400ms (capture 100ms + ocr 300ms) · 512 chars",
         int greenCount = 10,
         int yellowCount = 2,
-        int redCount = 1)
+        int redCount = 1,
+        RefreshTiming? timing = null)
     {
         return new RxLogSnapshot
         {
@@ -37,12 +38,32 @@ public class RxLogFormatterTests
             OcrStatusText = ocrStatusText ?? "",
             RawOcrText = rawOcrText,
             OcrWords = ocrWords ?? Array.Empty<OcrWord>(),
+            Timing = timing,
             Categories = categories ?? Array.Empty<RxLogCategorySnapshot>(),
             Notes = notes ?? Array.Empty<string>(),
             GreenCount = greenCount,
             YellowCount = yellowCount,
             RedCount = redCount
         };
+    }
+
+    [Fact]
+    public void OmitsTimingLineWhenNoTimingWasCaptured()
+    {
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(timing: null));
+
+        Assert.DoesNotContain("Timing:", blob);
+    }
+
+    [Fact]
+    public void IncludesTimingLineWhenTimingWasCaptured()
+    {
+        var timing = new RefreshTiming { AttachMs = 40, UiaMs = 55, CaptureMs = 56, OcrMs = 105, EngineMs = 180, RenderMs = 8, Phase2Ms = 240 };
+
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(timing: timing));
+
+        Assert.Contains(RxLogFormatter.FormatTimingLine(timing), blob);
+        Assert.Contains("- phase2 +240ms", blob);
     }
 
     [Fact]
@@ -256,6 +277,30 @@ public class RxLogFormatterTests
         Assert.DoesNotContain("4/5/1990", blob);
         Assert.DoesNotContain("SYNTH LN", blob);
         Assert.DoesNotContain("Synth Ln", blob);
+    }
+
+    [Fact]
+    public void RedactPatient_TimingLineSurvivesEvenWhenAMsValueCollidesWithAPatientDigitToken()
+    {
+        // The patient's street number below ("100") is a 3+ digit token
+        // the redaction pass would otherwise blank out anywhere it
+        // appears in the blob — including, by pure numeric coincidence,
+        // an unrelated millisecond count in the Timing line. See
+        // RxLogFormatter's "protectedPattern" doc: the Timing line is
+        // explicitly exempted from that pass since it is never PHI.
+        var categories = new List<RxLogCategorySnapshot>
+        {
+            new("Patient", "Match", new List<RxLogFieldSnapshot>
+            {
+                new("patientAddress", "Address", "Green", "100 SYNTH LN SPRINGFIELD IL", "100 Synth Ln Springfield, IL", "exact_match", "Address matches.")
+            })
+        };
+        var timing = new RefreshTiming { AttachMs = 100, UiaMs = 55, CaptureMs = 56, OcrMs = 105, EngineMs = 180, RenderMs = 8 };
+
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(categories: categories, timing: timing), redactPatient: true);
+
+        Assert.Contains(RxLogFormatter.FormatTimingLine(timing), blob);
+        Assert.Contains("attach 100", blob);
     }
 
     [Fact]

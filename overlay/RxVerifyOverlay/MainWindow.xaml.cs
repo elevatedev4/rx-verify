@@ -7,6 +7,7 @@ using Microsoft.Win32;
 using RxVerifyOverlay.Engine;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
+using RxVerifyOverlay.Uia;
 using RxVerifyOverlay.ViewModels;
 
 namespace RxVerifyOverlay;
@@ -29,6 +30,13 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // and the line below that actually constructs it — see
     // OnAutoRefreshToggled's null guard.
     private readonly DispatcherTimer? _autoRefreshTimer;
+
+    // EVENT-DRIVEN detection (latency fix, see Uia/TitleChangeWatcher.cs)
+    // — fires almost immediately on a title change instead of waiting up
+    // to AutoWatchIntervalMs for the next poll tick. Purely additive: the
+    // poll timer above is unchanged and remains the safety net if this
+    // hook fails to install (TryStart() returns false) or never fires.
+    private readonly TitleChangeWatcher _titleChangeWatcher;
 
     // Defensive suppression flag, same pattern as _autoRefreshTimer's
     // null guard below: InitializeComponent() can raise Checked for the
@@ -157,9 +165,32 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             _autoRefreshTimer.Start();
         }
 
+        // EVENT-DRIVEN detection (latency fix — see
+        // Uia/TitleChangeWatcher.cs). TryStart()'s return value is
+        // deliberately not surfaced to the pharmacist either way: on
+        // success this only IMPROVES on the poll's worst-case latency,
+        // and on failure the poll (started above, unconditionally)
+        // already keeps the overlay fully correct — see
+        // TitleChangeWatcher's class doc for why this can never be
+        // treated as an error condition.
+        _titleChangeWatcher = new TitleChangeWatcher(() => _ = SafeWatchAsync());
+        _titleChangeWatcher.TryStart();
+
         // First read on launch so the panel isn't empty while the
         // pharmacist decides whether to enable auto-watch.
         Loaded += async (_, _) => await SafeRefreshAsync();
+
+        // EngineClient now owns a PERSISTENT node.exe (latency fix — see
+        // Engine/EngineClient.cs) instead of spawning one per call, so it
+        // must be explicitly disposed on shutdown or that process would
+        // otherwise keep running as an orphan after the overlay closes.
+        // TitleChangeWatcher likewise holds an unmanaged OS hook that
+        // must be explicitly unhooked (see its Dispose doc).
+        Closed += (_, _) =>
+        {
+            _engineClient.Dispose();
+            _titleChangeWatcher.Dispose();
+        };
     }
 
     private async void OnRefreshClick(object sender, RoutedEventArgs e) => await SafeRefreshAsync();
@@ -413,10 +444,15 @@ public partial class MainWindow : Window, IOverlayVisibilityController
 
         // Rebuild the engine client with the new paths and rewire the
         // view model, since EngineClient's paths are immutable per
-        // instance (see Engine/EngineClient.cs).
+        // instance (see Engine/EngineClient.cs). MUST dispose the old
+        // client first — it owns a persistent node.exe process (latency
+        // fix) that would otherwise leak as an orphan every time settings
+        // are saved.
+        var previousEngineClient = _engineClient;
         _engineClient = new EngineClient(_settings.EngineCliPath, _settings.NodeExecutable);
         _viewModel = new OverlayViewModel(_engineClient, _settings, overlayVisibilityController: this);
         DataContext = _viewModel;
+        previousEngineClient.Dispose();
 
         MessageBox.Show(this, "Settings saved.", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
     }

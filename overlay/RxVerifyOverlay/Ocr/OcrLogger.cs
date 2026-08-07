@@ -124,6 +124,34 @@ public static class OcrLogger
         }
     }
 
+    /// <summary>
+    /// Latency fix (Will's field report — verdicts noticeably slower
+    /// than the OCR pipeline alone suggested): appends one compact
+    /// timing-breakdown line (see Diagnostics/RxLogFormatter.
+    /// FormatTimingLine) per refresh. Unlike LogRead above, this is NOT
+    /// subject to the de-dup guard — it carries no patient/prescriber/
+    /// drug content (just millisecond counts), so every refresh's timing
+    /// is worth keeping, including a repeat read of the same Rx, so Will
+    /// can see whether latency is consistent or a one-off. Still subject
+    /// to the same SIZE CAP rotation as everything else in this file.
+    /// </summary>
+    public static void LogTiming(string line)
+    {
+        try
+        {
+            lock (LockObj)
+            {
+                Directory.CreateDirectory(LogDirectory);
+                RotateIfOversized();
+                File.AppendAllText(LogFilePath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {line}{Environment.NewLine}");
+            }
+        }
+        catch
+        {
+            // Best-effort — see class doc.
+        }
+    }
+
     /// <summary>Appends a capture/OCR failure block — see OcrFieldReader.ReadSourceFromOcrAsync's catch. Not subject to the de-dup check (errors are rare and each one is worth a line), but still subject to the size cap.</summary>
     public static void LogError(Exception ex)
     {
