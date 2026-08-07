@@ -19,8 +19,13 @@ export interface AddressCompareResult {
   explanation: string;
 }
 
-/** USPS Pub 28 common street-suffix abbreviations (subset). */
-const STREET_SUFFIXES: Record<string, string> = {
+/**
+ * USPS Pub 28 common street-suffix abbreviations (subset). Exported so
+ * src/ocr/parseEscriptOcr.ts's address parsing can reuse this SAME table
+ * (branch brief defect #7b — "reuse the existing suffix table") rather
+ * than maintaining a second, driftable copy of the suffix word list.
+ */
+export const STREET_SUFFIXES: Record<string, string> = {
   street: 'st', st: 'st',
   avenue: 'ave', ave: 'ave', av: 'ave',
   road: 'rd', rd: 'rd',
@@ -382,6 +387,38 @@ function componentDiffers(a: string, b: string): boolean {
   return a !== '' && b !== '' && a !== b;
 }
 
+/**
+ * Like componentDiffers, but ASYMMETRIC — used for CITY (branch brief
+ * defect #7c, safety bound (ii)) and, via sourceAbsentIsGap below, for
+ * STREET's base too (round-2 review fold #2). A blank on the ENTERED
+ * side keeps the exact same tolerance as componentDiffers (the entered
+ * freeform line commonly omits trailing components — see
+ * componentDiffers' own doc). A blank on the SOURCE side, however, is
+ * treated as a genuine gap whenever the entered side DOES state a value:
+ * a source that never even reaches this component ("too little to
+ * verify") is not the same thing as a confirmed match — unlike state/
+ * ZIP, which get an explicit, EXPLAINED leniency further down
+ * (compareAddresses' own "confirmed street+city, source just didn't
+ * reach state/ZIP" branch) specifically because street+city being
+ * independently confirmed is what makes THAT leniency safe. Street and
+ * city have no equivalent "something else confirms it" signal, so their
+ * own absence on the source is never waved through.
+ */
+function cityMissingOrDiffers(sourceCity: string, enteredCity: string): boolean {
+  return sourceAbsentIsGap(sourceCity, enteredCity) || componentDiffers(sourceCity, enteredCity);
+}
+
+/**
+ * True when `enteredVal` states something but `sourceVal` is blank — see
+ * cityMissingOrDiffers' doc for the full rationale. Reused directly (not
+ * a strict equality check) by streetDiffers below, which layers its own
+ * fuzzy streetBaseDiffers comparison on top for the "both present" case
+ * — this helper only covers the "source never even stated it" gap.
+ */
+function sourceAbsentIsGap(sourceVal: string, enteredVal: string): boolean {
+  return enteredVal !== '' && sourceVal === '';
+}
+
 export function compareAddresses(
   sourceRaw: Address | null | undefined,
   enteredRaw: Address | null | undefined
@@ -464,12 +501,77 @@ export function compareAddresses(
   // must not fail the match. Per the "address alone is never RED"
   // stated philosophy, if the suffix genuinely differs on both sides
   // (e.g. "St" vs "Ave") it's still a real signal worth a yellow.
+  //
+  // ROUND-2 REVIEW FOLD #2: the base-vs-base comparison used to be fully
+  // symmetric (a blank base on EITHER side skipped it) — same class of
+  // gap as cityMissingOrDiffers originally fixed for city, just not yet
+  // applied to street: a source with NO street at all (e.g. only a
+  // `city` field, nothing else) compared against a fully-populated
+  // entered address could fall through every differs-check and land
+  // GREEN via the generic exact_match fallthrough below, having
+  // confirmed nothing. sourceAbsentIsGap closes that the same way city's
+  // already does: entered-blank stays tolerated (unchanged), but
+  // source-blank-while-entered-states-one is now a genuine gap.
   const streetDiffers =
+    sourceAbsentIsGap(srcStreet.base, entStreet.base) ||
     (srcStreet.base !== '' && entStreet.base !== '' && streetBaseDiffers(srcStreet.base, entStreet.base)) ||
     (srcStreet.suffix !== null && entStreet.suffix !== null && srcStreet.suffix !== entStreet.suffix);
-  const cityDiffers = componentDiffers(srcCity, entCity);
+  const cityDiffers = cityMissingOrDiffers(srcCity, entCity);
   const stateDiffers = componentDiffers(srcState, entState);
   const zipDiffers = componentDiffers(srcZip, entZip);
+
+  // DEFECT #7c (live-test bug: an OCR-read address that stops at the
+  // city — "808 E 1250 Road Lawrence", no state/ZIP recognized in that
+  // capture at all — compared against a fully-populated entered address
+  // and landed address_differs). OCR routinely drops the tail of an
+  // address line; that is not evidence the address is actually
+  // different, only that the SOURCE couldn't see that far. When state
+  // and/or ZIP are simply ABSENT on the source — never present-and-
+  // different, see safety bound (i) below — AND street+city ARE present
+  // on the source and actively confirmed matching the entered value,
+  // treat it as GREEN with an explanation that says exactly what was (and
+  // wasn't) compared, rather than silently folding into the generic
+  // "matches after normalization" message below. This is scoped
+  // narrowly: address is a yellow-tier field that never blocks
+  // dispensing, and patient identity is carried by name+DOB elsewhere in
+  // this engine, not by address — so a confirmed street+city match is
+  // enough to clear this field even when state/ZIP were never legible.
+  //
+  // SAFETY BOUNDS:
+  //  (i) present-but-different state/ZIP still flags normally — this
+  //      branch requires `!stateDiffers && !zipDiffers` explicitly, so a
+  //      source that DOES state a (different) state/ZIP falls straight
+  //      through to the ordinary address_differs handling below, never
+  //      this leniency.
+  //  (ii) source missing city too (street-only) does NOT qualify —
+  //      cityMissingOrDiffers (unlike the general componentDiffers used
+  //      for state/ZIP) treats a source-blank city as a genuine gap
+  //      whenever the entered side states one, so cityDiffers is already
+  //      true in that case and this branch's `!cityDiffers` guard
+  //      excludes it — see cityMissingOrDiffers' own doc.
+  //  (iii) this leniency applies ONLY to state/ZIP absence — street and
+  //      city must BOTH be present and actively confirmed matching
+  //      (srcStreet/entStreet non-blank and !streetDiffers; srcCity/
+  //      entCity non-blank and !cityDiffers); if either is blank or
+  //      differs, this branch is skipped and falls through unchanged.
+  const sourceMissingStateOrZip = srcState === '' || srcZip === '';
+  const streetAndCityConfirmed =
+    srcStreet.base !== '' &&
+    entStreet.base !== '' &&
+    !streetDiffers &&
+    srcCity !== '' &&
+    entCity !== '' &&
+    !cityDiffers;
+  if (sourceMissingStateOrZip && !stateDiffers && !zipDiffers && streetAndCityConfirmed) {
+    const missingParts: string[] = [];
+    if (srcState === '') missingParts.push('state');
+    if (srcZip === '') missingParts.push('ZIP');
+    return {
+      status: 'green',
+      reasonCode: 'exact_match_partial_source',
+      explanation: `Street and city match; source did not provide ${missingParts.join('/')}.`
+    };
+  }
 
   if (streetDiffers || cityDiffers || stateDiffers || zipDiffers) {
     return {

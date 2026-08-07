@@ -6,6 +6,7 @@ import {
   type OcrWord,
   type FieldDiagnostic
 } from '../src/ocr/parseEscriptOcr.js';
+import { compareAddresses } from '../src/normalize/address.js';
 
 /**
  * SYNTHETIC DATA ONLY — every name/DOB/NPI/NDC/address/phone below is
@@ -1223,14 +1224,395 @@ describe('parseEscriptOcr', () => {
     const ocr = flatten([TOOLBAR_ROW, locationRow, strayPhoneShapedRow, phoneRow]);
     const record = parseEscriptOcr(ocr);
 
-    // Documents current (accepted) behavior: the stray row is swept in,
-    // and — since it doesn't match the trailing "<state><zip>" shape
-    // parseAddressBlob requires — the whole value falls back to a
-    // street-only Address with no city/state/zip parsed out of it.
-    expect(record.prescriber?.address).toEqual({ street: '4930 Overland Drive 555-0001' });
+    // Documents current (accepted) behavior: the stray row is swept in.
+    // UPDATED (defect #7b): parseAddressBlob's no-state/ZIP fallback now
+    // splits a CITY off the end using the last recognized street-suffix
+    // word ("Drive") as the boundary, rather than dumping the whole
+    // string into `street` — a deliberate, correct improvement for the
+    // real case it targets (an OCR-dropped address tail). It has no way
+    // to know THIS particular trailing text is stray phone-shaped noise
+    // rather than a real city, so it still ends up mis-split into
+    // `city` — that residual imprecision is the accepted geometric
+    // limitation this test pins, now one layer downstream of where it
+    // used to be.
+    expect(record.prescriber?.address).toEqual({ street: '4930 Overland Drive', city: '555-0001' });
     // The real Phone field, on its own recognized row further down,
     // still resolves correctly and independently.
     expect(record.prescriber?.phone).toBe('(555) 555-4488');
+  });
+
+  describe('prescriber name label decoy (defect #5, live-test bug: source prescriberName resolved to "Order Nurnt*r: 770415Q8Q")', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump; the prescriber's own name is fabricated (not
+    // reused verbatim from the live report) per this repo's
+    // synthetic-data-only discipline. Root cause: the page has TWO
+    // lines that both fuzzy-match the 'prescriber' label — the real
+    // "Prescriber:" row (label+name inline, y=186) and a mangled footer
+    // line, "Prescr'ber Order Nurnt*r: 770415Q8Q" (a garbled
+    // "Prescriber Order Number:", y=630), whose leading word alone
+    // fuzzy-matches 'prescriber' under the existing edit-distance
+    // threshold. Lines are walked top-to-bottom, so without a fix the
+    // LATER (footer) match unconditionally overwrites the correctly-
+    // resolved name with the order number.
+    const realPrescriberRow: OcrWord[] = [
+      { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+      { text: 'Sampleton,', x: 119, y: 186, w: 80, h: 11 },
+      { text: 'Casey', x: 208, y: 186, w: 55, h: 11 }
+    ];
+    // Decoy footer — its OWN row, well below the real label, x≈24 (LEFT
+    // of the real label's own x≈45 — column position alone would have
+    // picked the WRONG one here, see NAME_FIELDS doc in
+    // parseEscriptOcr.ts).
+    const decoyFooterRow: OcrWord[] = [
+      { text: "Prescr'ber", x: 24, y: 630, w: 70, h: 10 },
+      { text: 'Order', x: 100, y: 630, w: 40, h: 10 },
+      { text: "Nurnt*r:", x: 145, y: 630, w: 60, h: 10 },
+      { text: '770415Q8Q', x: 210, y: 630, w: 70, h: 10 }
+    ];
+
+    it('resolves the REAL name even with the decoy footer also present, and never stores the order number', () => {
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), realPrescriberRow, decoyFooterRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBe('Sampleton, Casey');
+      expect(record.prescriber?.name).not.toMatch(/\d{6,}/);
+    });
+
+    it('is not_provided (never the order number) when ONLY the decoy footer exists', () => {
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), decoyFooterRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBeUndefined();
+    });
+
+    it('SAFETY: a genuinely digit-light name is unaffected by the value-shape gate', () => {
+      // e.g. a name with a single incidental digit (rare OCR noise) must
+      // not be rejected — the gate only trips on digit-DOMINATED text.
+      const row2: OcrWord[] = [
+        { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+        { text: 'O2Brien,', x: 119, y: 186, w: 70, h: 11 },
+        { text: 'Drew', x: 200, y: 186, w: 50, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row2]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBe('O2Brien, Drew');
+    });
+  });
+
+  describe('name value-shape gate boundary (defect #5 follow-up — pin the digit-run threshold on both sides so it can\'t silently drift)', () => {
+    // The gate (isImplausibleNameValue) rejects a candidate name value
+    // when it contains a 6+ digit run OR is >40% digits overall. Both
+    // thresholds were a deliberate choice, not an arbitrary one — pin
+    // them with a real-shaped credential suffix just under and just over
+    // the digit-run line, so a future change to either number shows up
+    // here instead of silently drifting.
+    it('ACCEPTED: a name with a credential suffix carrying a 5-digit run (license number) is NOT rejected', () => {
+      // "O'Day-Smith, Kaitlyn A.P.R.N. 12345" — a plausible real-world
+      // shape (name + credential + a license number under the run
+      // threshold). Digit run is exactly 5, under the 6+ trip-wire, and
+      // well under 40% of the total text.
+      const prescriberRow: OcrWord[] = [
+        { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+        { text: "O'Day-Smith,", x: 119, y: 186, w: 90, h: 11 },
+        { text: 'Kaitlyn', x: 215, y: 186, w: 60, h: 11 },
+        { text: 'A.P.R.N.', x: 280, y: 186, w: 60, h: 11 },
+        { text: '12345', x: 345, y: 186, w: 45, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBe("O'Day-Smith, Kaitlyn A.P.R.N. 12345");
+    });
+
+    it('REJECTED: the SAME shape with a 6-digit run instead of 5 is rejected to not_provided', () => {
+      const prescriberRow: OcrWord[] = [
+        { text: 'Prescriber:', x: 45, y: 186, w: 55, h: 11 },
+        { text: "O'Day-Smith,", x: 119, y: 186, w: 90, h: 11 },
+        { text: 'Kaitlyn', x: 215, y: 186, w: 60, h: 11 },
+        { text: 'A.P.R.N.', x: 280, y: 186, w: 60, h: 11 },
+        { text: '123456', x: 345, y: 186, w: 50, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), prescriberRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.name).toBeUndefined();
+    });
+  });
+
+  describe('DOB label/value OCR noise (defect #6, live-test bug: patientDOB stayed not_provided)', () => {
+    // SYNTHETIC — coordinates copied verbatim from a real owner OCR
+    // word-position dump. Two independent misreads on the same field:
+    // the label "DOB:" OCR'd as "DOBI" (colon misread as a trailing
+    // "I"), and the value "04/03/1985" OCR'd as "04/0311985" (the
+    // day/year "/" misread as "1").
+    it('label "DOBI" already fuzzy-matches the DOB label (verifies existing tolerance, no false negative)', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '04/03/1985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('04/03/1985');
+    });
+
+    it('sibling label noise "DOB1" also fuzzy-matches', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOB1', x: 76, y: 137, w: 40, h: 12 },
+        { text: '04/03/1985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('04/03/1985');
+    });
+
+    it('exact live-test repro: "DOBI" label + "04/0311985" value (day/year slash misread as "1") still resolves', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '04/0311985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('04/03/1985');
+    });
+
+    it('also repairs the month/day slash (not just day/year) when it is misread as a separator lookalike', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOB:', x: 76, y: 137, w: 40, h: 12 },
+        // Month/day "/" misread as "l" this time.
+        { text: '04l03/1985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('04/03/1985');
+    });
+
+    it('SAFETY: an unrepairable/garbage token stays not_provided, never a guessed date', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '04/0A11985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBeUndefined();
+    });
+
+    it('SAFETY: the separator-repair never invents an implausible date (e.g. month 13) — stays not_provided', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '13/0311985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBeUndefined();
+    });
+
+    // REVIEWER-DEMONSTRATED BLOCKER, FIXED: pattern 6 (separator-
+    // lookalike repair) requires NO existing structural evidence of a
+    // mangled date at all — unlike patterns 1-5 (which all need an
+    // existing "/", dash, or similar), a plain 10-digit number can
+    // satisfy pattern 6's shape purely by having a "1" at positions 3
+    // and 6. Applying it inside the page-wide candidatePool fallback
+    // scan (no label anchor — searches every still-unclaimed leftover
+    // line for anything date-shaped) let it fabricate a date out of
+    // ordinary, uncorrupted page text with nothing pointing at it as a
+    // DOB at all. Fix: pattern 6 now only fires for the value already
+    // tied to a recognized dob/written LABEL (repairMangledDate's
+    // allowSeparatorLookalike param) — never in the label-less pool
+    // scan, where patterns 1-5 (all still requiring real structural
+    // evidence) remain unaffected.
+    it('SAFETY (reviewer probe): a bare, uncorrupted 10-digit ID with NO dob/written label anywhere on the page must NOT be fabricated into a date', () => {
+      // No "DOB"/"DOBI"/"Written" label at all — just an ordinary
+      // leftover value (e.g. some other ID/reference number) that
+      // happens to be exactly 10 digits with a "1" at the two positions
+      // pattern 6 treats as separator slots. Reviewer verified this
+      // fabricated "07/15/1980" pre-fix.
+      const idRow: OcrWord[] = [{ text: '0711511980', x: 300, y: 400, w: 90, h: 12 }];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), idRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBeUndefined();
+    });
+
+    it('defect #6 live case still resolves after the blocker fix: "DOBI" label + "04/0311985" value (label-anchored repair still allowed)', () => {
+      const dobRow: OcrWord[] = [
+        { text: 'DOBI', x: 76, y: 137, w: 40, h: 12 },
+        { text: '04/0311985', x: 121, y: 136, w: 90, h: 12 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientDOB).toBe('04/03/1985');
+    });
+  });
+
+  describe('address city-segmentation (defect #7a/#7b, live-test bug: on-screen line "808 E 1250 Road Lawrence KS66047" displayed as stopping at the city)', () => {
+    // SYNTHETIC — geometry mirrors the real owner capture (patient
+    // Address: label @ (51,116)). Ground truth confirmed from the OCR
+    // word dump: the left-column value tokens are EXACTLY five ("808"
+    // "E" "1250" "Road" "Lawrence") and then nothing until the far
+    // right-column phone tokens — OCR never emitted a state/ZIP token in
+    // this capture at all, so it is not recoverable by parsing; this
+    // describe block is about the THREE downstream weaknesses that
+    // exposed, not about inventing the missing state/ZIP.
+    it('acceptance (1)/(4)-adjacent: exact live y=116 geometry (no state/ZIP anywhere in the OCR read) splits city off the end using the street-suffix boundary, instead of dumping the whole line into `street`', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({ street: '907 W 1300 Road', city: 'Faketown' });
+    });
+
+    it('acceptance (1) end-to-end: that same source address compares GREEN (with the partial-compare explanation) against a fully-populated entered address', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      const result = compareAddresses(record.patientAddress, {
+        street: '907 W 1300 Road',
+        city: 'Faketown',
+        state: 'KS',
+        zip: '66099'
+      });
+      expect(result.status).toBe('green');
+      expect(result.reasonCode).toBe('exact_match_partial_source');
+      expect(result.explanation).toContain('did not provide');
+    });
+
+    it('acceptance (2): same geometry, but the entered CITY differs — stays yellow, never waved through', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      const result = compareAddresses(record.patientAddress, {
+        street: '907 W 1300 Road',
+        city: 'Differentburg',
+        state: 'KS',
+        zip: '66099'
+      });
+      expect(result.status).toBe('yellow');
+      expect(result.reasonCode).toBe('address_differs');
+    });
+
+    // Acceptance (3): a glued state+ZIP token ("KS66614") after a comma,
+    // as part of a realistic full address line — the live prescriber-row
+    // example ("Topeka," @ (121,227) "KS66614" @ (174,227)).
+    it('acceptance (3): glued "KS66614" (comma before it, prescriber-row live example) parses into city/state/zip and the full compare works', () => {
+      const locationRow: OcrWord[] = [
+        { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
+        { text: '808', x: 120, y: 207, w: 30, h: 11 },
+        { text: 'E', x: 155, y: 207, w: 12, h: 11 },
+        { text: '1250', x: 172, y: 207, w: 30, h: 11 },
+        { text: 'Road', x: 207, y: 207, w: 35, h: 11 },
+        { text: 'Topeka,', x: 121, y: 227, w: 55, h: 11 },
+        { text: 'KS66614', x: 174, y: 227, w: 70, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), locationRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.prescriber?.address).toEqual({
+        street: '808 E 1250 Road',
+        city: 'Topeka',
+        state: 'KS',
+        zip: '66614'
+      });
+
+      const result = compareAddresses(record.prescriber?.address, {
+        street: '808 E 1250 Road',
+        city: 'Topeka',
+        state: 'KS',
+        zip: '66614'
+      });
+      expect(result.status).toBe('green');
+    });
+
+    // Acceptance (4): no-comma full single line, state+ZIP present but
+    // glued, no separator at all before it.
+    it('acceptance (4): no-comma full line "907 W 1300 Road Faketown KS66099" segments street/city/state/zip correctly', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 },
+        { text: 'Faketown', x: 235, y: 116, w: 60, h: 11 },
+        { text: 'KS66099', x: 300, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({
+        street: '907 W 1300 Road',
+        city: 'Faketown',
+        state: 'KS',
+        zip: '66099'
+      });
+    });
+
+    // Acceptance (5): street-only source (no city token at all — the
+    // suffix word IS the last token, nothing follows it) — the "don't
+    // guess" guard must hold, and the resulting compare stays yellow.
+    it('acceptance (5): street-only source (suffix word is the last token, no city follows) keeps current street-only behavior and compares yellow', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'W', x: 148, y: 116, w: 12, h: 11 },
+        { text: '1300', x: 161, y: 116, w: 30, h: 11 },
+        { text: 'Road', x: 196, y: 116, w: 35, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({ street: '907 W 1300 Road' });
+
+      const result = compareAddresses(record.patientAddress, {
+        street: '907 W 1300 Road',
+        city: 'Faketown',
+        state: 'KS',
+        zip: '66099'
+      });
+      expect(result.status).toBe('yellow');
+    });
+
+    it('GUARD: no recognized street-suffix word at all — falls back to the pre-existing street-only behavior (never guesses)', () => {
+      const addressRow: OcrWord[] = [
+        { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
+        { text: '907', x: 121, y: 116, w: 30, h: 11 },
+        { text: 'Fictional', x: 155, y: 116, w: 60, h: 11 },
+        { text: 'Faketown', x: 220, y: 116, w: 60, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), addressRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientAddress).toEqual({ street: '907 Fictional Faketown' });
+    });
   });
 
   describe('buildDiagnosticsBlock (per-field diagnostics log formatting — branch brief item 4)', () => {
