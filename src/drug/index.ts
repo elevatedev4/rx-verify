@@ -326,11 +326,13 @@ export function extractStatedStrength(name: string): string | null {
  * "captopril" is never touched. Deliberately only covers the handful of
  * abbreviations pharmacy systems actually produce (PioneerRx free-text
  * entry vs an e-script's spelled-out form) — release qualifiers like
- * ER/XR/CR are left as-is (they already compare equal via the
- * case-folding above, and collapsing them together would risk treating
- * two genuinely different release profiles as the same product, which
- * this file's stated philosophy — fail toward yellow, never a false
- * green — rules out).
+ * ER/XR/CR are left as bare tokens here (they already compare equal
+ * to each other via the case-folding above when BOTH sides already use
+ * the same abbreviation). Spelled-out release-qualifier PHRASES
+ * ("extended release" etc) ARE folded down to their abbreviation, but
+ * by RELEASE_PHRASE_FOLDS below (a phrase-level regex pass, since a
+ * whole-token map can't match two words) — see that constant's doc for
+ * why the direction is phrase -> abbreviation only, never the reverse.
  */
 const DOSAGE_FORM_WORDS: Record<string, string> = {
   tab: 'tablet', tabs: 'tablet', tablets: 'tablet',
@@ -365,8 +367,41 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
 };
 
 /**
+ * Release-qualifier PHRASE -> canonical abbreviation. Field report:
+ * "Metoprolol Succinate ER 50 mg" (entered) vs "Metoprolol Succinate
+ * Extended Release 50 mg" (e-script) was flagged as a mismatch —
+ * same drug, one side spells the qualifier out. Each entry matches the
+ * two words separated by whitespace OR a hyphen ("extended release" and
+ * "extended-release" both fold), case-insensitively (input is already
+ * lowercased by the time this runs).
+ *
+ * Direction is ONE-WAY on purpose: an explicit phrase folds DOWN to its
+ * abbreviation (unambiguous — "extended release" only ever means ER).
+ * The reverse is never done — a bare "er"/"cr"/etc. token is NOT
+ * expanded up to a phrase, because a bare abbreviation is ambiguous
+ * (folding "er" up would require guessing which release word was
+ * meant, and could collide with an unrelated token). This is also why
+ * XL/XR are NOT included here: the codebase does not treat XL/XR as
+ * equivalent to ER anywhere else (grepped — no existing XL/XR<->ER
+ * equivalence), so this is a NEW equivalence class this branch is not
+ * authorized to introduce; only the explicit-phrase-to-abbreviation
+ * folds the bug report asked for are added. XL/XR/ER stay untouched as
+ * bare tokens, same as before this change.
+ */
+const RELEASE_PHRASE_FOLDS: Array<[RegExp, string]> = [
+  [/\bextended[\s-]+release\b/g, 'er'],
+  [/\bsustained[\s-]+release\b/g, 'sr'],
+  [/\bcontrolled[\s-]+release\b/g, 'cr'],
+  [/\bdelayed[\s-]+release\b/g, 'dr'],
+  [/\bimmediate[\s-]+release\b/g, 'ir']
+];
+
+/**
  * Normalize a free-text drug name/description for IDENTITY comparison:
- * case/punctuation/whitespace, common dosage-FORM abbreviations (see
+ * case/punctuation/whitespace, release-qualifier phrases (see
+ * RELEASE_PHRASE_FOLDS — "extended release"/"extended-release" -> er,
+ * sustained release -> sr, controlled release -> cr, delayed release ->
+ * dr, immediate release -> ir), common dosage-FORM abbreviations (see
  * DOSAGE_FORM_WORDS — TAB/TABS -> tablet, CAP/CAPS -> capsule, SOL ->
  * solution, SUSP -> suspension, OINT/UNG -> ointment, CRM -> cream,
  * SUPP -> suppository, INJ -> injection, GTT -> drops),
@@ -379,12 +414,16 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
  * superficially similar.
  */
 export function normalizeDrugNameString(raw: string): string {
-  const folded = raw
+  let folded = raw
     .toLowerCase()
     .replace(/[®™©]/g, '')
     .replace(/[.,]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+
+  for (const [pattern, abbrev] of RELEASE_PHRASE_FOLDS) {
+    folded = folded.replace(pattern, abbrev);
+  }
 
   // Force exactly one space between a number and a trailing strength
   // unit, so "2mg" and "2 mg" fold to the same text (unit CASING is

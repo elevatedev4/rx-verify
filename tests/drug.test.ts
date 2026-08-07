@@ -193,6 +193,79 @@ describe('compareDrugs', () => {
           expect(normalizeDrugNameString('Fentanyl 25mcg patch')).toBe('fentanyl 25 mcg patch');
         });
       });
+
+      // Bug 1 (round 4): live report — entered "Metoprolol Succinate ER
+      // 50 mg", source e-script spelled it "Metoprolol Succinate Extended
+      // Release 50 mg". Same drug, flagged as a mismatch because the
+      // abbreviation and the spelled-out phrase never folded to the same
+      // normalized string. RELEASE_PHRASE_FOLDS folds the spelled-out
+      // phrase DOWN to the abbreviation (one-way: never expand a bare
+      // abbreviation back up to a phrase).
+      describe('Bug 1: release-qualifier phrase folding (ER/SR/CR/DR/IR)', () => {
+        it('is GREEN name_identity_match for "Metoprolol Succinate ER 50 mg" vs "Metoprolol Succinate Extended Release 50 mg"', () => {
+          const r = compareDrugs(
+            { name: 'Metoprolol Succinate ER 50 mg' },
+            { name: 'Metoprolol Succinate Extended Release 50 mg' },
+            provider
+          );
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        it('still MISMATCHES "ER" vs "IR" — folding the phrase must not blur genuinely different release profiles', () => {
+          const r = compareDrugs(
+            { name: 'Metoprolol Succinate ER 50 mg' },
+            { name: 'Metoprolol Succinate IR 50 mg' },
+            provider
+          );
+          expect(r.reasonCode).not.toBe('name_identity_match');
+        });
+
+        it('folds hyphenated "extended-release" the same as the two-word phrase', () => {
+          expect(normalizeDrugNameString('Metoprolol Succinate extended-release 50mg')).toBe(
+            normalizeDrugNameString('Metoprolol Succinate ER 50mg')
+          );
+        });
+
+        it('folds "sustained release" -> sr', () => {
+          expect(normalizeDrugNameString('Verapamil Sustained Release 240mg')).toBe(
+            normalizeDrugNameString('Verapamil SR 240mg')
+          );
+        });
+
+        it('folds "controlled release" -> cr', () => {
+          expect(normalizeDrugNameString('Diltiazem Controlled Release 240mg')).toBe(
+            normalizeDrugNameString('Diltiazem CR 240mg')
+          );
+        });
+
+        it('folds "delayed release" -> dr', () => {
+          expect(normalizeDrugNameString('Divalproex Delayed Release 250mg')).toBe(
+            normalizeDrugNameString('Divalproex DR 250mg')
+          );
+        });
+
+        it('folds "immediate release" -> ir', () => {
+          expect(normalizeDrugNameString('Metoprolol Immediate Release 25mg')).toBe(
+            normalizeDrugNameString('Metoprolol IR 25mg')
+          );
+        });
+
+        it('does NOT fold a bare abbreviation up to a phrase (direction is phrase -> abbreviation only)', () => {
+          // "er" stays "er" — normalizeDrugNameString never introduces
+          // the word "extended" or "release" from a bare abbreviation.
+          expect(normalizeDrugNameString('Metoprolol Succinate ER 50mg')).toBe('metoprolol succinate er 50 mg');
+        });
+
+        it('does NOT fold XL or XR to ER — no existing equivalence in this codebase, out of scope for this fix', () => {
+          const r = compareDrugs(
+            { name: 'Metoprolol Succinate ER 50 mg' },
+            { name: 'Metoprolol Succinate XL 50 mg' },
+            provider
+          );
+          expect(r.reasonCode).not.toBe('name_identity_match');
+        });
+      });
     });
   });
 });

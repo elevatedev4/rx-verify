@@ -210,6 +210,73 @@ function isImplausibleNameValue(text: string): boolean {
   return digitCount / totalCount > 0.4;
 }
 
+/**
+ * Bug 2 (round 4, W-T-round4 msg-396): live report — a doctor's free-text
+ * note read "Patient requested renewal. Thank you!"; the app took
+ * "requested renewal..." as the patient name. Root cause, traced against
+ * the live capture geometry: the note's own OCR row is ["Note",
+ * "Patient", "requested", "renewal.", "Thank", "you!"] (the "Note" label
+ * immediately followed, on the SAME physical row, by the note's typed
+ * text). Pass A consumes "Note" as the real label, then checks whether
+ * the remainder starts with the NEXT label so it can split a label-only
+ * row — and "Patient" passes that check (EXACT match against the
+ * 'patient' canonical), so the remainder is treated as "starts with the
+ * next label" and re-queued as its own line. That re-queued line is then
+ * matched via findLabelAtLineStart exactly like any other label row,
+ * producing a second 'patient' label occurrence whose value is
+ * "requested renewal. Thank you!" — plain letters, so the existing
+ * isImplausibleNameValue value-shape gate (added for the prescriber
+ * decoy, defect #5) doesn't reject it, and it unconditionally overwrites
+ * the already-resolved real patient name (every field but 'refills' uses
+ * last-row-wins — see NAME_FIELDS doc).
+ *
+ * Per the owner: "The patient name will always be at the top left by
+ * 'Patient:' ... we cannot use [words elsewhere] for patient name." The
+ * live-capture geometry confirms it: the real "Patient" label sits at
+ * x=64, y=97 (msg-396 log), in the same left LABEL column as every other
+ * label on the page (Address/DOB/Prescriber/etc, all x < 90). The decoy
+ * sits at x=120, y=533 — in the VALUE column (same x as
+ * "Smith,"/"330"/etc.), far down the page.
+ *
+ * X ONLY, deliberately no Y bound: an absolute Y threshold ("near the
+ * top") was tried first and reverted — test (k) below ("block layout
+ * scrolled/shifted vertically") asserts the WHOLE parser stays correct
+ * under a uniform +1000px Y shift (the owner's PioneerRx pane can be
+ * scrolled; every label/value on the page moves by the same amount), and
+ * an absolute-Y gate on 'patient' broke exactly that case — a real,
+ * merely-scrolled "Patient:" label got rejected right along with the
+ * decoy. X, by contrast, does NOT move under vertical scrolling and
+ * reliably separates the label column from the value column in every
+ * fixture in this file (including the two-column and x-shifted
+ * layouts), so it alone is the gate.
+ *
+ * Unlike the prescriber fix (defect #5), which rejected position as the
+ * PRIMARY signal because THAT decoy sat to the LEFT of the real label
+ * (x≈24 vs the real label's x≈45) — here the label-vs-value COLUMN gap
+ * is reliable, and is the fix: a 'patient' candidate is only accepted as
+ * a label anchor if the matched word itself sits in the label column.
+ * Anything in the value column (or further right) is never treated as
+ * the patient label, no matter how well it fuzzy/exact-matches
+ * lexically. Applied inside findLabelAtLineStart/findLabelAt themselves
+ * (not just at the final assignment site, unlike isImplausibleNameValue)
+ * so a decoy also can't force Pass A's label-only-row SPLIT logic to
+ * fire and steal the decoy text away from whatever field it actually
+ * belongs to (here, Note's own value) in the first place.
+ *
+ * The bound is generous on purpose (the real label was observed at x=64
+ * in two independent captures; test (p) below deliberately exercises a
+ * legitimate label column shifted to x=100) so ordinary OCR position
+ * jitter never trips this, while still excluding the value column (x=120
+ * in the live capture) a comfortable margin away.
+ */
+const PATIENT_LABEL_MAX_X = 110;
+
+/** See PATIENT_LABEL_MAX_X doc above. */
+function isPlausiblePatientLabelWord(word: OcrWord | undefined): boolean {
+  if (!word) return false;
+  return word.x <= PATIENT_LABEL_MAX_X;
+}
+
 /** Horizontal gap (px) beyond which two consecutive words on the same reconstructed line are treated as belonging to different on-screen columns, not the same value. Chosen well above normal within-value word spacing (the widest normal gap observed between real sig words on the live capture was ~105px) but well below the far-column jump actually observed (~309px). Reused (same threshold) as the column-CLUSTERING distance for Pass B — a column boundary and a "different column" word gap are the same underlying signal at two different granularities (word-level vs line-start-level). */
 const MAX_VALUE_WORD_GAP_PX = 150;
 
@@ -460,6 +527,10 @@ function findLabelAtLineStart(line: OcrWord[]): LabelMatch | null {
 
     for (const label of LABELS) {
       if (consumed > label.maxWords) continue;
+      // See PATIENT_LABEL_MAX_X/MAX_Y doc: a 'patient' candidate outside
+      // the label column/top-of-page region is never a valid label
+      // anchor, regardless of how well its text matches lexically.
+      if (label.key === 'patient' && !isPlausiblePatientLabelWord(line[0])) continue;
       const dist = levenshtein(candidate, label.canonical);
       if (dist > fuzzyThreshold(label.canonical.length)) continue;
       const ratio = dist / label.canonical.length;
@@ -489,6 +560,8 @@ function findLabelAt(words: OcrWord[], start: number): LabelMatch | null {
 
     for (const label of LABELS) {
       if (consumed > label.maxWords) continue;
+      // See PATIENT_LABEL_MAX_X/MAX_Y doc.
+      if (label.key === 'patient' && !isPlausiblePatientLabelWord(words[start])) continue;
       const dist = levenshtein(candidate, label.canonical);
       if (dist > fuzzyThreshold(label.canonical.length)) continue;
       const ratio = dist / label.canonical.length;

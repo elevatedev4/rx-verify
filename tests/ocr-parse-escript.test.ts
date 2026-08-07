@@ -1359,6 +1359,74 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  describe('patient name label decoy (Bug 2, round 4, live-test bug msg-396: source patientName resolved to "requested renewal..." from a doctor\'s free-text note)', () => {
+    // SYNTHETIC — coordinates copied verbatim from the owner's msg-396 OCR
+    // word-position dump; the patient's own name is fabricated (not
+    // reused verbatim from the live report) per this repo's
+    // synthetic-data-only discipline. The note's own wording ("Patient
+    // requested renewal. Thank you!") is kept verbatim per the branch
+    // brief — it is non-identifying text, not PHI.
+    //
+    // Root cause: the page's Note row is ["Note", "Patient", "requested",
+    // "renewal.", "Thank", "you!"] — the real "Note" label immediately
+    // followed, on the SAME physical OCR row, by the note's own typed
+    // text, which happens to start with the word "Patient". Pass A
+    // consumes "Note" as the real label, then checks whether the
+    // remainder starts with the NEXT label (to split a label-only row);
+    // "Patient" is an EXACT match for the 'patient' canonical, so the
+    // remainder gets re-queued as its own line and is then matched as a
+    // second, decoy 'patient' label occurrence — whose value,
+    // "requested renewal. Thank you!", is plain letters, so the existing
+    // digit-shape gate (isImplausibleNameValue, added for the prescriber
+    // decoy) doesn't reject it, and it unconditionally overwrites the
+    // already-resolved real patient name.
+    const realPatientRow: OcrWord[] = [
+      { text: 'Patient', x: 64, y: 97, w: 42, h: 10 },
+      { text: 'Sample,', x: 121, y: 95, w: 45, h: 15 },
+      { text: 'Jordan', x: 170, y: 95, w: 35, h: 15 }
+    ];
+    // Decoy — the Note label's own row, well below and to the right of
+    // the real label's label-column position (x=64/y=97 vs x=120/y=533
+    // for the decoy "Patient" token — same value column as every other
+    // field's value, far down the page).
+    const noteRowWithPatientDecoy: OcrWord[] = [
+      { text: 'Note', x: 78, y: 533, w: 29, h: 10 },
+      { text: 'Patient', x: 120, y: 533, w: 46, h: 11 },
+      { text: 'requested', x: 170, y: 533, w: 65, h: 14 },
+      { text: 'renewal.', x: 239, y: 533, w: 54, h: 11 },
+      { text: 'Thank', x: 296, y: 533, w: 40, h: 11 },
+      { text: 'you!', x: 338, y: 533, w: 26, h: 14 }
+    ];
+
+    it('resolves the REAL patient name even with the note decoy also present, and never stores the note text', () => {
+      const ocr = flatten([TOOLBAR_ROW, realPatientRow, noteRowWithPatientDecoy]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientName).toBe('Sample, Jordan');
+      expect(record.patientName).not.toContain('requested');
+      expect(record.patientName).not.toContain('renewal');
+    });
+
+    it('is not_provided (never the note text) when there is NO real patient label, only the note', () => {
+      const ocr = flatten([TOOLBAR_ROW, noteRowWithPatientDecoy]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientName).toBeUndefined();
+    });
+
+    it('SAFETY: a genuinely digit-light patient name is unaffected by the position gate (real label stays in the label column)', () => {
+      const row2: OcrWord[] = [
+        { text: 'Patient', x: 64, y: 97, w: 42, h: 10 },
+        { text: 'O2Brien,', x: 121, y: 95, w: 70, h: 11 },
+        { text: 'Drew', x: 200, y: 95, w: 50, h: 11 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row2]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.patientName).toBe('O2Brien, Drew');
+    });
+  });
+
   describe('name value-shape gate boundary (defect #5 follow-up — pin the digit-run threshold on both sides so it can\'t silently drift)', () => {
     // The gate (isImplausibleNameValue) rejects a candidate name value
     // when it contains a 6+ digit run OR is >40% digits overall. Both
