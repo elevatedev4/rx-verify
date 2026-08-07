@@ -57,6 +57,20 @@ public sealed class FieldReader
     // ReadBoolWithRetry below).
     private static readonly EnteredFieldElementCache<AutomationElement> ElementCache = new();
 
+    /// <summary>
+    /// Post-review fix: forces every entered field to re-resolve from
+    /// scratch on the next ReadEntered() call, for whatever window is
+    /// attached next. Called from PioneerRxWindow.TryAttach's self-heal
+    /// catch block when the SHARED UIA3Automation session itself gets
+    /// disposed and recreated — see EnteredFieldElementCache.Invalidate's
+    /// doc for why a same-handle cache hit alone isn't safe to trust
+    /// across that boundary. PioneerRxWindow and FieldReader share the
+    /// Uia namespace; this is the one intentional coupling between them,
+    /// kept to this single narrow static call rather than threading an
+    /// automation-session identifier through every cache key.
+    /// </summary>
+    public static void InvalidateElementCache() => ElementCache.Invalidate();
+
     /// <summary>Cumulative time this ReadEntered() call spent doing FRESH FindFirstDescendant walks (cache misses only) — see Diagnostics/RefreshTiming.cs UiaFindMs. Reset at the start of every ReadEntered() call.</summary>
     public long LastReadFindMs { get; private set; }
 
@@ -380,27 +394,23 @@ public sealed class FieldReader
 
     /// <summary>
     /// Reads a string-valued field through the cache: resolve (cached or
-    /// fresh) -&gt; timed read. If the read throws, OR reads blank where
-    /// this field has read non-blank before this window session (see
-    /// EnteredFieldElementCache.HasEverReadNonBlank), the cached element
-    /// is evicted and re-resolved ONCE more before the result is trusted
-    /// — branch brief item 4: a possibly-stale cached element must never
-    /// be allowed to silently feed a wrong/blank value into a verdict.
+    /// fresh) -&gt; timed read, with the retry-on-suspicion algorithm
+    /// itself delegated to Uia/RetryingFieldRead.cs (post-review fix:
+    /// that orchestration — the highest-stakes new logic here per branch
+    /// brief item 4 — is now a plain, independently xUnit-tested
+    /// algorithm rather than only covered by a manual trace; see
+    /// RxVerifyOverlay.Tests/RetryingFieldReadTests.cs). MarkNonBlank
+    /// bookkeeping stays here, applied to whatever RetryingFieldRead.Read
+    /// returns as FINAL — never called mid-retry.
     /// </summary>
     private string? ReadWithRetry(string automationId, Func<AutomationElement, string?> readValue)
     {
-        var element = ResolveElement(automationId);
-        if (element is null) return null;
-
-        var (value, threw) = TimedRead(element, readValue);
-
-        if (threw || (IsBlank(value) && _windowHandle != IntPtr.Zero && ElementCache.HasEverReadNonBlank(_windowHandle, automationId)))
-        {
-            ElementCache.InvalidateField(_windowHandle, automationId);
-            element = ResolveElement(automationId);
-            if (element is null) return null;
-            (value, _) = TimedRead(element, readValue);
-        }
+        var value = RetryingFieldRead.Read<AutomationElement, string?>(
+            resolveElement: () => ResolveElement(automationId),
+            readValue: element => TimedRead(element, readValue),
+            hasEverReadNonBlank: _windowHandle != IntPtr.Zero && ElementCache.HasEverReadNonBlank(_windowHandle, automationId),
+            isBlank: IsBlank,
+            onSuspicious: () => InvalidateCachedField(automationId));
 
         if (!IsBlank(value) && _windowHandle != IntPtr.Zero)
         {
@@ -413,18 +423,12 @@ public sealed class FieldReader
     /// <summary>Same retry-on-suspicion shape as ReadWithRetry, for the one bool? (checkbox) field — see ReadWithRetry's doc.</summary>
     private bool? ReadBoolWithRetry(string automationId, Func<AutomationElement, bool?> readValue)
     {
-        var element = ResolveElement(automationId);
-        if (element is null) return null;
-
-        var (value, threw) = TimedReadBool(element, readValue);
-
-        if (threw || (value is null && _windowHandle != IntPtr.Zero && ElementCache.HasEverReadNonBlank(_windowHandle, automationId)))
-        {
-            ElementCache.InvalidateField(_windowHandle, automationId);
-            element = ResolveElement(automationId);
-            if (element is null) return null;
-            (value, _) = TimedReadBool(element, readValue);
-        }
+        var value = RetryingFieldRead.Read<AutomationElement, bool?>(
+            resolveElement: () => ResolveElement(automationId),
+            readValue: element => TimedReadBool(element, readValue),
+            hasEverReadNonBlank: _windowHandle != IntPtr.Zero && ElementCache.HasEverReadNonBlank(_windowHandle, automationId),
+            isBlank: static v => v is null,
+            onSuspicious: () => InvalidateCachedField(automationId));
 
         if (value is not null && _windowHandle != IntPtr.Zero)
         {
@@ -434,35 +438,43 @@ public sealed class FieldReader
         return value;
     }
 
-    private (string? Value, bool Threw) TimedRead(AutomationElement element, Func<AutomationElement, string?> readValue)
+    private void InvalidateCachedField(string automationId)
     {
-        var stopwatch = Stopwatch.StartNew();
-        try
+        if (_windowHandle != IntPtr.Zero)
         {
-            var value = readValue(element);
-            LastReadValueMs += stopwatch.ElapsedMilliseconds;
-            return (value, false);
-        }
-        catch
-        {
-            LastReadValueMs += stopwatch.ElapsedMilliseconds;
-            return (null, true);
+            ElementCache.InvalidateField(_windowHandle, automationId);
         }
     }
 
-    private (bool? Value, bool Threw) TimedReadBool(AutomationElement element, Func<AutomationElement, bool?> readValue)
+    private RetryingFieldRead.Attempt<string?> TimedRead(AutomationElement element, Func<AutomationElement, string?> readValue)
     {
         var stopwatch = Stopwatch.StartNew();
         try
         {
             var value = readValue(element);
             LastReadValueMs += stopwatch.ElapsedMilliseconds;
-            return (value, false);
+            return new RetryingFieldRead.Attempt<string?>(value, Threw: false);
         }
         catch
         {
             LastReadValueMs += stopwatch.ElapsedMilliseconds;
-            return (null, true);
+            return new RetryingFieldRead.Attempt<string?>(null, Threw: true);
+        }
+    }
+
+    private RetryingFieldRead.Attempt<bool?> TimedReadBool(AutomationElement element, Func<AutomationElement, bool?> readValue)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var value = readValue(element);
+            LastReadValueMs += stopwatch.ElapsedMilliseconds;
+            return new RetryingFieldRead.Attempt<bool?>(value, Threw: false);
+        }
+        catch
+        {
+            LastReadValueMs += stopwatch.ElapsedMilliseconds;
+            return new RetryingFieldRead.Attempt<bool?>(null, Threw: true);
         }
     }
 

@@ -252,10 +252,20 @@ public sealed class PioneerRxWindow : IDisposable
             // a status message / error dialog rather than crashing, same
             // as before this change, and the next refresh tick tries
             // again from a clean slate.
+            //
+            // Post-review fix: FieldReader.ElementCache holds its OWN
+            // AutomationElement references, keyed only by window handle
+            // — a same-handle cache hit there would otherwise survive
+            // this reset untouched, reusing entered-field elements minted
+            // under the automation session being disposed right here.
+            // That would rely on undocumented COM disconnect-exception
+            // behavior to ever self-heal rather than being invalidated
+            // explicitly, so it's cleared alongside everything else.
             _sharedAutomation?.Dispose();
             _sharedAutomation = null;
             _cachedHandle = IntPtr.Zero;
             _cachedWindowElement = null;
+            FieldReader.InvalidateElementCache();
             throw;
         }
     }

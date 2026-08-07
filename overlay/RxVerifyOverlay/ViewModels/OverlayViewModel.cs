@@ -468,7 +468,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         LastOcrRawText = ocrResult.RawText;
         OcrStatusText = ocrResult.Error is not null
             ? $"OCR: error — {ocrResult.Error}"
-            : $"OCR: {ocrResult.TotalMs}ms (capture {ocrResult.CaptureMs}ms + ocr {ocrResult.OcrMs}ms) · {ocrResult.CharCount} chars";
+            : $"OCR: {ocrResult.TotalMs}ms (capture {ocrResult.CaptureMs}ms + ocr {ocrResult.OcrMs}ms) · {ocrResult.CharCount} chars · scale {ocrResult.OcrScaleFactor:0.#}x";
 
         if (ocrResult.Error is not null)
         {

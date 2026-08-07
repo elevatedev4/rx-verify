@@ -104,7 +104,8 @@ public sealed class OcrFieldReader
                 CaptureBlitMs = blitMs,
                 OcrMs = ocrMs,
                 TotalMs = totalMs,
-                CharCount = ocrText.Text.Length
+                CharCount = ocrText.Text.Length,
+                OcrScaleFactor = ocrText.OcrScaleFactor
             };
         }
         catch (Exception ex)

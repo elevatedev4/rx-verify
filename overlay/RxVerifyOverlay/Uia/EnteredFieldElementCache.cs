@@ -105,4 +105,29 @@ public sealed class EnteredFieldElementCache<TElement> where TElement : class
         _elements.Clear();
         _everNonBlank.Clear();
     }
+
+    /// <summary>
+    /// Unconditionally forces the NEXT call (for any window handle,
+    /// including the same one) to start from empty — mirrors Ocr/
+    /// CaptureRegionCache.cs's Invalidate(). Post-review fix: called by
+    /// FieldReader.InvalidateElementCache(), in turn called from
+    /// PioneerRxWindow.TryAttach's self-heal catch block. That catch
+    /// runs when the SHARED UIA3Automation session itself gets disposed
+    /// and recreated (e.g. the accessibility service restarted) — every
+    /// AutomationElement this cache is holding was minted under the OLD,
+    /// now-disposed session. EnsureWindow's ordinary same-handle check
+    /// alone would NOT catch this: the window's HWND can be completely
+    /// unchanged (same PioneerRx window, same handle) even though the
+    /// automation SESSION underneath every cached element reference is
+    /// gone, so relying on a handle-only comparison here would mean
+    /// re-using elements from a torn-down COM session on faith. This
+    /// method exists specifically so that reuse never has to be trusted
+    /// on faith.
+    /// </summary>
+    public void Invalidate()
+    {
+        _hasWindow = false;
+        _elements.Clear();
+        _everNonBlank.Clear();
+    }
 }
