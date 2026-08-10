@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseNdc, compareDrugs, normalizeDrugNameString, FixtureProvider } from '../src/drug/index.js';
+import { parseNdc, compareDrugs, normalizeDrugNameString, extractStatedDurationHours, FixtureProvider } from '../src/drug/index.js';
 
 const provider = new FixtureProvider();
 
@@ -265,6 +265,87 @@ describe('compareDrugs', () => {
           );
           expect(r.reasonCode).not.toBe('name_identity_match');
         });
+      });
+    });
+
+    // Live report: source e-script "AMPHETAMINE-DEXTROAMPHET ER 30 MG
+    // CAPSULE EXTENDED RELEASE 24 HOUR" vs entered "Dextroamp-Amphet Er
+    // 30 Mg Cap" went YELLOW unknown_drug — same Adderall XR generic,
+    // different abbreviation/ordering/format conventions.
+    describe('amphetamine-family (Adderall/Adderall XR generics) equivalence', () => {
+      it('is GREEN name_identity_match for the exact live-test regression pair', () => {
+        const r = compareDrugs(
+          { name: 'AMPHETAMINE-DEXTROAMPHET ER 30 MG CAPSULE EXTENDED RELEASE 24 HOUR' },
+          { name: 'Dextroamp-Amphet Er 30 Mg Cap' },
+          provider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_identity_match');
+      });
+
+      it('folds "dextroamp"/"amphet" word-boundary abbreviations and sorts the combo ingredients alphabetically', () => {
+        expect(normalizeDrugNameString('Dextroamp-Amphet 20 Mg Tab')).toBe(
+          normalizeDrugNameString('Amphetamine-Dextroamphetamine 20 Mg Tablet')
+        );
+      });
+
+      it('does not rewrite "amphet" as a substring inside an unrelated longer word', () => {
+        // Sanity check: a hypothetical token that merely CONTAINS "amphet"
+        // as a substring (not a standalone/hyphen-delimited token) must
+        // not be rewritten. "amphetamine" itself is the full ingredient
+        // word (not the "amphet" abbreviation), so it must pass through
+        // unchanged rather than matching the abbreviation key.
+        expect(normalizeDrugNameString('Amphetamine 10mg tablet')).toBe('amphetamine 10 mg tablet');
+      });
+
+      it('folds "mixed salts"/"salts" away for this family without touching "sulfate"', () => {
+        const r = compareDrugs(
+          { name: 'Amphetamine-Dextroamphetamine Mixed Salts 20 mg tablet' },
+          { name: 'Dextroamp-Amphet 20 Mg Tab' },
+          provider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_identity_match');
+      });
+
+      it('does NOT strip "sulfate" — Amphetamine Sulfate is a different, non-combo product and stays distinct', () => {
+        expect(normalizeDrugNameString('Amphetamine Sulfate 10mg tablet')).toBe('amphetamine sulfate 10 mg tablet');
+        const r = compareDrugs(
+          { name: 'Amphetamine Sulfate 10 mg tablet' },
+          { name: 'Dextroamp-Amphet 10 mg tablet' },
+          provider
+        );
+        expect(r.status).not.toBe('green');
+      });
+
+      it('is RED on a stated-strength mismatch even with the family name folding applied', () => {
+        const r = compareDrugs(
+          { name: 'Dextroamp-Amphet Er 30 Mg Cap' },
+          { name: 'AMPHETAMINE-DEXTROAMPHET ER 25 MG CAPSULE EXTENDED RELEASE 24 HOUR' },
+          provider
+        );
+        expect(r.status).toBe('red');
+        expect(r.reasonCode).toBe('drug_mismatch');
+      });
+
+      it('does not let a stated release-duration mismatch (12 hour vs 24 hour) resolve to a false green', () => {
+        const r = compareDrugs(
+          { name: 'Dextroamp-Amphet Er 30 Mg Cap 24 Hour' },
+          { name: 'AMPHETAMINE-DEXTROAMPHET ER 30 MG CAPSULE EXTENDED RELEASE 12 HOUR' },
+          provider
+        );
+        expect(r.status).not.toBe('green');
+      });
+
+      it('a stated duration on only ONE side does not block the match', () => {
+        expect(extractStatedDurationHours('AMPHETAMINE-DEXTROAMPHET ER 30 MG CAPSULE EXTENDED RELEASE 24 HOUR')).toBe(24);
+        expect(extractStatedDurationHours('Dextroamp-Amphet Er 30 Mg Cap')).toBeNull();
+        const r = compareDrugs(
+          { name: 'AMPHETAMINE-DEXTROAMPHET ER 30 MG CAPSULE EXTENDED RELEASE 24 HOUR' },
+          { name: 'Dextroamp-Amphet Er 30 Mg Cap' },
+          provider
+        );
+        expect(r.status).toBe('green');
       });
     });
   });

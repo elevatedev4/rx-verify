@@ -103,7 +103,15 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   // existing qhs/hs abbreviations.
   [/\bevery night at bedtime\b/g, 'qhs'],
   [/\bat bedtime\b/g, 'qhs'],
-  [/\bevery night\b/g, 'qhs']
+  [/\bevery night\b/g, 'qhs'],
+  // Morning/evening phrasings imply once-daily frequency, same as the
+  // existing qam/qpm abbreviations (live report: source sig "...in the
+  // morning...Once a day" vs entered "...EVERY MORNING." went YELLOW
+  // sig_ambiguous because only one side had an explicit frequency word —
+  // "every/each/in the morning" IS the frequency statement, not just
+  // timing, so it must resolve to the same 1/day as "once a day"/"qam".
+  [/\b(in the morning|each morning|every morning)\b/g, 'qam'],
+  [/\b(in the evening|each evening|every evening)\b/g, 'qpm']
 ];
 
 function preprocess(raw: string): string {

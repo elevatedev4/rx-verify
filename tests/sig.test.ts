@@ -51,6 +51,25 @@ describe('parseSig', () => {
     expect(p.timesPerDay).toBe(1);
     expect(p.ambiguous).toBe(false);
   });
+
+  describe('morning/evening phrasings imply once-daily frequency', () => {
+    it.each([
+      ['in the morning', 'take 1 capsule in the morning'],
+      ['each morning', 'take 1 capsule each morning'],
+      ['every morning', 'take 1 capsule every morning'],
+      ['qam', 'take 1 capsule qam'],
+      ['in the evening', 'take 1 capsule in the evening'],
+      ['each evening', 'take 1 capsule each evening'],
+      ['every evening', 'take 1 capsule every evening'],
+      ['qpm', 'take 1 capsule qpm'],
+      ['at bedtime', 'take 1 capsule at bedtime'],
+      ['qhs', 'take 1 capsule qhs']
+    ])('"%s" -> frequency 1/day, unambiguous', (_label, sig) => {
+      const p = parseSig(sig);
+      expect(p.timesPerDay).toBe(1);
+      expect(p.ambiguous).toBe(false);
+    });
+  });
 });
 
 describe('compareSigs', () => {
@@ -99,5 +118,26 @@ describe('compareSigs', () => {
     const r = compareSigs(undefined, 'take 1 tab po bid');
     expect(r.status).toBe('yellow');
     expect(r.reasonCode).toBe('not_provided');
+  });
+
+  it('is GREEN "1 cap" vs "1 capsule" (dose-unit abbreviation equivalence regression)', () => {
+    const r = compareSigs('take 1 cap po bid', 'take 1 capsule po bid');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('is GREEN for the live-test regression: amphetamine-family sig, "1 capsule in the morning Orally Once a day" vs "TAKE ONE CAPSULE BY MOUTH EVERY MORNING."', () => {
+    const r = compareSigs(
+      '1 capsule in the morning Orally Once a day',
+      'TAKE ONE CAPSULE BY MOUTH EVERY MORNING.'
+    );
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('is RED when morning frequency contradicts an explicit different frequency', () => {
+    const r = compareSigs('take 1 tab po every morning', 'take 1 tab po bid');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
   });
 });

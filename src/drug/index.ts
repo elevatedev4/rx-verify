@@ -397,6 +397,132 @@ const RELEASE_PHRASE_FOLDS: Array<[RegExp, string]> = [
 ];
 
 /**
+ * Release-qualifier tokens that can legitimately appear TWICE in one
+ * name string: openFDA-style official labeling routinely states the
+ * qualifier once as the short form attached to the ingredient ("...ER
+ * 30 MG...") AND again spelled out as part of the dosage-form
+ * description ("...CAPSULE, EXTENDED RELEASE..."), which
+ * RELEASE_PHRASE_FOLDS above also folds down to "er". Both occurrences
+ * describe the SAME release profile, so after folding, keep only the
+ * first occurrence of each qualifier — otherwise a name with the
+ * qualifier stated once (typical PioneerRx free-text entry) would never
+ * string-match a name that states it twice (typical e-script/openFDA
+ * labeling), even though they're the same drug.
+ */
+const RELEASE_ABBREVS = new Set(['er', 'sr', 'cr', 'dr', 'ir']);
+
+function dedupeReleaseAbbrevs(spaced: string): string {
+  let seen = false;
+  return spaced
+    .split(' ')
+    .filter((tok) => {
+      if (!RELEASE_ABBREVS.has(tok)) return true;
+      if (seen) return false;
+      seen = true;
+      return true;
+    })
+    .join(' ');
+}
+
+/**
+ * Extract a stated release-duration token ("24 hour" / "12 hour", as in
+ * "...CAPSULE EXTENDED RELEASE 24 HOUR") from a RAW (non-normalized)
+ * drug name. Returns the number of hours, or null if none is stated.
+ * Mirrors extractStatedStrength below: used to detect a genuine
+ * CONTRADICTION (both sides state a duration and it differs) before the
+ * name-identity fast path in compareDrugs, since normalizeDrugNameString
+ * folds the duration phrase away entirely (see foldDurationHours) and
+ * would otherwise let two differently-timed products silently match.
+ */
+export function extractStatedDurationHours(name: string): number | null {
+  const m = /\b(\d+)\s*hour\b/i.exec(name);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Fold away a stated "N hour" release-duration phrase for the identity
+ * comparison string. Safe to do unconditionally here ONLY because
+ * compareDrugs separately blocks the name-identity fast path whenever
+ * both sides state a DIFFERENT duration (see extractStatedDurationHours)
+ * — this function alone cannot tell "one side silent" apart from
+ * "both sides differ", so it must never be the sole gate.
+ */
+function foldDurationHours(spaced: string): string {
+  return spaced.replace(/\b\d+\s*hour\b/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Word-level abbreviation expansions for the amphetamine/dextroamphetamine
+ * combination family (Adderall / Adderall XR generics — "amphetamine-
+ * dextroamphetamine mixed salts"). Field report: e-script named the drug
+ * "AMPHETAMINE-DEXTROAMPHET" (openFDA-style, dextro- prefix fused onto
+ * the "amphet" abbreviation of amphetamine), PioneerRx entry named it
+ * "Dextroamp-Amphet" (a more aggressively truncated abbreviation of
+ * dextroamphetamine, plus the same "amphet" abbreviation) — same
+ * ingredients, different truncations, flagged as unknown_drug. Keys are
+ * matched as WHOLE tokens only (space- or hyphen-delimited), never a
+ * substring rewrite inside an unrelated longer word — see
+ * foldAmphetamineFamily below, which always splits on hyphens before
+ * looking a token up here.
+ */
+const AMPHETAMINE_ABBREV_MAP: Record<string, string> = {
+  dextroamp: 'dextroamphetamine',
+  dextroamphet: 'dextroamphetamine',
+  amphet: 'amphetamine'
+};
+
+const AMPHETAMINE_FAMILY_INGREDIENTS = new Set(['amphetamine', 'dextroamphetamine']);
+
+/**
+ * Amphetamine-family-only normalization pass:
+ *  1. Expand the whole-token abbreviations above (splitting hyphenated
+ *     compounds first, so "dextroamp-amphet" expands each side
+ *     independently).
+ *  2. Combo-ingredient order normalization, SCOPED to this family only
+ *     (not applied generically — no other hyphenated multi-ingredient
+ *     name has test coverage to prove it's safe fleet-wide): when a
+ *     hyphenated token is exactly the two amphetamine-family ingredients
+ *     in either order, sort them alphabetically, mirroring
+ *     scripts/build-drug-data.ts's existing ingredient-alphabetization
+ *     convention (there: semicolon-joined and localeCompare-sorted; here:
+ *     hyphen-joined, same sort).
+ *  3. Salt-phrase folding, scoped to this family only (gated on the
+ *     string actually containing a family ingredient): "salts"/"salt"/
+ *     "mixed" tokens carry no product-distinguishing meaning for this
+ *     combination product and are dropped. Never touches "sulfate"/
+ *     "sulphate" — Amphetamine SULFATE is a different, non-combo
+ *     product and must stay distinct.
+ *
+ * Strength/dose-form equality is still enforced entirely by the
+ * existing checks elsewhere in compareDrugs (extractStatedStrength
+ * contradiction check, concept ingredient/strength/form comparison) —
+ * this function only touches how the ingredient NAME portion folds, so
+ * e.g. generic Mydayis (12.5/25/37.5/50mg) still only matches Adderall
+ * XR (5/10/15/20/25/30mg) at the genuine 25mg strength overlap, and only
+ * when the raw names carry no other distinguishing token — no
+ * additional product-level logic is added here on purpose.
+ */
+function foldAmphetamineFamily(spaced: string): string {
+  const words = spaced.split(' ').map((word) => {
+    if (!word.includes('-')) {
+      return AMPHETAMINE_ABBREV_MAP[word] ?? word;
+    }
+    const parts = word.split('-').map((p) => AMPHETAMINE_ABBREV_MAP[p] ?? p);
+    if (parts.length === 2 && parts.every((p) => AMPHETAMINE_FAMILY_INGREDIENTS.has(p))) {
+      parts.sort((a, b) => a.localeCompare(b));
+    }
+    return parts.join('-');
+  });
+
+  const hasFamilyIngredient = words.some(
+    (w) => AMPHETAMINE_FAMILY_INGREDIENTS.has(w) || w.split('-').some((p) => AMPHETAMINE_FAMILY_INGREDIENTS.has(p))
+  );
+  if (!hasFamilyIngredient) return words.join(' ');
+
+  return words.filter((w) => w !== 'salts' && w !== 'salt' && w !== 'mixed').join(' ');
+}
+
+/**
  * Normalize a free-text drug name/description for IDENTITY comparison:
  * case/punctuation/whitespace, release-qualifier phrases (see
  * RELEASE_PHRASE_FOLDS — "extended release"/"extended-release" -> er,
@@ -425,12 +551,23 @@ export function normalizeDrugNameString(raw: string): string {
     folded = folded.replace(pattern, abbrev);
   }
 
+  // Fold away a stated release-DURATION phrase ("24 hour"/"12 hour") —
+  // see foldDurationHours's doc: safe here only because compareDrugs
+  // separately blocks the identity fast path on a genuine duration
+  // CONTRADICTION via extractStatedDurationHours.
+  folded = foldDurationHours(folded);
+  // Collapse a release qualifier stated twice (once abbreviated, once
+  // spelled out and re-folded above) down to one occurrence.
+  folded = dedupeReleaseAbbrevs(folded);
+
   // Force exactly one space between a number and a trailing strength
   // unit, so "2mg" and "2 mg" fold to the same text (unit CASING is
   // already handled by the toLowerCase() above).
   const spaced = folded.replace(/(\d)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
 
-  return spaced
+  const amphetFolded = foldAmphetamineFamily(spaced);
+
+  return amphetFolded
     .split(' ')
     .map((tok) => DOSAGE_FORM_WORDS[tok] ?? tok)
     .join(' ');
@@ -477,9 +614,22 @@ export function compareDrugs(
   // resolve ingredient/strength/form for the RED/YELLOW paths) — a
   // precise RxNorm-rxcui identity compare is documented future work (see
   // this file's header) once Will's UTS license lands.
+  // Release-DURATION contradiction guard: normalizeDrugNameString folds
+  // away a stated "N hour" duration phrase entirely (see
+  // foldDurationHours) so that a name stating it on only one side still
+  // matches. That fold alone can't tell "one side silent" apart from
+  // "both sides state a DIFFERENT duration" — so check the raw strings
+  // here and refuse the fast-path green on a genuine contradiction (a
+  // 12-hour and a 24-hour product are not the same dispense, even if
+  // everything else about the name is identical).
+  const srcDurationHours = src.name ? extractStatedDurationHours(src.name) : null;
+  const entDurationHours = ent.name ? extractStatedDurationHours(ent.name) : null;
+  const durationConflict =
+    srcDurationHours !== null && entDurationHours !== null && srcDurationHours !== entDurationHours;
+
   const srcNameNorm = src.name ? normalizeDrugNameString(src.name) : null;
   const entNameNorm = ent.name ? normalizeDrugNameString(ent.name) : null;
-  if (srcNameNorm && entNameNorm && srcNameNorm === entNameNorm) {
+  if (srcNameNorm && entNameNorm && srcNameNorm === entNameNorm && !durationConflict) {
     return {
       status: 'green',
       reasonCode: 'name_identity_match',
