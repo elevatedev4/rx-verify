@@ -86,4 +86,32 @@ describe('compareNames', () => {
     const r = compareNames('Jordan Alex Rivera', 'Rivera, Jordan');
     expect(r.status).toBe('yellow');
   });
+
+  describe('Round 6, fix 8: compound-surname separator collapse (false RED)', () => {
+    it('is GREEN (was RED surname_mismatch): a spaced compound surname vs the same surname glued with no separator', () => {
+      const r = compareNames('John Smith Jones', 'John Smithjones');
+      expect(r.status).toBe('green');
+    });
+
+    it('is GREEN: hyphenated vs glued forms of the same compound surname', () => {
+      const r = compareNames('John Smith-Jones', 'John Smithjones');
+      expect(r.status).toBe('green');
+    });
+
+    it('is GREEN: glued vs spaced, either direction', () => {
+      const r = compareNames('John Smithjones', 'John Smith Jones');
+      expect(r.status).toBe('green');
+    });
+
+    it('regression: a genuinely DIFFERENT surname still returns RED, even glued', () => {
+      const r = compareNames('John Smith Jones', 'John Johnsonmiller');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('surname_mismatch');
+    });
+
+    it('regression: a near-miss (one letter different) compound surname is not swallowed by the separator collapse', () => {
+      const r = compareNames('John Smith Jones', 'John Smythjones');
+      expect(r.status).not.toBe('green');
+    });
+  });
 });

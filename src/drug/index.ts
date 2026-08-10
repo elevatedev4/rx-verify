@@ -321,6 +321,73 @@ export function extractStatedStrength(name: string): string | null {
 }
 
 /**
+ * Round 6, fix 2: OCR confusables scoped NARROWLY to the immediate
+ * vicinity of a compound concentration strength ("12.5 mg/0.5 mL"), never
+ * applied to the name string generally:
+ *  - a unit word (mg/mcg/ml/g/unit(s)) immediately followed by "I" or
+ *    "1" where "/" belongs ("MGI0.5" / "MGIO.5" -> "MG/0.5" / "MG/O.5"),
+ *    only when what follows looks like the start of the second number
+ *    (a digit, or an "o." that itself needs the next fix below);
+ *  - a bare "O" standing in for "0" immediately before a decimal point
+ *    that's itself followed by a digit ("O.5" -> "0.5") — the classic
+ *    OCR zero/letter-O confusion, scoped to this exact decimal-point-
+ *    adjacent shape.
+ * Field report: source e-script text "12.5 MGIO.5 ML ..." (intended:
+ * "12.5 MG/0.5 ML") — see extractStatedConcentrationStrength's doc for
+ * why the fix has to happen before that regex runs, not by fuzzing the
+ * strength-matching regex itself.
+ */
+function fixStrengthOcrConfusables(s: string): string {
+  let out = s.replace(/\b(mcg|mg|ml|g|units?)[i1](?=\d|o\.)/gi, '$1/');
+  out = out.replace(/\bo(?=\.\d)/gi, '0');
+  return out;
+}
+
+const CONCENTRATION_STRENGTH_RE =
+  /(\d+(?:\.\d+)?)\s*(mcg|mg|ml|g|units?)\s*\/\s*(\d+(?:\.\d+)?)\s*(mcg|mg|ml|g|units?)\b/i;
+
+/**
+ * True when a free-text drug name STATES (or, per fixStrengthOcrConfusables,
+ * appears to have intended to state) a compound concentration strength —
+ * a literal "/" concentration notation, or the specific unit+I/1-glued
+ * OCR shape fixStrengthOcrConfusables targets. Used by compareDrugs to
+ * decide when the plain single-value extractStatedStrength cross-check
+ * is unsafe to fall back to (see the safety rule on
+ * extractStatedConcentrationStrength).
+ */
+function hasConcentrationSignal(name: string): boolean {
+  return /\//.test(name) || /\b(mcg|mg|ml|g|units?)[i1](?=\d|o\.)/i.test(name);
+}
+
+/**
+ * Extract a compound CONCENTRATION strength ("12.5 mg/0.5 mL" -> one
+ * "12.5mg/0.5ml" value, not two independently-competing single
+ * strengths) from a free-text drug name, tolerating the narrow OCR
+ * confusables in fixStrengthOcrConfusables. Field report (round 6, fix
+ * 2): "ZEPBOUND 12.5 MGIO.5 ML SUBCUTANEOUS PEN INJECTOR" — the OLD
+ * single-value extractStatedStrength regex, run directly against that
+ * garbled text, skipped past the unparseable "MGIO.5" fragment entirely
+ * and grabbed the isolated "5" + "ML" left over from "...IO.5 ML..." as
+ * if "5ml" were the whole stated strength — producing a confirmed false
+ * RED against a correctly-matching "12.5 Mg/0.5 Ml" entry.
+ *
+ * SAFETY RULE: returns null — "unparseable", never a guessed value —
+ * whenever a confident compound match can't be found even after the
+ * scoped confusable fixes. Callers must never derive a RED verdict from
+ * a null/partial result here; a RED requires two CLEANLY parsed,
+ * genuinely different compound strengths on both sides (see compareDrugs'
+ * use of this alongside hasConcentrationSignal).
+ */
+export function extractStatedConcentrationStrength(name: string): string | null {
+  const fixed = fixStrengthOcrConfusables(name);
+  const m = CONCENTRATION_STRENGTH_RE.exec(fixed);
+  if (!m) return null;
+  const unit1 = (m[2] ?? '').toLowerCase().replace(/^units$/, 'unit');
+  const unit2 = (m[4] ?? '').toLowerCase().replace(/^units$/, 'unit');
+  return `${m[1]}${unit1}/${m[3]}${unit2}`;
+}
+
+/**
  * Common dosage-FORM word variants -> canonical form word. Applied as a
  * whole-token replacement (never a substring replace) so e.g. "cap" in
  * "captopril" is never touched. Deliberately only covers the handful of
@@ -462,6 +529,55 @@ function foldDurationHours(spaced: string): string {
 }
 
 /**
+ * Round 6, fix 3: strip a trailing strength restatement that DUPLICATES
+ * the strength already stated earlier in the same name string — field
+ * report: e-script text restates the strength again after the dosage
+ * form ("ELIQUIS 5 MG TABLET 5 mg"), which PioneerRx's entry naturally
+ * doesn't repeat ("Eliquis 5 Mg Tablet"), so the two names never
+ * normalized-string-matched and fell through to unknown_drug yellow.
+ *
+ * Deliberately requires the duplicate to be an EXACT match of the
+ * earliest-stated strength AND to be the string's actual trailing
+ * token(s) — a trailing strength that CONTRADICTS the earlier one
+ * ("TABLET 10 mg" after "5 MG" stated earlier) is left untouched here on
+ * purpose: that's a genuine restated-strength contradiction, and must
+ * still surface via the existing extractStatedStrength-based
+ * stated-strength-mismatch RED check in compareDrugs (which reads the
+ * FIRST stated strength on each side) rather than being silently erased
+ * by this fold.
+ *
+ * Operates on `spaced` (this function runs after normalizeDrugNameString
+ * has already inserted a space between a glued digit+unit, e.g. "5mg" ->
+ * "5 mg") so every strength token here is already in the consistent
+ * "digit unit" shape. Never touches any other word in the name — e.g. a
+ * salt suffix like "dihydrochloride" sitting between the two strength
+ * occurrences is left completely alone, only the trailing duplicate
+ * strength token(s) are removed.
+ */
+function foldTrailingDuplicateStrength(spaced: string): string {
+  const strengthRe = /\b(\d+(?:\.\d+)?)\s+(mcg|mg|ml|g|units?)\b/g;
+  const matches = [...spaced.matchAll(strengthRe)];
+  if (matches.length < 2) return spaced;
+
+  const first = matches[0] as RegExpMatchArray;
+  const last = matches[matches.length - 1] as RegExpMatchArray;
+  const firstVal = `${first[1]}${first[2]}`;
+  const lastVal = `${last[1]}${last[2]}`;
+  if (firstVal !== lastVal) return spaced; // contradiction — never fold, leave both in place
+
+  // Only strip when the duplicate is genuinely the END of the string (a
+  // restatement tacked on after the form word) — not a strength mentioned
+  // mid-name that happens to repeat for an unrelated reason.
+  const lastIndex = last.index ?? -1;
+  if (lastIndex < 0) return spaced;
+  const tail = spaced.slice(lastIndex).trim();
+  const expectedTail = `${last[1]} ${last[2]}`;
+  if (tail !== expectedTail) return spaced;
+
+  return spaced.slice(0, lastIndex).trim();
+}
+
+/**
  * Word-level abbreviation expansions for the amphetamine/dextroamphetamine
  * combination family (Adderall / Adderall XR generics — "amphetamine-
  * dextroamphetamine mixed salts"). Field report: e-script named the drug
@@ -478,7 +594,14 @@ function foldDurationHours(spaced: string): string {
 const AMPHETAMINE_ABBREV_MAP: Record<string, string> = {
   dextroamp: 'dextroamphetamine',
   dextroamphet: 'dextroamphetamine',
-  amphet: 'amphetamine'
+  amphet: 'amphetamine',
+  // Round 6, fix 5 (additive): "amphetam" is another truncation of
+  // amphetamine actually seen on a live PioneerRx entry
+  // ("Dextroamp-Amphetam"); "dextroamphetam" added defensively for the
+  // symmetric dextroamphetamine truncation, same length-truncation
+  // pattern as the existing dextroamp/dextroamphet keys above.
+  amphetam: 'amphetamine',
+  dextroamphetam: 'dextroamphetamine'
 };
 
 const AMPHETAMINE_FAMILY_INGREDIENTS = new Set(['amphetamine', 'dextroamphetamine']);
@@ -575,11 +698,46 @@ export function normalizeDrugNameString(raw: string): string {
   // already handled by the toLowerCase() above).
   const spaced = folded.replace(/(\d)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
 
-  const amphetFolded = foldAmphetamineFamily(spaced);
+  // Round 6, fix 3 (additive): strip a trailing strength restatement that
+  // exactly duplicates the strength already stated earlier in the name
+  // — see foldTrailingDuplicateStrength's doc.
+  const dedupedStrength = foldTrailingDuplicateStrength(spaced);
+
+  const amphetFolded = foldAmphetamineFamily(dedupedStrength);
 
   return amphetFolded
     .split(' ')
     .map((tok) => DOSAGE_FORM_WORDS[tok] ?? tok)
+    .join(' ');
+}
+
+/**
+ * Round 6, fix 4: route-qualifier words that sometimes appear inside the
+ * FORM phrase of a drug name ("...ORAL TABLET" vs "...TABLET"). Field
+ * report: e-script text carries a route qualifier PioneerRx's shorter
+ * free-text entry drops entirely — same drug, one side is just more
+ * verbose. Only the common, unambiguous route words are listed; scoped
+ * exactly the way DOSAGE_FORM_WORDS/RELEASE_PHRASE_FOLDS above document
+ * their own scoping (a fixed, deliberately short list, not a general
+ * fuzzy pass).
+ */
+const FORM_ROUTE_QUALIFIERS = new Set([
+  'oral', 'subcutaneous', 'topical', 'sublingual', 'rectal', 'vaginal',
+  'intramuscular', 'intravenous', 'transdermal', 'ophthalmic', 'otic',
+  'nasal', 'inhalation'
+]);
+
+function extractFormRouteQualifier(normalizedName: string): string | null {
+  for (const tok of normalizedName.split(' ')) {
+    if (FORM_ROUTE_QUALIFIERS.has(tok)) return tok;
+  }
+  return null;
+}
+
+function stripFormRouteQualifiers(normalizedName: string): string {
+  return normalizedName
+    .split(' ')
+    .filter((tok) => !FORM_ROUTE_QUALIFIERS.has(tok))
     .join(' ');
 }
 
@@ -647,6 +805,30 @@ export function compareDrugs(
     };
   }
 
+  // Round 6, fix 4: a route qualifier stated in the FORM phrase on only
+  // ONE side ("...Oral Tablet" vs "...Tablet") is not itself evidence of
+  // a different product — fold it out and retry the identity comparison.
+  // When BOTH sides state a route qualifier and it genuinely DIFFERS
+  // ("oral tablet" vs "sublingual tablet"), that IS a real difference —
+  // this check refuses to fold in that case, so a real route mismatch
+  // still falls through to the ordinary (non-green) comparison below.
+  if (srcNameNorm && entNameNorm && !durationConflict) {
+    const srcRoute = extractFormRouteQualifier(srcNameNorm);
+    const entRoute = extractFormRouteQualifier(entNameNorm);
+    const routesConflict = srcRoute !== null && entRoute !== null && srcRoute !== entRoute;
+    if (!routesConflict && (srcRoute !== null || entRoute !== null)) {
+      const srcNoRoute = stripFormRouteQualifiers(srcNameNorm);
+      const entNoRoute = stripFormRouteQualifiers(entNameNorm);
+      if (srcNoRoute === entNoRoute) {
+        return {
+          status: 'green',
+          reasonCode: 'name_identity_match',
+          explanation: `Drug name/description matches after folding out a route qualifier stated on only one side ("${src.name}" / "${ent.name}").`
+        };
+      }
+    }
+  }
+
   const srcNdc = src.ndc ? parseNdc(src.ndc) : null;
   const entNdc = ent.ndc ? parseNdc(ent.ndc) : null;
 
@@ -663,15 +845,59 @@ export function compareDrugs(
   // "Lisinopril 20mg" and "Lisinopril 10mg" can resolve to the same
   // fixture concept — the stated strengths must not be allowed to
   // contradict silently.
-  const srcStatedStrength = src.name ? extractStatedStrength(src.name) : null;
-  const entStatedStrength = ent.name ? extractStatedStrength(ent.name) : null;
-  if (srcStatedStrength && entStatedStrength && srcStatedStrength !== entStatedStrength) {
-    return {
-      status: 'red',
-      reasonCode: 'drug_mismatch',
-      explanation: `Drug does not match: strength stated in the drug names differs (${srcStatedStrength} vs ${entStatedStrength}).`
-    };
+  //
+  // Round 6, fix 2: a compound CONCENTRATION strength ("12.5 mg/0.5 mL")
+  // is ONE unit, not two independently-competing single strengths — see
+  // extractStatedConcentrationStrength's doc. Try that first whenever
+  // either side's name looks like it's stating one (hasConcentrationSignal
+  // — a literal "/" or the specific OCR-glued shape); only fall back to
+  // the plain single-value check below when NEITHER side shows any such
+  // signal at all. Per the safety rule: if one side signals a
+  // concentration strength but it can't be cleanly parsed even after the
+  // scoped OCR-confusable fixes, this NEVER falls back to the naive
+  // single-value regex for that side (which is exactly what produced the
+  // original false RED — a fragment like "5ml" grabbed from a garbled
+  // "...IO.5 ML..." remainder) — it just skips the strength-conflict
+  // check entirely and lets the comparison continue (typically landing on
+  // a yellow verdict further down), never guessing a RED.
+  const srcConcStrength = src.name ? extractStatedConcentrationStrength(src.name) : null;
+  const entConcStrength = ent.name ? extractStatedConcentrationStrength(ent.name) : null;
+  const srcHasConcSignal = src.name ? hasConcentrationSignal(src.name) : false;
+  const entHasConcSignal = ent.name ? hasConcentrationSignal(ent.name) : false;
+
+  let srcStatedStrength: string | null = null;
+  let entStatedStrength: string | null = null;
+
+  if (srcConcStrength && entConcStrength) {
+    if (srcConcStrength !== entConcStrength) {
+      return {
+        status: 'red',
+        reasonCode: 'drug_mismatch',
+        explanation: `Drug does not match: concentration strength stated in the drug names differs (${srcConcStrength} vs ${entConcStrength}).`
+      };
+    }
+    // Compound strengths agree — do NOT also run the single-value
+    // cross-check below; it would risk comparing two DIFFERENT halves of
+    // the same compound value (e.g. one side's per-dose mg vs the other's
+    // per-volume mL) as if they were competing single strengths.
+  } else if (!srcHasConcSignal && !entHasConcSignal) {
+    // Neither side shows any concentration-strength notation — safe to
+    // run the plain single-strength cross-check exactly as before.
+    srcStatedStrength = src.name ? extractStatedStrength(src.name) : null;
+    entStatedStrength = ent.name ? extractStatedStrength(ent.name) : null;
+    if (srcStatedStrength && entStatedStrength && srcStatedStrength !== entStatedStrength) {
+      return {
+        status: 'red',
+        reasonCode: 'drug_mismatch',
+        explanation: `Drug does not match: strength stated in the drug names differs (${srcStatedStrength} vs ${entStatedStrength}).`
+      };
+    }
   }
+  // else: at least one side shows concentration notation but a confident
+  // compound match couldn't be confirmed on both sides — per the safety
+  // rule above, strength comparison for this pair is indeterminate; fall
+  // through without emitting a RED (the concept-resolution path below
+  // will typically land on a yellow verdict).
 
   const srcConceptViaNdc = srcNdc ? provider.getConcept(srcNdc.normalized11) : null;
   const entConceptViaNdc = entNdc ? provider.getConcept(entNdc.normalized11) : null;
@@ -690,8 +916,8 @@ export function compareDrugs(
   // NDC pins the exact product) or its raw name states a strength. A
   // name-resolved side with no stated strength gives us no basis to
   // claim "same strength" — that claim must not appear in a verdict.
-  const srcStrengthVerified = srcConceptViaNdc !== null || srcStatedStrength !== null;
-  const entStrengthVerified = entConceptViaNdc !== null || entStatedStrength !== null;
+  const srcStrengthVerified = srcConceptViaNdc !== null || srcStatedStrength !== null || srcConcStrength !== null;
+  const entStrengthVerified = entConceptViaNdc !== null || entStatedStrength !== null || entConcStrength !== null;
   const strengthUnverified = !srcStrengthVerified || !entStrengthVerified;
 
   if (srcConcept.rxcui === entConcept.rxcui) {

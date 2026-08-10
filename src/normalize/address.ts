@@ -88,6 +88,33 @@ function splitGluedUnitTokens(s: string): string {
     .join(' ');
 }
 
+/**
+ * Round 6, fix 9a: OCR sometimes glues a street SUFFIX directly onto a
+ * following unit designator (and that onto the unit value) with no space
+ * at ALL — "StSte2050" instead of "St Ste 2050" (live report: "1130 W
+ * 4th StSte2050" vs "1130 W 4th St Ste 2050"). GLUED_UNIT_RE above only
+ * covers a designator glued straight onto its digits ("suite205"); it
+ * doesn't fire here because the token doesn't START with a designator
+ * word, it starts with a SUFFIX word that a designator+digits run is
+ * glued onto. Insert a space between a known street-suffix word and an
+ * immediately-following known unit-designator word (itself immediately
+ * followed by digits), all still lowercase/lightly-folded at this point.
+ * Scoped to the finite, KNOWN suffix (STREET_SUFFIXES keys) and unit-
+ * designator word lists — never a blind alpha/digit boundary split — so
+ * this can't fracture an ordinary street or city name.
+ */
+const SUFFIX_WORD_ALT = Object.keys(STREET_SUFFIXES)
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+const UNIT_WORD_ALT = ['apartment', 'suite', 'unit', 'apt', 'ste']
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+const GLUED_SUFFIX_UNIT_RE = new RegExp(`\\b(${SUFFIX_WORD_ALT})(${UNIT_WORD_ALT})(\\d\\w*)\\b`, 'gi');
+
+function splitGluedSuffixUnitTokens(s: string): string {
+  return s.replace(GLUED_SUFFIX_UNIT_RE, '$1 $2 $3');
+}
+
 /** Standard Levenshtein edit distance, small-string DP (address tokens are short). */
 function levenshtein(a: string, b: string): number {
   const m = a.length;
@@ -245,9 +272,57 @@ interface NormalizedStreet {
   baseWithoutTrailingToken: string | null;
 }
 
+/**
+ * Round 6, fix 9b: a trailing "1/2"/"1/4"/"3/4" fraction glued directly
+ * onto a house number with no space ("7291/2" instead of "729 1/2") —
+ * live report shape (synthetic address here — see tests/normalize-
+ * address.test.ts): "7291/2 Ridgemont St 210" vs "729 1/2 Ridgemont St,
+ * Ste 210". Non-greedy leading digit group finds the unique split
+ * point (there is only ever one valid place these 3 fixed fraction
+ * literals can start), so this can't mis-split an ordinary house number
+ * that happens to contain a "1".
+ */
+const HOUSE_NUMBER_FRACTION_RE = /^(\d+?)(1\/2|1\/4|3\/4)\b/;
+
+function splitHouseNumberFraction(s: string): string {
+  return s.replace(HOUSE_NUMBER_FRACTION_RE, '$1 $2');
+}
+
+/**
+ * Round 6, fix 9c: a fixed, narrow list of FULL (non-abbreviated)
+ * street-suffix words that tolerate a truncated OCR read as a >=5-char
+ * PREFIX match — live report: "3310 [Street] PARKWA" (OCR dropped the
+ * final "Y") vs "...Parkway...". Deliberately NOT applied to the
+ * abbreviated forms (st, dr, ave, ...) or to STREET_SUFFIXES as a whole —
+ * those are already short enough that a prefix match would risk
+ * colliding with a genuinely different, shorter real word. Only the
+ * exact fixed list of suffix words named in the branch brief; not a
+ * general fuzzy-suffix pass.
+ */
+const PREFIX_TOLERANT_SUFFIXES = [
+  'parkway', 'avenue', 'boulevard', 'street', 'drive',
+  'circle', 'terrace', 'highway', 'court', 'place', 'road', 'lane'
+];
+
+/**
+ * True match (returning the canonical abbreviation) when `token` is a
+ * >=5-char prefix of one of PREFIX_TOLERANT_SUFFIXES — see that
+ * constant's doc. Exact equality is already handled by the normal
+ * STREET_SUFFIXES lookup; this only covers the truncated case.
+ */
+function truncatedSuffixMatch(token: string): string | null {
+  if (token.length < 5) return null;
+  for (const full of PREFIX_TOLERANT_SUFFIXES) {
+    if (full !== token && full.startsWith(token)) {
+      return STREET_SUFFIXES[full] as string;
+    }
+  }
+  return null;
+}
+
 /** Split a raw street line into base + unit, and normalize tokens. */
 function normalizeStreetLine(raw: string): NormalizedStreet {
-  let s = splitGluedUnitTokens(foldCase(raw));
+  let s = splitGluedUnitTokens(splitGluedSuffixUnitTokens(splitHouseNumberFraction(foldCase(raw))));
 
   // Extract "#123" style unit anywhere in the string.
   let unit: string | null = null;
@@ -272,8 +347,38 @@ function normalizeStreetLine(raw: string): NormalizedStreet {
   const normalized = outTokens.map((tok) => {
     if (STREET_SUFFIXES[tok]) return STREET_SUFFIXES[tok] as string;
     if (DIRECTIONALS[tok]) return DIRECTIONALS[tok] as string;
+    const truncated = truncatedSuffixMatch(tok);
+    if (truncated) return truncated;
     return tok;
   });
+
+  // Round 6, fix 9b: a BARE trailing number with no unit-designator word
+  // at all, immediately after a recognized street suffix ("...St 210",
+  // no "Ste"/"Apt"/etc present) — treated as an implicit unit number, the
+  // same "incomplete entry, not evidence of a different street" leniency
+  // this file already gives an explicit designator-based unit (Bug 7).
+  // Only fires when no unit was already found (via "#" or a designator
+  // word) and the SECOND-TO-LAST token is a real recognized suffix — the
+  // exact shape of "the unit-designator word got dropped, the number
+  // stayed". An address that simply ends in a suffix with nothing after
+  // it is unaffected — the ordinary suffix-detection below still handles
+  // that unchanged.
+  if (
+    unit === null &&
+    normalized.length >= 3 &&
+    /^\d+$/.test(normalized[normalized.length - 1] as string) &&
+    SUFFIX_ABBREVIATIONS.has(normalized[normalized.length - 2] as string)
+  ) {
+    const implicitUnit = normalized[normalized.length - 1] as string;
+    const implicitSuffix = normalized[normalized.length - 2] as string;
+    return {
+      base: normalized.slice(0, -2).join(' '),
+      suffix: implicitSuffix,
+      unit: implicitUnit.toLowerCase(),
+      trailingToken: null,
+      baseWithoutTrailingToken: null
+    };
+  }
 
   // Split a trailing street-type suffix (e.g. "st", "ave") off the core
   // street text. This is deliberately separate from `base` — see

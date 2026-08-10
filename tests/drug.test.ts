@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { parseNdc, compareDrugs, normalizeDrugNameString, extractStatedDurationHours, FixtureProvider } from '../src/drug/index.js';
+import {
+  parseNdc,
+  compareDrugs,
+  normalizeDrugNameString,
+  extractStatedDurationHours,
+  extractStatedConcentrationStrength,
+  FixtureProvider
+} from '../src/drug/index.js';
 
 const provider = new FixtureProvider();
 
@@ -377,6 +384,148 @@ describe('compareDrugs', () => {
         );
         expect(r.status).toBe('green');
       });
+    });
+  });
+});
+
+describe('Round 6 fixes', () => {
+  describe('fix 2: concentration-strength false RED', () => {
+    const garbledSource =
+      'ZEPBOUND 12.5 MGIO.5 ML SUBCUTANEOUS PEN INJECTOR 12.5 mg/O.5 mL';
+    const cleanEntered = 'Zepbound 12.5 Mg/0.5 Ml Pen';
+
+    it('extracts the compound concentration strength from the garbled source, tolerating I->/ and O->0', () => {
+      expect(extractStatedConcentrationStrength(garbledSource)).toBe('12.5mg/0.5ml');
+    });
+
+    it('extracts the same compound strength from the clean entered text', () => {
+      expect(extractStatedConcentrationStrength(cleanEntered)).toBe('12.5mg/0.5ml');
+    });
+
+    it('is NOT red for the live-report pair (previously a false RED "5ml vs 12.5mg")', () => {
+      const r = compareDrugs({ name: garbledSource }, { name: cleanEntered }, provider);
+      expect(r.status).not.toBe('red');
+    });
+
+    it('the trailing restatement "12.5 mg/O.5 mL" in the same source string corroborates the same compound strength', () => {
+      expect(extractStatedConcentrationStrength('12.5 mg/O.5 mL')).toBe('12.5mg/0.5ml');
+    });
+
+    it('regression: a REAL concentration-strength difference (both cleanly stated) stays RED', () => {
+      const r = compareDrugs(
+        { name: 'Zepbound 12.5 mg/0.5 ml Pen' },
+        { name: 'Zepbound 15 mg/0.5 ml Pen' },
+        provider
+      );
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('drug_mismatch');
+      expect(r.explanation).toContain('12.5mg/0.5ml');
+      expect(r.explanation).toContain('15mg/0.5ml');
+    });
+
+    it('safety rule: concentration SIGNAL present (a unit+I/1-glued shape) but no leading number to pair it with — extraction fails cleanly, never guesses a RED', () => {
+      const noLeadingNumber = 'ZEPBOUND MGI5 ML SUBCUTANEOUS PEN INJECTOR';
+      expect(extractStatedConcentrationStrength(noLeadingNumber)).toBeNull();
+      const r = compareDrugs({ name: noLeadingNumber }, { name: 'Zepbound 12.5 Mg/0.5 Ml Pen' }, provider);
+      expect(r.status).not.toBe('red');
+    });
+  });
+
+  describe('fix 3: trailing duplicate strength restatement', () => {
+    it('is GREEN name_identity_match: "ELIQUIS 5 MG TABLET 5 mg" vs "Eliquis 5 Mg Tablet"', () => {
+      const r = compareDrugs({ name: 'ELIQUIS 5 MG TABLET 5 mg' }, { name: 'Eliquis 5 Mg Tablet' }, provider);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+
+    it('strips only the trailing duplicate, leaving a salt suffix between the two occurrences untouched', () => {
+      // Whole-number strength to isolate this fix from the pre-existing,
+      // out-of-scope decimal-point-stripping behavior earlier in
+      // normalizeDrugNameString's punctuation-folding step (it strips
+      // "." from the whole string, so "0.5" would independently become
+      // "05" regardless of this fix — see the exact-brief-text case
+      // below for that shape, tested only for a sane non-crashing result
+      // rather than an exact decimal string).
+      expect(normalizeDrugNameString('PRAMIPEXOLE DIHYDROCHLORIDE 5 MG TABLET 5 mg')).toBe(
+        'pramipexole dihydrochloride 5 mg tablet'
+      );
+    });
+
+    it('the exact brief-text decimal example still resolves GREEN end-to-end (both sides fold the same "0.5"->"05" way, so they still agree)', () => {
+      const r = compareDrugs(
+        { name: 'PRAMIPEXOLE DIHYDROCHLORIDE 0.5 MG TABLET 0.5 mg' },
+        { name: 'Pramipexole Dihydrochloride 0.5 Mg Tablet' },
+        provider
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('salt-suffix folding stays out of scope: dropping the salt word on the entered side is not required to go green (may stay yellow)', () => {
+      const r = compareDrugs(
+        { name: 'PRAMIPEXOLE DIHYDROCHLORIDE 0.5 MG TABLET 0.5 mg' },
+        { name: 'Pramipexole 0.5 Mg Tablet' },
+        provider
+      );
+      expect(r.status).not.toBe('red');
+      expect(r.reasonCode).not.toBe('name_identity_match');
+    });
+
+    it('regression: a CONTRADICTING trailing strength ("TABLET 10 mg" after "5 MG" stated earlier) is NOT folded away and still surfaces as a stated-strength-mismatch RED', () => {
+      const r = compareDrugs(
+        { name: 'LISINOPRIL 5 MG TABLET 10 mg' },
+        { name: 'Lisinopril 10 Mg Tablet' },
+        provider
+      );
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('drug_mismatch');
+      expect(r.explanation).toContain('5mg vs 10mg');
+    });
+  });
+
+  describe('fix 4: one-sided route word in the form phrase', () => {
+    it('is GREEN: "LISINOPRIL 10 MG ORAL TABLET" vs "Lisinopril 10 Mg Tablet"', () => {
+      const r = compareDrugs({ name: 'LISINOPRIL 10 MG ORAL TABLET' }, { name: 'Lisinopril 10 Mg Tablet' }, provider);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+
+    it('is GREEN: "AMPHETAMINE-DEXTROAMPHETAMINE 7.5 MG ORAL TABLET" vs "Dextroamp-Amphetam 7.5 Mg Tab" (route-fold + amphetam abbreviation together)', () => {
+      const r = compareDrugs(
+        { name: 'AMPHETAMINE-DEXTROAMPHETAMINE 7.5 MG ORAL TABLET' },
+        { name: 'Dextroamp-Amphetam 7.5 Mg Tab' },
+        provider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+
+    it('regression: BOTH sides stating DIFFERENT route qualifiers (oral vs sublingual) must NOT be folded into a match', () => {
+      const r = compareDrugs(
+        { name: 'Lisinopril 10 Mg Oral Tablet' },
+        { name: 'Lisinopril 10 Mg Sublingual Tablet' },
+        provider
+      );
+      expect(r.reasonCode).not.toBe('name_identity_match');
+    });
+
+    it('regression: BOTH sides stating the SAME route qualifier already matched via the primary exact-normalization path (unaffected by this fix)', () => {
+      const r = compareDrugs(
+        { name: 'Lisinopril 10 Mg Oral Tablet' },
+        { name: 'Lisinopril 10 Mg Oral Tablet' },
+        provider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_identity_match');
+    });
+  });
+
+  describe('fix 5: amphetamine/dextroamphetamine abbreviation additions', () => {
+    it('"amphetam" expands to "amphetamine"', () => {
+      expect(normalizeDrugNameString('amphetam 5 mg tablet')).toBe('amphetamine 5 mg tablet');
+    });
+
+    it('"dextroamphetam" expands to "dextroamphetamine"', () => {
+      expect(normalizeDrugNameString('dextroamphetam 5 mg tablet')).toBe('dextroamphetamine 5 mg tablet');
     });
   });
 });

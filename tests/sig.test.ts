@@ -406,3 +406,80 @@ describe('Round 5, fix 4: additive sig abbreviation coverage', () => {
     });
   });
 });
+
+describe('Round 6 fixes', () => {
+  describe('fix 1: identical-sig fast path (verbatim_match)', () => {
+    it('is GREEN verbatim_match for an unparseable-but-identical sig (live report)', () => {
+      const text = 'Inject 12.5mg under the skin every week.';
+      const r = compareSigs(text, text);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('verbatim_match');
+    });
+
+    it('confirms the raw text really is unparseable on its own (sanity check the fast path is actually doing work)', () => {
+      const p = parseSig('Inject 12.5mg under the skin every week.');
+      expect(p.ambiguous).toBe(true);
+    });
+
+    it('is GREEN verbatim_match tolerating case/whitespace/trailing-punctuation differences only', () => {
+      const r = compareSigs('  Inject 12.5mg under the skin every week.  ', 'inject 12.5mg under the skin every week');
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('verbatim_match');
+    });
+
+    it('regression: two DIFFERENT unparseable sigs still fall to yellow sig_ambiguous, not a false green', () => {
+      const r = compareSigs('use as directed by prescriber', 'apply sparingly as directed');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('sig_ambiguous');
+    });
+
+    it('regression: a parseable pair that genuinely differs is still RED, not swallowed by the fast path', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 2 tab po bid');
+      expect(r.status).toBe('red');
+    });
+  });
+
+  describe('fix 6: qday/qdaily frequency', () => {
+    it('is GREEN: "1 tab PO qday" vs "TAKE ONE TABLET BY MOUTH EVERY DAY."', () => {
+      const r = compareSigs('1 tab PO qday', 'TAKE ONE TABLET BY MOUTH EVERY DAY.');
+      expect(r.status).toBe('green');
+    });
+
+    it('"qday" parses to once-daily frequency', () => {
+      const p = parseSig('take 1 tab po qday');
+      expect(p.timesPerDay).toBe(1);
+    });
+
+    it('"qdaily" also parses to once-daily frequency', () => {
+      const p = parseSig('take 1 tab po qdaily');
+      expect(p.timesPerDay).toBe(1);
+    });
+  });
+
+  describe('fix 7: "moming"/"evenmg" OCR confusables in morning/evening phrase folds', () => {
+    it('is GREEN: "each moming" (OCR rn->m) matches "every morning"', () => {
+      const r = compareSigs('Take 1 capsule by mouth each moming.', 'TAKE ONE CAPSULE BY MOUTH EVERY MORNING.');
+      expect(r.status).toBe('green');
+    });
+
+    it('"each moming" parses to once-daily (qam) frequency, same as "each morning"', () => {
+      const p = parseSig('take 1 capsule by mouth each moming');
+      expect(p.timesPerDay).toBe(1);
+    });
+
+    it('"in the evenmg" parses to once-daily (qpm) frequency, same as "in the evening"', () => {
+      const p = parseSig('take 1 tab po in the evenmg');
+      expect(p.timesPerDay).toBe(1);
+    });
+
+    it('regression: "every morning and evening" (round-4 guard) still stays ambiguous, unaffected by the moming/evenmg tolerance', () => {
+      const p = parseSig('take 1 tab po every morning and evening');
+      expect(p.timesPerDay).toBeNull();
+    });
+
+    it('regression: "every moming and evening" (confusable + the "and" continuation together) also stays ambiguous, not silently folded to once-daily', () => {
+      const p = parseSig('take 1 tab po every moming and evening');
+      expect(p.timesPerDay).toBeNull();
+    });
+  });
+});

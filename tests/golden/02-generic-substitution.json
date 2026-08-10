@@ -84,7 +84,7 @@
     {
       "field": "sig",
       "status": "green",
-      "reasonCode": "exact_match"
+      "reasonCode": "verbatim_match"
     }
   ],
   "expectedSummary": {
