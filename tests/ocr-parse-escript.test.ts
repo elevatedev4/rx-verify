@@ -7,6 +7,11 @@ import {
   type FieldDiagnostic
 } from '../src/ocr/parseEscriptOcr.js';
 import { compareAddresses } from '../src/normalize/address.js';
+import { compareRefills } from '../src/quantity/index.js';
+import { verify } from '../src/engine/index.js';
+import { FixtureProvider } from '../src/drug/index.js';
+
+const provider = new FixtureProvider();
 
 /**
  * SYNTHETIC DATA ONLY — every name/DOB/NPI/NDC/address/phone below is
@@ -417,6 +422,67 @@ describe('parseEscriptOcr', () => {
     // (L, T, N, C, D, M, Y) — repairDigits must leave real words alone.
     expect(repairDigits('LOTION')).toBe('LOTION');
     expect(repairDigits('CLINDAMYCIN')).toBe('CLINDAMYCIN');
+  });
+
+  // Round 5, Fix 3 (live report): some e-scripts show an "Available:"
+  // date; PioneerRx then displays THAT date, not the Written date, in its
+  // own entered fields. Parsing side: recognizes the "Available" label
+  // and resolves it into record.availableDate, mirroring dob/written.
+  describe('"Available:" date label recognition (round 5, fix 3)', () => {
+    it('parses a labeled "Available:" date into record.availableDate', () => {
+      const rows = [row(100, ['Patient:', 'Test,', 'Case']), row(120, ['Available:', '07/19/2026'])];
+      const ocr = flatten([TOOLBAR_ROW, ...rows]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.availableDate).toBe('07/19/2026');
+    });
+
+    it('a script with no "Available:" label anywhere leaves availableDate unset — even when a Written date is present', () => {
+      const rows = [row(100, ['Patient:', 'Test,', 'Case']), row(120, ['Written:', '07/01/2026'])];
+      const ocr = flatten([TOOLBAR_ROW, ...rows]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.dateWritten).toBe('07/01/2026');
+      expect(record.availableDate).toBeUndefined();
+    });
+
+    it('SAFETY: unlike dob/written, availableDate does NOT fall back to scanning leftover date-shaped lines when no "Available" label exists — a stray unrelated date elsewhere on the page must never be mistaken for one', () => {
+      // No "Available" label anywhere in this capture, but there IS an
+      // unrelated, unlabeled date-shaped leftover line (e.g. a stray
+      // fill/audit date OCR happened to pick up) — round 5 fix 3
+      // deliberately does NOT extend dob/written's pool-fallback scan to
+      // 'available', since most scripts never show it at all and a blind
+      // scan would spuriously invent an Available date on ordinary
+      // scripts (see resolveDateField's doc).
+      const rows = [
+        row(100, ['Patient:', 'Test,', 'Case']),
+        row(120, ['Written:', '07/01/2026']),
+        row(140, ['09/09/2026'])
+      ];
+      const ocr = flatten([TOOLBAR_ROW, ...rows]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.dateWritten).toBe('07/01/2026');
+      expect(record.availableDate).toBeUndefined();
+    });
+
+    it('ACCEPTANCE: a script whose source shows Available 07/19/2026 and no Written date, entered 7/19/2026, goes GREEN end-to-end (parse -> engine)', () => {
+      const rows = [row(100, ['Patient:', 'Test,', 'Case']), row(120, ['Available:', '07/19/2026'])];
+      const ocr = flatten([TOOLBAR_ROW, ...rows]);
+      const source = parseEscriptOcr(ocr);
+      expect(source.dateWritten).toBeUndefined();
+      expect(source.availableDate).toBe('07/19/2026');
+
+      const result = verify(source, { dateWritten: '7/19/2026' }, provider);
+      const dateWrittenVerdict = result.verdicts.find((v) => v.field === 'dateWritten')!;
+      expect(dateWrittenVerdict.status).toBe('green');
+      expect(dateWrittenVerdict.reasonCode).toBe('available_date_match');
+
+      const availableVerdict = result.verdicts.find((v) => v.field === 'availableDate')!;
+      expect(availableVerdict).toBeDefined();
+      expect(availableVerdict.status).toBe('green');
+      expect(availableVerdict.sourceValue).toBe('07/19/2026');
+    });
   });
 
   it('(i) [live-tuning fixture 4] Quantity+Refills share one physical OCR row (real on-screen shape from a live capture, PHI replaced) — both must resolve, not just the leading field', () => {
@@ -1152,6 +1218,65 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  // Round 5, Fix 1 (live report, W-T-round5): a refill script's OCR
+  // dropped "Total Fills: 4 (including this fill)" down to the exact word
+  // shape below, on ONE physical row shared with the quantity value.
+  // "Total" garbled to "To>l" (its own row-start label never matches
+  // anything, since this row starts with the quantity number, not a
+  // label). Root cause traced to the DEFENSIVE chrome filter just above
+  // Pass A/B (not the label fuzzy-match or the phrase fallback
+  // themselves): "Fills" is 1 edit from the CHROME_TOKENS "fill" entry
+  // and "fill)" is an exact hit once its trailing paren is stripped —
+  // two hits trips the "2+ chrome words -> drop the whole line" rule,
+  // deleting the row (phrase and all) before findTotalFillsPhraseValue
+  // ever got a chance to scan it. Fix: findTotalFillsPhraseValue now
+  // scans the lines set captured BEFORE that defensive filter runs, so
+  // an exact "N (including this fill)" phrase anchor is found regardless
+  // of whether the filter goes on to drop the row for every other
+  // purpose. Result was refills "(not provided)" yellow; expected
+  // refills = 4 (raw) -> 3 (effective, N-1 at compareRefills match-time).
+  it('(x0) [live-tuning fixture 11, real capture] "Total Fills: N (including this fill)" recognized even though the row also fuzzy-trips the defensive chrome filter ("Fills"~"fill", "fill)"~"fill")', () => {
+    const quantityLabelRow = row(320, ['Quantity']);
+    const mergedRow: OcrWord[] = [
+      { text: '90.0000', x: 121, y: 358, w: 60, h: 11 },
+      { text: 'Each', x: 186, y: 358, w: 36, h: 11 },
+      { text: '(90.0000', x: 227, y: 358, w: 62, h: 11 },
+      { text: 'Tablet)', x: 291, y: 358, w: 55, h: 11 },
+      { text: 'To>l', x: 573, y: 358, w: 28, h: 11 },
+      { text: 'Fills', x: 605, y: 358, w: 28, h: 11 },
+      { text: '4', x: 637, y: 358, w: 8, h: 11 },
+      { text: '(including', x: 650, y: 358, w: 70, h: 11 },
+      { text: 'this', x: 725, y: 358, w: 22, h: 11 },
+      { text: 'fill)', x: 753, y: 358, w: 30, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), quantityLabelRow, mergedRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('(x0) [live-tuning fixture 11, real capture] compareRefills applies the N-1 "Total fills" semantics on top of the recovered raw value, yielding 3 effective refills', () => {
+    const quantityLabelRow = row(320, ['Quantity']);
+    const mergedRow: OcrWord[] = [
+      { text: '90.0000', x: 121, y: 358, w: 60, h: 11 },
+      { text: 'Each', x: 186, y: 358, w: 36, h: 11 },
+      { text: '(90.0000', x: 227, y: 358, w: 62, h: 11 },
+      { text: 'Tablet)', x: 291, y: 358, w: 55, h: 11 },
+      { text: 'To>l', x: 573, y: 358, w: 28, h: 11 },
+      { text: 'Fills', x: 605, y: 358, w: 28, h: 11 },
+      { text: '4', x: 637, y: 358, w: 8, h: 11 },
+      { text: '(including', x: 650, y: 358, w: 70, h: 11 },
+      { text: 'this', x: 725, y: 358, w: 22, h: 11 },
+      { text: 'fill)', x: 753, y: 358, w: 30, h: 11 }
+    ];
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), quantityLabelRow, mergedRow]);
+    const record = parseEscriptOcr(ocr);
+
+    const result = compareRefills(record.refills, '3', record.refillsFromTotalFills);
+    expect(result.status).toBe('green');
+  });
+
   it('(x) [live-tuning fixture 9, real capture] prescriberAddress continuation row also carries an unrelated right-column value (wrapped "Agent name" tail) on the SAME OCR row — must not bleed into the address', () => {
     // SYNTHETIC — coordinates copied verbatim from a real owner OCR
     // word-position dump (PHI replaced with fabricated street/city/zip/
@@ -1297,6 +1422,63 @@ describe('parseEscriptOcr', () => {
     expect(record.prescriber?.address).toEqual({ street: '4930 Overland Drive', city: '555-0001' });
     // The real Phone field, on its own recognized row further down,
     // still resolves correctly and independently.
+    expect(record.prescriber?.phone).toBe('(555) 555-4488');
+  });
+
+  // Round 5, Fix 2 (live report, W-T-round5): a real capture showed
+  // prescriber.address = "1811 Wakarusa Dr, Ste 102" with NO city/state/
+  // zip line, on a clinic that parses fine (city line included) on other
+  // captures of the SAME clinic. Root cause: on this capture "Location:"
+  // has no inline value (a label-only row) — the street address only
+  // resolves via Pass B's block-column pairing, further down. The
+  // continuation-gather block above only ever ran BEFORE Pass B, gated on
+  // `raw.location` already being set — so for this capture shape it was a
+  // no-op, silently dropping the still-unclaimed city/state/zip
+  // continuation row instead of gathering it. Fix: gatherLocationContinuation()
+  // now also runs a second time immediately after Pass B, so a
+  // block-column-resolved location gets its continuation row(s) gathered
+  // too, under the exact same Y-band/x-column guards as the inline case.
+  it('(x1) [live-tuning fixture 12, real capture] prescriberAddress continuation row is gathered when "Location:" itself only resolves via Pass B block-column pairing (label-only row, no inline value)', () => {
+    const patientRow: OcrWord[] = [
+      { text: 'Patient', x: 55, y: 100, w: 44, h: 10 },
+      { text: 'Sample,', x: 120, y: 100, w: 50, h: 11 },
+      { text: 'Pat', x: 176, y: 100, w: 24, h: 11 }
+    ];
+    // Label-only row — no inline value on this physical row, so
+    // "Location:" cannot resolve in Pass A and must fall through to Pass
+    // B's block-column pairing below.
+    const locationLabelOnly: OcrWord[] = [{ text: 'Location:', x: 55, y: 207, w: 50, h: 10 }];
+    // The street value, as its own leftover row — this is what Pass B
+    // pairs to the 'location' label by column.
+    const streetValueRow: OcrWord[] = [
+      { text: '1811', x: 120, y: 227, w: 32, h: 11 },
+      { text: 'Wakarusa', x: 160, y: 227, w: 68, h: 11 },
+      { text: 'Dr,', x: 260, y: 227, w: 22, h: 11 },
+      { text: 'Ste', x: 290, y: 227, w: 26, h: 11 },
+      { text: '102', x: 330, y: 227, w: 26, h: 11 }
+    ];
+    // Wrapped city/state/zip continuation, same left-x column as the
+    // street row, one row below it — still unclaimed by anything else.
+    const cityContinuationRow: OcrWord[] = [
+      { text: 'Lawrence,', x: 120, y: 247, w: 62, h: 12 },
+      { text: 'KS', x: 210, y: 247, w: 18, h: 10 },
+      { text: '66049', x: 240, y: 247, w: 38, h: 10 }
+    ];
+    const phoneRow: OcrWord[] = [
+      { text: 'Phone', x: 66, y: 267, w: 39, h: 10 },
+      { text: '(555)', x: 120, y: 267, w: 31, h: 14 },
+      { text: '555-4488', x: 155, y: 267, w: 58, h: 11 }
+    ];
+
+    const ocr = flatten([TOOLBAR_ROW, patientRow, locationLabelOnly, streetValueRow, cityContinuationRow, phoneRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.prescriber?.address).toEqual({
+      street: '1811 Wakarusa Dr, Ste 102',
+      city: 'Lawrence',
+      state: 'KS',
+      zip: '66049'
+    });
     expect(record.prescriber?.phone).toBe('(555) 555-4488');
   });
 

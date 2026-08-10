@@ -31,6 +31,15 @@ export interface FieldVerdict {
  * "prescriber" field hid which specific piece (name vs NPI vs phone vs
  * address) actually differed. daysSupply has been REMOVED entirely (not
  * compared, not displayed) per the same feedback round.
+ *
+ * 'availableDate' (round 5, fix 3) is CONDITIONAL — the engine only ever
+ * emits this verdict when the source e-script actually shows an
+ * "Available" date (see PrescriptionRecord.availableDate below and
+ * compareWrittenOrAvailableDate in normalize/date.ts); most scripts never
+ * populate it, so most verify() calls simply skip this slot. Every other
+ * field above is unconditional. verify()'s own order check tolerates the
+ * skip (see engine/index.ts) while still enforcing that whatever IS
+ * present appears in this relative order.
  */
 export const FIELD_ORDER = [
   'patientName',
@@ -41,6 +50,7 @@ export const FIELD_ORDER = [
   'prescriberPhone',
   'prescriberAddress',
   'dateWritten',
+  'availableDate',
   'quantity',
   'refills',
   'daw',
@@ -81,6 +91,17 @@ export interface PrescriptionRecord {
   patientAddress?: Address;
   prescriber?: Prescriber;
   dateWritten?: string;
+  /**
+   * SOURCE-side only: PioneerRx's "Available" date, when the source
+   * e-script shows one (seen on refill-response layouts). When present,
+   * PioneerRx displays THIS date — not the Written date — in its own
+   * entered fields, so a technician's entered date is expected to match
+   * Available rather than Written. See compareWrittenOrAvailableDate
+   * (normalize/date.ts), which folds this into the dateWritten verdict,
+   * and FIELD_ORDER's doc above for the conditional 'availableDate'
+   * verdict row. Never meaningfully set on the entered side.
+   */
+  availableDate?: string;
   drug?: DrugDescriptor;
   sig?: string;
   quantity?: string | number;

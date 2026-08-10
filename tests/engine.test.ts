@@ -6,8 +6,17 @@ import { FIELD_ORDER } from '../src/types.js';
 const provider = new FixtureProvider();
 
 describe('verify engine', () => {
-  it('always returns verdicts in FIELD_ORDER', () => {
+  it('always returns verdicts in FIELD_ORDER (minus the conditional availableDate slot, absent here since source has none)', () => {
     const result = verify({}, {}, provider);
+    // Round 5 fix 3: 'availableDate' is a CONDITIONAL slot in FIELD_ORDER
+    // (only rendered when source.availableDate is set — see its doc,
+    // types.ts) — every other field is unconditional, so the remaining
+    // 13 still appear in FIELD_ORDER's exact relative order.
+    expect(result.verdicts.map((v) => v.field)).toEqual(FIELD_ORDER.filter((f) => f !== 'availableDate'));
+  });
+
+  it('renders the conditional availableDate verdict, in FIELD_ORDER position, only when source.availableDate is set', () => {
+    const result = verify({ availableDate: '07/19/2026' }, {}, provider);
     expect(result.verdicts.map((v) => v.field)).toEqual([...FIELD_ORDER]);
   });
 

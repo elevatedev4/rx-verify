@@ -160,3 +160,80 @@ export function compareDates(
     explanation: `Source date ${a} does not match entered date ${b}.`
   };
 }
+
+/**
+ * Round 5, fix 3 — live report: some e-scripts show an "Available:" date
+ * (seen on refill-response layouts); PioneerRx then displays THAT date —
+ * not the Written date — in its own entered-date fields, so a
+ * technician's entered date naturally ends up matching Available, not
+ * Written. Before this, the entered date was only ever compared against
+ * source.dateWritten, so a script with an Available date and no Written
+ * date always fell through to compareDates' "source date not provided"
+ * yellow, even though the entered date was, in fact, correct.
+ *
+ * Used for the 'dateWritten' verdict field itself (folds Available-
+ * awareness into the existing field rather than adding a second,
+ * independently-scored comparison) — see engine/index.ts. The separate,
+ * purely-informational 'availableDate' verdict row (added conditionally
+ * in engine/index.ts, only when source.availableDate is present) mirrors
+ * whatever this function returns, so the overlay can show WHY the written
+ * date shows green/red next to the actual Available value it was checked
+ * against.
+ *
+ * Decision order:
+ *  1. No availableDate at all -> behavior fully unchanged (plain
+ *     compareDates against dateWritten).
+ *  2. availableDate present and the entered date matches it -> GREEN,
+ *     'available_date_match' (regardless of whether dateWritten is also
+ *     present/matches — Available is PioneerRx's displayed date, so a
+ *     match against it is always the strongest signal).
+ *  3. availableDate present but entered doesn't match it, AND there's no
+ *     Written date to fall back to -> surface the Available comparison's
+ *     own result as-is (its usual not_provided/unparseable/date_mismatch
+ *     status).
+ *  4. Both Written and Available are present, entered matches Available
+ *     status is not green, but DOES match Written -> that's still a
+ *     legitimate match; return the Written comparison as-is.
+ *  5. Both present, entered matches NEITHER (and both sides parsed
+ *     cleanly enough to make that comparison meaningful) -> explicit RED
+ *     'date_mismatch' per the branch brief ("entered matches neither ⇒
+ *     RED"), never a silent yellow — a real discrepancy, not a missing
+ *     field.
+ */
+export function compareWrittenOrAvailableDate(
+  sourceWritten: string | null | undefined,
+  sourceAvailable: string | null | undefined,
+  enteredRaw: string | null | undefined,
+  opts?: DateParseOptions
+): DateCompareResult {
+  const availableEmpty = !sourceAvailable || !sourceAvailable.trim();
+  if (availableEmpty) {
+    return compareDates(sourceWritten, enteredRaw, opts);
+  }
+
+  const availableResult = compareDates(sourceAvailable, enteredRaw, opts);
+  if (availableResult.status === 'green') {
+    const parsedAvailable = parseDate(sourceAvailable, opts);
+    return {
+      status: 'green',
+      reasonCode: 'available_date_match',
+      explanation: `Source shows an Available date (${parsedAvailable ?? sourceAvailable}); PioneerRx displays this instead of the Written date, and the entered date matches it.`
+    };
+  }
+  // Entered date itself is the issue (missing/unparseable) — preserve
+  // that signal as-is rather than manufacturing a mismatch against a
+  // Written date the entered value couldn't even be compared to.
+  if (availableResult.status === 'yellow') return availableResult;
+
+  const writtenEmpty = !sourceWritten || !sourceWritten.trim();
+  if (writtenEmpty) return availableResult;
+
+  const writtenResult = compareDates(sourceWritten, enteredRaw, opts);
+  if (writtenResult.status === 'green') return writtenResult;
+
+  return {
+    status: 'red',
+    reasonCode: 'date_mismatch',
+    explanation: `Entered date matches neither the source's Written date nor its Available date.`
+  };
+}
