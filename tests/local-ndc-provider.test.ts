@@ -86,6 +86,58 @@ describe('compareDrugs with LocalNdcProvider (real data)', () => {
   });
 });
 
+describe('LocalNdcProvider NAME resolution + compareDrugs concept_match (real openFDA data, live-report acceptance pairs)', () => {
+  it('ACCEPTANCE: "CARIPRAZINE 1.5 MG ORAL CAPSULE" vs "Vraylar 1.5 Mg Capsule" is GREEN concept_match (brand+generic of the same product record)', () => {
+    const r = compareDrugs({ name: 'CARIPRAZINE 1.5 MG ORAL CAPSULE' }, { name: 'Vraylar 1.5 Mg Capsule' }, provider);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('concept_match');
+    expect(r.explanation).toContain('cariprazine');
+  });
+
+  it('ACCEPTANCE: "ELIQUIS 5 MG TABLET" vs "Eliquis 5 Mg Tablet" is GREEN (routes cleanly, whichever fast path gets there first)', () => {
+    const r = compareDrugs({ name: 'ELIQUIS 5 MG TABLET' }, { name: 'Eliquis 5 Mg Tablet' }, provider);
+    expect(r.status).toBe('green');
+  });
+
+  it('ACCEPTANCE: the amphetamine-family hand-coded fold already greens "AMPHETAMINE-DEXTROAMPHETAMINE 7.5 MG ORAL TABLET" vs "Dextroamp-Amphetam 7.5 Mg Tab" — new concept path does not fight it', () => {
+    const r = compareDrugs(
+      { name: 'AMPHETAMINE-DEXTROAMPHETAMINE 7.5 MG ORAL TABLET' },
+      { name: 'Dextroamp-Amphetam 7.5 Mg Tab' },
+      provider
+    );
+    expect(r.status).toBe('green');
+  });
+
+  it('NEGATIVE GUARD: "Vraylar 1.5 Mg" vs "CARIPRAZINE 3 MG" is NOT green — differing stated strength', () => {
+    const r = compareDrugs({ name: 'Vraylar 1.5 Mg' }, { name: 'CARIPRAZINE 3 MG' }, provider);
+    expect(r.status).not.toBe('green');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('drug_mismatch');
+  });
+
+  it('NEGATIVE GUARD: "Amphetamine Sulfate" vs the dextro-amphet combo is NOT green through the concept path either', () => {
+    const r = compareDrugs(
+      { name: 'Amphetamine Sulfate 10 mg tablet' },
+      { name: 'Dextroamp-Amphet 10 mg tablet' },
+      provider
+    );
+    expect(r.status).not.toBe('green');
+  });
+
+  it('NEGATIVE GUARD: an ambiguously-resolving brand name falls through to yellow, never a guess', () => {
+    // "Percocet" collides across multiple distinct oxycodone/acetaminophen
+    // strength combinations in openFDA; asking with NO strength stated at
+    // all must miss (never guess a strength), not silently pick one.
+    expect(provider.getConcept('Percocet Tablet')).toBeNull();
+  });
+
+  it('name resolution is a heuristic layer only: a name-only query with no NDC on either side never regresses to red for an unresolvable pair', () => {
+    const r = compareDrugs({ name: 'Totally Unknown Fabricated Drug Name 5 mg tablet' }, { name: 'Another Made Up Drug 5 mg tablet' }, provider);
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('unknown_drug');
+  });
+});
+
 describe('LocalNdcProvider ingredient+strength+form equivalence key (approximation, not real RxNorm rxcui)', () => {
   it('gives the same rxcui-equivalent key to two different NDCs with matching ingredient/strength/form', () => {
     const a = provider.getConcept(LISINOPRIL_10MG_A);

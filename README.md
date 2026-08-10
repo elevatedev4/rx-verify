@@ -99,10 +99,29 @@ through the real engine (not part of the published package).
 
 `src/cli.ts` wires in `LocalNdcProvider` (`src/drug/index.ts`) — a real
 drug dataset derived from the public **openFDA NDC directory**
-(~134k products / ~251k package NDCs), bundled as
-`data/ndc-data.json.gz` (~4MB, committed to the repo) and loaded into an
-in-memory `Map` once per process. **Zero network calls happen at lookup
+(~134k products / ~252k package NDCs), bundled as
+`data/ndc-data.json.gz` (~5.4MB, committed to the repo) and loaded into
+in-memory `Map`s once per process. **Zero network calls happen at lookup
 time** — this preserves the HIPAA local-only guarantee for verification.
+
+Besides the original NDC -> concept lookup, the bundle also carries a
+**name index** (`nameIndex`: normalized brand/generic name -> candidate
+product records, ~52k keys) and a **known-forms table**
+(`formsByIngredient`: ingredient -> every distinct dosage form seen for
+it, ~11k ingredient keys) — see `src/drug/local-data-format.ts` for the
+shapes and `resolveConceptByName` in `src/drug/index.ts` for the
+disambiguation rule. `LocalNdcProvider.getConcept` uses these to resolve
+a free-text drug NAME (not just an NDC) to a single concept when it's
+unambiguous, and `compareDrugs` uses a confirmed name-resolved match
+(same ingredient/strength/form on both sides) to GREEN with reason
+`concept_match` — e.g. "Vraylar 1.5 Mg Capsule" vs "CARIPRAZINE 1.5 MG
+ORAL CAPSULE" now resolve to the same product record instead of falling
+to `unknown_drug` yellow. This layer is strictly ADDITIVE and
+IRON-RULE-bound: a lookup miss or an ambiguous name (maps to more than
+one distinct ingredient/strength/form) always resolves to `null`, and
+`compareDrugs` never lets name-based resolution alone escalate a pair to
+red — worst case it's the same `unknown_drug` yellow this engine has
+always fallen back to.
 
 `FixtureProvider` (also in `src/drug/index.ts`) still exists as a small
 ~20-concept synthetic stand-in, used only by `tests/drug.test.ts` and
@@ -114,8 +133,9 @@ time** — this preserves the HIPAA local-only guarantee for verification.
 script — the one place in this repo that's allowed to touch the
 network. It downloads the openFDA NDC bulk file, extracts it (needs
 `unzip` on PATH), transforms it into the compact `LocalConcept` shape
-(see `src/drug/local-data-format.ts`), and writes
-`data/ndc-data.json.gz`. Run it with:
+plus the `nameIndex`/`formsByIngredient` tables (see
+`src/drug/local-data-format.ts` and `buildDataset` in this script), and
+writes `data/ndc-data.json.gz`. Run it with:
 
 ```bash
 npx tsx scripts/build-drug-data.ts

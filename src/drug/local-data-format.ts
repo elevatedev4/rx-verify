@@ -29,6 +29,35 @@ export interface LocalDrugData {
   concepts: LocalConcept[];
   /** normalized 11-digit package NDC -> index into `concepts` */
   ndcIndex: Record<string, number>;
+  /**
+   * Normalized brand_name / generic_name (via normalizeDrugNameString in
+   * src/drug/index.ts, shared build+runtime) -> every `concepts` index
+   * whose openFDA product record carried that name. Optional/possibly
+   * absent on OLDER bundles built before this field existed — runtime
+   * code must treat a missing nameIndex as "no name data available"
+   * (name lookup returns null), never crash or guess.
+   *
+   * DELIBERATELY not deduplicated down to "distinct concepts only": the
+   * same normalized name (e.g. a generic name shared by every labeler's
+   * copy of the same drug, or a brand name reused across several
+   * strengths) routinely maps to MANY product records. Runtime
+   * (LocalNdcProvider.getConcept) is responsible for narrowing that list
+   * down to a single unambiguous concept (using the strength/form stated
+   * in the query) or returning null when it can't -- see that method's
+   * doc for the full disambiguation/ambiguity rule.
+   */
+  nameIndex?: Record<string, number[]>;
+  /**
+   * concept.ingredient (the same normalized, semicolon-joined,
+   * alphabetized ingredient-set key deriveRxcui/deriveName use) -> every
+   * DISTINCT normalized dosage_form seen anywhere in the dataset for that
+   * ingredient set. Answers "does lisinopril only ever come as a
+   * tablet?" Purely informational/confirmatory context (see
+   * LocalNdcProvider.knownFormsFor and compareDrugs) -- never used to
+   * auto-green or auto-red on its own. Optional for the same
+   * old-bundle-compat reason as nameIndex above.
+   */
+  formsByIngredient?: Record<string, string[]>;
 }
 
 /**
