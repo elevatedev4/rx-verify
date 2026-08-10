@@ -337,6 +337,36 @@ describe('compareDrugs', () => {
         expect(r.status).not.toBe('green');
       });
 
+      // REVIEW FIX (confirmed false GREEN, fleet-wide — not amphetamine
+      // specific): dedupeReleaseAbbrevs must drop only a REPEATED
+      // occurrence of the SAME release qualifier, never a genuinely
+      // different second qualifier. A single global "have we seen any
+      // qualifier yet" boolean silently dropped a real "dr" that
+      // followed an "er", collapsing an ER+DR product to the same
+      // normalized string as an ER-only product.
+      it('ER-only and ER+DR (two DIFFERENT release qualifiers) normalize distinctly, not the same string', () => {
+        const erOnly = normalizeDrugNameString('Diltiazem ER 180 MG Capsule Extended Release');
+        const erPlusDr = normalizeDrugNameString('Diltiazem ER 180 MG Capsule, Extended Release Delayed Release');
+        expect(erOnly).not.toBe(erPlusDr);
+        expect(erOnly).toBe('diltiazem er 180 mg capsule');
+        expect(erPlusDr).toContain('dr');
+      });
+
+      it('does not let ER+DR resolve name-identity GREEN against an ER-only product', () => {
+        const r = compareDrugs(
+          { name: 'Diltiazem ER 180 MG Capsule Extended Release' },
+          { name: 'Diltiazem ER 180 MG Capsule, Extended Release Delayed Release' },
+          provider
+        );
+        expect(r.reasonCode).not.toBe('name_identity_match');
+      });
+
+      it('still dedupes a genuinely REPEATED qualifier (ER stated twice) to one occurrence', () => {
+        expect(normalizeDrugNameString('Diltiazem ER 180 MG Capsule Extended Release')).toBe(
+          normalizeDrugNameString('Diltiazem ER 180 MG Capsule')
+        );
+      });
+
       it('a stated duration on only ONE side does not block the match', () => {
         expect(extractStatedDurationHours('AMPHETAMINE-DEXTROAMPHET ER 30 MG CAPSULE EXTENDED RELEASE 24 HOUR')).toBe(24);
         expect(extractStatedDurationHours('Dextroamp-Amphet Er 30 Mg Cap')).toBeNull();

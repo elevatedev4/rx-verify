@@ -404,21 +404,31 @@ const RELEASE_PHRASE_FOLDS: Array<[RegExp, string]> = [
  * description ("...CAPSULE, EXTENDED RELEASE..."), which
  * RELEASE_PHRASE_FOLDS above also folds down to "er". Both occurrences
  * describe the SAME release profile, so after folding, keep only the
- * first occurrence of each qualifier — otherwise a name with the
- * qualifier stated once (typical PioneerRx free-text entry) would never
- * string-match a name that states it twice (typical e-script/openFDA
- * labeling), even though they're the same drug.
+ * first occurrence of EACH DISTINCT qualifier value — otherwise a name
+ * with the qualifier stated once (typical PioneerRx free-text entry)
+ * would never string-match a name that states it twice (typical
+ * e-script/openFDA labeling), even though they're the same drug.
+ *
+ * REVIEW FIX (confirmed false GREEN, fleet-wide — not amphetamine
+ * specific): the dedup must track EACH qualifier VALUE seen, not just
+ * "have we seen any qualifier yet". A single boolean silently dropped a
+ * genuinely DIFFERENT second qualifier too — e.g. "...ER 180 MG
+ * Capsule, Extended Release Delayed Release" folds to tokens
+ * "er ... er dr"; a single-boolean dedupe drops the "dr" (wrong — ER
+ * and DR are different release profiles), collapsing it to the same
+ * string as an ER-only product and producing a false name-identity
+ * GREEN between two actually-different drugs.
  */
 const RELEASE_ABBREVS = new Set(['er', 'sr', 'cr', 'dr', 'ir']);
 
 function dedupeReleaseAbbrevs(spaced: string): string {
-  let seen = false;
+  const seenValues = new Set<string>();
   return spaced
     .split(' ')
     .filter((tok) => {
       if (!RELEASE_ABBREVS.has(tok)) return true;
-      if (seen) return false;
-      seen = true;
+      if (seenValues.has(tok)) return false;
+      seenValues.add(tok);
       return true;
     })
     .join(' ');

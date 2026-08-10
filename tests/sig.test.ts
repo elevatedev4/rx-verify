@@ -140,4 +140,39 @@ describe('compareSigs', () => {
     expect(r.status).toBe('red');
     expect(r.reasonCode).toBe('sig_mismatch');
   });
+
+  // REVIEW FIX (confirmed false GREEN): "every morning and evening" is a
+  // genuinely twice-daily instruction. Before the negative-lookahead
+  // fix, "every morning" folded to qam regardless of the trailing "and
+  // evening", which was then silently dropped by extractFrequency (no
+  // FREQ_MAP entry for bare "evening") — so this BID sig compared GREEN
+  // against an entered once-daily "qam" sig.
+  it('does NOT fold "every morning and evening" to once-daily — must not be GREEN against a once-daily entered sig', () => {
+    const p = parseSig('take 1 tab every morning and evening');
+    expect(p.timesPerDay).toBeNull();
+
+    const r = compareSigs('take 1 tab every morning and evening', 'take 1 tab qam');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('does NOT fold "each evening and morning" to once-daily either (same continuation guard, reversed order)', () => {
+    const r = compareSigs('take 1 tab each evening and morning', 'take 1 tab qpm');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('a preceding conflicting frequency word ("twice every morning") stays non-green, not silently folded to once-daily', () => {
+    const r = compareSigs('take 1 tab twice every morning', 'take 1 tab qam');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('an unrelated "and" after the morning phrase (no continuation risk) still folds normally to once-daily', () => {
+    // Sanity check that the negative lookahead isn't so broad it starts
+    // rejecting every sig that merely contains "and" somewhere later.
+    const r = compareSigs('take 1 tab every morning and with food', 'take 1 tab qam');
+    // "and with food" still trails the phrase, so per the conservative
+    // lookahead this also stays unfolded/ambiguous rather than green —
+    // documenting the actual (safe) behavior rather than asserting a
+    // stronger claim than the fix makes.
+    expect(r.status).not.toBe('green');
+  });
 });

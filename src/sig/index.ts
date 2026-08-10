@@ -110,8 +110,19 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   // sig_ambiguous because only one side had an explicit frequency word —
   // "every/each/in the morning" IS the frequency statement, not just
   // timing, so it must resolve to the same 1/day as "once a day"/"qam".
-  [/\b(in the morning|each morning|every morning)\b/g, 'qam'],
-  [/\b(in the evening|each evening|every evening)\b/g, 'qpm']
+  //
+  // REVIEW FIX (confirmed false GREEN): the negative lookahead below
+  // refuses to fold when the phrase is followed by " and <word>" — e.g.
+  // "every morning and evening" is a genuinely twice-daily instruction,
+  // not once-daily. Without the lookahead, "every morning" folded to
+  // qam and the trailing "and evening" was silently dropped (nothing in
+  // FREQ_MAP matches a bare "evening"), so a real BID sig compared
+  // GREEN against an entered "qam" sig. Blocking the fold here leaves
+  // timesPerDay unextracted for that continuation form, which correctly
+  // falls back to YELLOW sig_ambiguous — the same safe behavior this
+  // input had before morning/evening folding was added at all.
+  [/\b(in the morning|each morning|every morning)\b(?!\s+and\b)/g, 'qam'],
+  [/\b(in the evening|each evening|every evening)\b(?!\s+and\b)/g, 'qpm']
 ];
 
 function preprocess(raw: string): string {
