@@ -260,6 +260,52 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// True from immediately before RefreshFromOcrAsync awaits
+    /// OcrFieldReader.ReadSourceFromOcrAsync until that await returns
+    /// (success or failure — always reset in a finally). Purely
+    /// cosmetic: MainWindow.xaml binds a small indeterminate spinner to
+    /// this next to OcrStatusText so the pharmacist sees "reading in
+    /// progress" instead of a static line during the capture+OCR window.
+    /// A property set either side of an already-running await can never
+    /// slow down the capture/OCR pipeline itself — see Owner's request
+    /// ("NOT if this will substantially slow down the program"). Always
+    /// false on the Uia path (no OCR read happens there at all).
+    /// </summary>
+    private bool _isOcrReading;
+    public bool IsOcrReading
+    {
+        get => _isOcrReading;
+        private set { if (_isOcrReading == value) return; _isOcrReading = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>
+    /// "Rx is not an escript" banner (Task 1b) — set only when the OCR
+    /// path's OcrSourceUsability.Evaluate returns NotAnEscript (healthy
+    /// word count, but no "Escript" tab-label marker anywhere in the
+    /// capture — see Ocr/EscriptMarkerDetector). Reset to empty at the
+    /// top of every OCR/UIA refresh pass so a stale banner from a
+    /// previous Rx never lingers once the pharmacist moves on. Bound in
+    /// MainWindow.xaml via HasNonEscriptMessage, reusing the same red
+    /// banner STYLE as the e-script Notes banner (not the same
+    /// collection — Notes carries actual NCPDP note text, this carries
+    /// an app-level status message, and conflating the two would make
+    /// BuildCurrentLogBlob's "Notes" section misleading).
+    /// </summary>
+    private string _nonEscriptMessage = "";
+    public string NonEscriptMessage
+    {
+        get => _nonEscriptMessage;
+        private set { if (_nonEscriptMessage == value) return; _nonEscriptMessage = value; OnPropertyChanged(); HasNonEscriptMessage = !string.IsNullOrEmpty(value); }
+    }
+
+    private bool _hasNonEscriptMessage;
+    public bool HasNonEscriptMessage
+    {
+        get => _hasNonEscriptMessage;
+        private set { if (_hasNonEscriptMessage == value) return; _hasNonEscriptMessage = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>
     /// E-script free-text notes (item 6, NCPDP Note element — see
     /// Parsing/EscriptTreeParser.ParseNotes), rendered in red at the
     /// bottom of the overlay only when non-empty (see MainWindow.xaml's
@@ -453,7 +499,18 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// <summary>OCR source path — screen-region capture + local OCR, NO tab switch. Replaces FieldReader.ReadSource()'s Escript-tab UIA-tree walk entirely. See Uia/OcrFieldReader.cs.</summary>
     private async Task RefreshFromOcrAsync(PioneerRxWindow window, PrescriptionRecord entered, int generation, RefreshTiming timing)
     {
-        var ocrResult = await _ocrFieldReader.ReadSourceFromOcrAsync(window, _settings, _overlayVisibilityController);
+        NonEscriptMessage = ""; // reset before this pass decides fresh — see property doc
+
+        OcrCaptureResult ocrResult;
+        IsOcrReading = true;
+        try
+        {
+            ocrResult = await _ocrFieldReader.ReadSourceFromOcrAsync(window, _settings, _overlayVisibilityController);
+        }
+        finally
+        {
+            IsOcrReading = false;
+        }
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting OCR
 
@@ -487,7 +544,15 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // empty here, vs. the UIA path's SourceNotes.
         UpdateNotes(Array.Empty<string>());
 
-        if (!OcrFieldReader.IsSourceUsable(ocrWords))
+        // Task 1 (non-escript blank state): OcrSourceUsability.Evaluate
+        // combines the existing word-count pre-gate with
+        // EscriptMarkerDetector's fuzzy "Escript" tab-label check, in
+        // that priority order — a sparse capture (window mid-load) can't
+        // reliably prove the marker is ABSENT, so TooSparse always wins
+        // over NotAnEscript even if the marker also happens to be
+        // missing from those few words. See Ocr/OcrSourceUsability.cs.
+        var usability = OcrSourceUsability.Evaluate(ocrWords);
+        if (usability == OcrSourceUsabilityDecision.TooSparse)
         {
             // v1: a cheap word-count pre-gate on the raw OCR output, NOT
             // a check of a parsed record (parsing now happens inside the
@@ -496,6 +561,23 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             StatusMessage = "OCR didn't find enough text on the captured e-script image to attempt a comparison. " +
                              "Check the capture region (Engine settings) and the raw OCR text below.";
             ClearCategories();
+            UpdateSummary(null);
+            return;
+        }
+
+        if (usability == OcrSourceUsabilityDecision.NotAnEscript)
+        {
+            // Owner's request: when the current Rx isn't an e-script at
+            // all (no "Escript" tab-label marker in the capture — a
+            // transfer, a faxed image, etc.), don't run the engine
+            // compare and blank out the verdict table instead of
+            // showing per-field comparisons against data that was never
+            // meant to line up. NonEscriptMessage drives the red banner
+            // in MainWindow.xaml (see property doc — reuses the Notes
+            // banner's STYLE, not its collection).
+            StatusMessage = "Rx is not an escript.";
+            ClearCategories(); // must run BEFORE setting NonEscriptMessage below — ClearCategories resets it too, for every other early-return path that isn't this one
+            NonEscriptMessage = "Rx is not an escript";
             UpdateSummary(null);
             return;
         }
@@ -540,6 +622,13 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         OcrStatusText = "OCR off — reading Escript tab directly";
         LastOcrRawText = "";
         _lastOcrWords = Array.Empty<OcrWord>();
+
+        // The OCR-only NotAnEscript banner (Task 1) never applies on this
+        // path — reset it so it can't linger on screen after the
+        // pharmacist switches from OCR to Escript-tab-direct mode
+        // mid-session. The Uia path's own SourceUnavailableReason flow
+        // (below) is the equivalent surface here.
+        NonEscriptMessage = "";
 
         PrescriptionRecord source;
         try
@@ -842,6 +931,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         OcrStatusText = "OCR: not read yet.";
         LastOcrRawText = "";
         _lastTiming = null;
+        NonEscriptMessage = ""; // NotAnEscript's own branch (RefreshFromOcrAsync) re-sets this AFTER calling ClearCategories — every other caller wants it cleared
     }
 
     /// <summary>Replaces Notes' contents and recomputes HasNotes — shared by RefreshAsync's ReadSource call and every ClearCategories early-return.</summary>

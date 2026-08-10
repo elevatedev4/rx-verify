@@ -375,26 +375,54 @@
             (the common case) shows nothing here at all — no empty red
             box.
         -->
-        <Border Grid.Row="3" Margin="0,4,0,0" Padding="0,0,0,4">
-            <Border.Style>
-                <Style TargetType="Border">
-                    <Setter Property="Visibility" Value="Collapsed" />
-                    <Style.Triggers>
-                        <DataTrigger Binding="{Binding HasNotes}" Value="True">
-                            <Setter Property="Visibility" Value="Visible" />
-                        </DataTrigger>
-                    </Style.Triggers>
-                </Style>
-            </Border.Style>
-            <ItemsControl ItemsSource="{Binding Notes}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <TextBlock Text="{Binding}" Foreground="#FFEF5350" FontSize="10" FontWeight="Bold"
-                                   TextWrapping="Wrap" Margin="0,1" />
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </Border>
+        <StackPanel Grid.Row="3">
+            <Border Margin="0,4,0,0" Padding="0,0,0,4">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding HasNotes}" Value="True">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <ItemsControl ItemsSource="{Binding Notes}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" Foreground="#FFEF5350" FontSize="10" FontWeight="Bold"
+                                       TextWrapping="Wrap" Margin="0,1" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+
+            <!--
+                Task 1b (non-escript blank state): "Rx is not an escript"
+                banner — same red/bold TEXT STYLE as the e-script Notes
+                banner directly above (reusing its visual language per
+                the brief, not its collection — see
+                OverlayViewModel.NonEscriptMessage doc for why these stay
+                separate properties). Visible only while
+                HasNonEscriptMessage is true (OCR path only; the Uia path
+                never sets this — it has its own SourceUnavailableReason
+                status-message flow instead).
+            -->
+            <Border Margin="0,4,0,0" Padding="0,0,0,4">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding HasNonEscriptMessage}" Value="True">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding NonEscriptMessage}" Foreground="#FFEF5350" FontSize="10" FontWeight="Bold"
+                           TextWrapping="Wrap" Margin="0,1" />
+            </Border>
+        </StackPanel>
 
         <!--
             Row 3 (VerifyOCR): always-visible OCR timing/char-count status
@@ -407,7 +435,33 @@
             in-the-moment view of the same data.
         -->
         <StackPanel Grid.Row="4" Margin="0,0,0,4">
-            <TextBlock Text="{Binding OcrStatusText}" Foreground="#FF9CCC65" FontSize="10" TextWrapping="Wrap" />
+            <!--
+                Task 2 (OCR reading indicator): small indeterminate
+                spinner next to the OCR status line, visible only while
+                OverlayViewModel.IsOcrReading is true (set immediately
+                before/after the ReadSourceFromOcrAsync await — see
+                RefreshFromOcrAsync). Copies the exact same
+                ProgressBar/DataTrigger pattern as the drug row's pending
+                spinner above (Row 2's IsPending ProgressBar) rather than
+                inventing new spinner chrome. Purely cosmetic — the
+                property flips either side of an await that was already
+                running, so this cannot slow down capture/OCR itself.
+            -->
+            <StackPanel Orientation="Horizontal">
+                <ProgressBar IsIndeterminate="True" Width="10" Height="10" Margin="0,0,5,0" VerticalAlignment="Center">
+                    <ProgressBar.Style>
+                        <Style TargetType="ProgressBar">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsOcrReading}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ProgressBar.Style>
+                </ProgressBar>
+                <TextBlock Text="{Binding OcrStatusText}" Foreground="#FF9CCC65" FontSize="10" TextWrapping="Wrap" />
+            </StackPanel>
             <Expander Header="Raw OCR text (last read)" Foreground="#FFBBBBBB" FontSize="10" Margin="0,2,0,0">
                 <TextBox Text="{Binding LastOcrRawText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
                          AcceptsReturn="True" MaxHeight="150" VerticalScrollBarVisibility="Auto"
