@@ -73,6 +73,20 @@ describe('parseSig', () => {
 });
 
 describe('compareSigs', () => {
+  // Round 5, fix 4(a): brief's exact prescribed test — scout said every
+  // component (bid, twice daily, po, word numbers) already existed, so
+  // this may ALREADY pass. It does — all four components (dose count via
+  // NUMBER_WORD_MAP "two", dose unit "tablets"->tab, route "by mouth"->po,
+  // frequency "twice daily"->bid) were already wired up before round 5.
+  // Kept as a regression guard; the live miss this brief describes is
+  // therefore an OCR-extraction issue upstream of this module, out of
+  // scope here.
+  it('(fix 4a) is GREEN: "2 tab po bid" vs "Take two tablets by mouth twice daily." (already passes pre-round-5 — regression guard only)', () => {
+    const r = compareSigs('2 tab po bid', 'Take two tablets by mouth twice daily.');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
   it('is GREEN when expansions are semantically equal', () => {
     const r = compareSigs('take 1 tablet by mouth twice daily', 'take 1 tab po bid');
     expect(r.status).toBe('green');
@@ -174,5 +188,221 @@ describe('compareSigs', () => {
     // documenting the actual (safe) behavior rather than asserting a
     // stronger claim than the fix makes.
     expect(r.status).not.toBe('green');
+  });
+});
+
+// Round 5, fix 4(b): additive abbreviation coverage. Every new entry gets
+// a green-equivalence pair; at least 3 negative tests prove different
+// frequencies/doses/routes still mismatch (brief's own examples: ac vs
+// pc, 1 puff vs 2 puffs, im vs iv — all included below, plus more per
+// category for solid coverage).
+describe('Round 5, fix 4: additive sig abbreviation coverage', () => {
+  describe('frequencies/timing', () => {
+    it('GREEN: "ac" matches itself (before-meals qualifier, both sides)', () => {
+      const r = compareSigs('take 1 tab po bid ac', 'take 1 tablet po bid ac');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "pc" matches itself (after-meals qualifier, both sides)', () => {
+      const r = compareSigs('take 1 tab po bid pc', 'take 1 tablet po bid pc');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "q24h" is equivalent to "daily"/"qd" (once every 24h = once daily)', () => {
+      const r = compareSigs('take 1 tab po q24h', 'take 1 tab po daily');
+      expect(r.status).toBe('green');
+      expect(parseSig('take 1 tab po q24h').timesPerDay).toBe(1);
+    });
+
+    it('GREEN: "q48h" matches itself', () => {
+      const r = compareSigs('take 1 tab po q48h', 'take 1 tab po q48h');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "q72h" matches itself', () => {
+      const r = compareSigs('take 1 tab po q72h', 'take 1 tab po q72h');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "qwk" is equivalent to "weekly"', () => {
+      const r = compareSigs('take 1 tab po qwk', 'take 1 tab po weekly');
+      expect(r.status).toBe('green');
+    });
+
+    it('NEGATIVE: "ac" vs "pc" is a mismatch (brief\'s own example)', () => {
+      const r = compareSigs('take 1 tab po bid ac', 'take 1 tab po bid pc');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    it('NEGATIVE: "q24h" vs "q48h" is a frequency mismatch (daily vs every-other-day rate)', () => {
+      const r = compareSigs('take 1 tab po q24h', 'take 1 tab po q48h');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    it('NEGATIVE: "qwk" vs "q24h" is a frequency mismatch (weekly vs daily)', () => {
+      const r = compareSigs('take 1 tab po qwk', 'take 1 tab po q24h');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    it('one side specifies "ac", the other omits it entirely -> YELLOW indeterminate (never silently ignored)', () => {
+      const r = compareSigs('take 1 tab po bid ac', 'take 1 tab po bid');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('sig_ambiguous');
+    });
+  });
+
+  describe('dose units', () => {
+    it('GREEN: "1 tsp" vs "1 teaspoon"', () => {
+      const r = compareSigs('take 1 tsp po daily', 'take 1 teaspoon po daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "1 tbsp" vs "1 tablespoon"', () => {
+      const r = compareSigs('take 1 tbsp po daily', 'take 1 tablespoon po daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "1 oz" vs "1 ounce"', () => {
+      const r = compareSigs('take 1 oz po daily', 'take 1 ounce po daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "2 puffs" vs "2 inhalations"', () => {
+      const r = compareSigs('inhale 2 puffs bid', 'inhale 2 inhalations bid');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "1 spray" vs "1 spray" (both sides)', () => {
+      const r = compareSigs('use 1 spray each nostril daily', 'use 1 spray each nostril daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "1 unit" vs "1 unit" (both sides)', () => {
+      const r = compareSigs('inject 1 unit sc daily', 'inject 1 unit sc daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "1 patch" vs "1 patch" (both sides)', () => {
+      const r = compareSigs('apply 1 patch top daily', 'apply 1 patch top daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('NEGATIVE: "1 puff" vs "2 puffs" is a dose-count mismatch (brief\'s own example)', () => {
+      const r = compareSigs('inhale 1 puff bid', 'inhale 2 puffs bid');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    it('NEGATIVE: "1 tsp" vs "1 tbsp" is a dose-unit mismatch (different dose forms)', () => {
+      const r = compareSigs('take 1 tsp po daily', 'take 1 tbsp po daily');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+  });
+
+  describe('routes', () => {
+    it('GREEN: "im" matches itself', () => {
+      const r = compareSigs('inject 1 ml im weekly', 'inject 1 ml im weekly');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "iv" matches itself', () => {
+      const r = compareSigs('give 1 dose iv daily', 'give 1 dose iv daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('GREEN: "sc"/"subq"/"subcut"/"subcutaneously" all fold to the same canonical route', () => {
+      expect(compareSigs('inject 1 unit sc daily', 'inject 1 unit subq daily').status).toBe('green');
+      expect(compareSigs('inject 1 unit subcut daily', 'inject 1 unit subcutaneously daily').status).toBe('green');
+      expect(compareSigs('inject 1 unit sc daily', 'inject 1 unit subcutaneously daily').status).toBe('green');
+    });
+
+    it('GREEN: "in each nostril" -> nasal route matches itself', () => {
+      const r = compareSigs('use 1 spray in each nostril bid', 'use 1 spray in each nostril bid');
+      expect(r.status).toBe('green');
+      expect(parseSig('use 1 spray in each nostril bid').route).toBe('nasal');
+    });
+
+    it('GREEN: "inhale" matches "inhalation" (route)', () => {
+      const r = compareSigs('inhale 2 puffs bid', 'take 2 puffs by inhalation bid');
+      expect(r.status).toBe('green');
+    });
+
+    it('NEGATIVE: "im" vs "iv" is a route mismatch (brief\'s own example)', () => {
+      const r = compareSigs('inject 1 ml im daily', 'inject 1 ml iv daily');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    it('NEGATIVE: "sc" vs "im" is a route mismatch', () => {
+      const r = compareSigs('inject 1 unit sc daily', 'inject 1 unit im daily');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    it('NEGATIVE: "nasal" (in each nostril) vs "po" is a route mismatch', () => {
+      const r = compareSigs('use 1 spray in each nostril bid', 'take 1 spray po bid');
+      expect(r.status).toBe('red');
+      expect(r.reasonCode).toBe('sig_mismatch');
+    });
+
+    // REVIEWER BLOCKER (round 5, fix 4 hardening): "iv" collides with
+    // ROMAN_MAP's pre-existing roman-numeral-4. Before the fix,
+    // extractDoseCount and extractRoute ran as fully independent scans,
+    // so a bare "iv" was read as BOTH doseCount=4 AND route='iv' at
+    // once — reproduced by the reviewer:
+    //   parseSig('give iv daily') -> {doseCount:4, route:'iv', ...}
+    //   parseSig('take iv tablets daily') -> {doseCount:4, route:'iv', ...}
+    //   compareSigs(...) -> green exact_match  // FALSE GREEN
+    // a genuinely-IV instruction compared GREEN against an oral tablet
+    // sig that used roman "iv" as dose-count-4, because dose-unit
+    // null-vs-tab is a no-penalty one-sided case and both sides
+    // coincidentally parsed the same spurious route+doseCount pair.
+    describe('"iv" / roman-numeral-4 collision (reviewer blocker)', () => {
+      it('FALSE GREEN regression: "give iv daily" (route) vs "take iv tablets daily" (roman-numeral dose count) must NOT be green', () => {
+        const r = compareSigs('give iv daily', 'take iv tablets daily');
+        expect(r.status).not.toBe('green');
+      });
+
+      it('"take iv tablets daily" resolves "iv" as roman-numeral doseCount 4, with NO route (adjacent dose-unit word disambiguates)', () => {
+        const p = parseSig('take iv tablets daily');
+        expect(p.doseCount).toBe(4);
+        expect(p.route).toBeNull();
+      });
+
+      it('"give iv daily" resolves "iv" as the route (intravenous), with NO dose count (nothing adjacent for it to quantify)', () => {
+        const p = parseSig('give iv daily');
+        expect(p.route).toBe('iv');
+        expect(p.doseCount).toBeNull();
+      });
+
+      it('a genuine "administer 1 ml iv daily" still gets route iv (explicit digit dose count leaves "iv" free for route)', () => {
+        const p = parseSig('administer 1 ml iv daily');
+        expect(p.doseCount).toBe(1);
+        expect(p.route).toBe('iv');
+      });
+
+      it('other roman numerals (unaffected by the "iv" gate) still resolve as plain dose counts, no adjacency requirement', () => {
+        const p = parseSig('take ii tabs po tid');
+        expect(p.doseCount).toBe(2);
+        expect(p.route).toBe('po');
+      });
+    });
+  });
+
+  describe('deliberately NOT added (ambiguous — see ROUTE_MAP/MEAL_RELATION_MAP docs)', () => {
+    it('"qn" is NOT recognized as a frequency — stays an unrecognized-freq-token yellow, not silently mapped', () => {
+      const p = parseSig('take 1 tab po qn');
+      expect(p.hasUnrecognizedFreqToken).toBe(true);
+    });
+
+    it('"od" still means the existing "right eye" route, never "once daily" (no new od-as-frequency mapping added)', () => {
+      const p = parseSig('take 1 gtt od bid');
+      expect(p.route).toBe('od');
+      expect(p.timesPerDay).toBe(2); // from bid, not from "od"
+    });
   });
 });

@@ -83,6 +83,7 @@ type LabelKey =
   | 'location'
   | 'phone'
   | 'written'
+  | 'available'
   | 'ndc'
   | 'medication'
   | 'quantity'
@@ -131,6 +132,12 @@ const LABELS: LabelDef[] = [
   { key: 'supervisor', canonical: 'supervisor', maxWords: 2, ignore: true },
   { key: 'spi', canonical: 'spi', maxWords: 1, ignore: true },
   { key: 'written', canonical: 'written', maxWords: 3 },
+  // Round 5 fix 3: some e-scripts show an "Available:" date — PioneerRx
+  // then displays THAT date (not the Written date) in its own entered
+  // fields, so a technician's entered date is expected to match Available
+  // when present. See availableDate on PrescriptionRecord (types.ts) and
+  // compareWrittenOrAvailableDate (normalize/date.ts).
+  { key: 'available', canonical: 'available', maxWords: 3 },
   { key: 'ndc', canonical: 'ndc', maxWords: 3 },
   { key: 'medication', canonical: 'medication', maxWords: 3 },
   { key: 'quantity', canonical: 'quantity', maxWords: 3 },
@@ -1159,6 +1166,24 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // OCR row; "Refills"/"refills)" alone fuzzy-match 2 CHROME_TOKENS
     // entries meant for the "Refilled 1 time" tab-strip, tripping the
     // 2-hit rule below and silently dropping the Quantity value too).
+    // Round 5 fix 1: snapshot the lines BEFORE the defensive chrome filter
+    // below runs. Live report — a refill script's "Total Fills: N
+    // (including this fill)" tail landed on the SAME physical OCR row as
+    // the (correctly recognized elsewhere) Quantity value, with the
+    // "Total" label itself garbled beyond recognition ("To>l"). That row
+    // starts with the quantity number, not a label, so it doesn't qualify
+    // for the "recognized label at line start" keep-exception just below
+    // — and "Fills"~"fill" (1 edit) plus "fill)"~"fill" (exact) both
+    // fuzzy-hit the CHROME_TOKENS "fill" entry (meant for the "Fill
+    // Audit" toolbar button), tripping the 2-hit rule and dropping the
+    // WHOLE row, phrase and all, before findTotalFillsPhraseValue below
+    // ever gets a chance to see it. The phrase anchor itself
+    // ("N (including this fill)") is exact-shape and effectively
+    // impossible to false-positive on, so it's safe to scan for it here,
+    // on the pre-chrome-filter line set, independent of whether the
+    // defensive filter goes on to drop the row for every OTHER purpose
+    // (Pass A/B field pairing is unaffected — deliberately left alone).
+    const linesBeforeChromeFilter = lines;
     lines = lines.filter((line) => {
       const startMatch = findLabelAtLineStart(line);
       if (startMatch && !startMatch.label.ignore) return true;
@@ -1462,55 +1487,69 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // ever read; the far-column text is left behind as its own leftover
     // line for whatever field (if any) actually owns it.
     //
-    // KNOWN, ACCEPTED SCOPE LIMIT (mirrors the sig-continuation block
-    // immediately above, same constraint): this runs BEFORE Pass B, so
-    // `raw.location` is only set here when Pass A already resolved the
-    // location's own row INLINE (label + street value on the same
-    // physical OCR row). If a capture instead needs Pass B's block-
-    // column pairing to resolve "Location:" in the first place (a
-    // labels-block-then-values-block layout where the label and its
-    // value are NOT on the same row), raw.location is still undefined at
-    // this point and this whole block is a no-op for that capture — any
-    // wrapped 2nd/3rd address line on such a capture is not gathered.
-    // Every real live-test capture this branch was tuned against has
-    // "Location:" resolved inline (same shape sig always resolves in),
-    // so this hasn't been a reported gap; flagging it here rather than
-    // silently relying on that.
-    if (raw.location) {
+    // ROUND 5 FIX 2: this used to run ONCE, here, BEFORE Pass B — so
+    // `raw.location` was only ever set at this point when Pass A had
+    // already resolved the location's own row INLINE (label + street
+    // value on the same physical OCR row). A live capture showed
+    // prescriber.address = "1811 Wakarusa Dr, Ste 102" with NO city/
+    // state/zip line at all, on a clinic that parses fine (city line
+    // included) on other captures — traced to this exact gap: on that
+    // capture "Location:" only resolved via PASS B's block-column
+    // pairing (a labels-block-then-values-block layout, label and street
+    // value on different rows), so raw.location was still undefined here
+    // and this whole block was a no-op — silently dropping the
+    // still-unclaimed city/state/zip continuation row instead of
+    // gathering it (previously documented below as a "KNOWN, ACCEPTED
+    // SCOPE LIMIT"; now closed). Fix: extracted into gatherLocationContinuation()
+    // and called a SECOND time, right after Pass B runs (see call site
+    // below), so a Pass-B-resolved location also gets its continuation
+    // row(s) gathered. Every guard is unchanged and reused verbatim for
+    // both call sites — same Y-band (label's own row Y .. next
+    // recognized label's row Y), same left-x column-alignment check
+    // (MAX_VALUE_WORD_GAP_PX/2), same trimColumnGap-before-reading-text
+    // (bug 2 fix, protects against an unrelated right-column value
+    // sharing the continuation row) — see tests/ocr-parse-escript.test.ts
+    // fixtures (x)/(y)/(z), which must stay green. Calling this twice is
+    // safe/idempotent: any row already consumed by the first (pre-Pass-B)
+    // call is skipped by the `consumedLeftover.has(i)` guard on the
+    // second (post-Pass-B) call, so an inline-resolved location's
+    // continuation is never gathered twice.
+    function gatherLocationContinuation(): void {
+      if (!raw.location) return;
       const locationIdx = labelOrder.findIndex((k) => k === 'location');
       const locationMeta = resolutionMeta.location;
-      if (locationIdx !== -1 && locationMeta) {
-        const locationRowY = (labelPositions[locationIdx] as { x: number; y: number; text: string }).y;
-        const valueX = (locationMeta.words[0] as OcrWord).x;
-        let nextLabelY = Number.POSITIVE_INFINITY;
-        for (const p of labelPositions) {
-          if (p.y > locationRowY + 1 && p.y < nextLabelY) nextLabelY = p.y;
-        }
-        const continuationTexts: string[] = [];
-        const continuationWordsAll: OcrWord[] = [];
-        for (let i = 0; i < leftoverLines.length; i++) {
-          if (consumedLeftover.has(i)) continue;
-          const line = leftoverLines[i] as OcrWord[];
-          const first = line[0] as OcrWord;
-          if (first.y <= locationRowY + 1 || first.y >= nextLabelY) continue;
-          if (Math.abs(first.x - valueX) > MAX_VALUE_WORD_GAP_PX / 2) continue;
-          consumedLeftover.add(i);
-          const trimmedLine = trimColumnGap(line);
-          const text = wordsToText(trimmedLine);
-          if (text) {
-            continuationTexts.push(text);
-            continuationWordsAll.push(...trimmedLine);
-          }
-        }
-        if (continuationTexts.length > 0) {
-          raw.location = [raw.location, ...continuationTexts].join(' ');
-          resolutionMeta.location = {
-            strategy: locationMeta.strategy,
-            words: [...locationMeta.words, ...continuationWordsAll]
-          };
+      if (locationIdx === -1 || !locationMeta) return;
+      const locationRowY = (labelPositions[locationIdx] as { x: number; y: number; text: string }).y;
+      const valueX = (locationMeta.words[0] as OcrWord).x;
+      let nextLabelY = Number.POSITIVE_INFINITY;
+      for (const p of labelPositions) {
+        if (p.y > locationRowY + 1 && p.y < nextLabelY) nextLabelY = p.y;
+      }
+      const continuationTexts: string[] = [];
+      const continuationWordsAll: OcrWord[] = [];
+      for (let i = 0; i < leftoverLines.length; i++) {
+        if (consumedLeftover.has(i)) continue;
+        const line = leftoverLines[i] as OcrWord[];
+        const first = line[0] as OcrWord;
+        if (first.y <= locationRowY + 1 || first.y >= nextLabelY) continue;
+        if (Math.abs(first.x - valueX) > MAX_VALUE_WORD_GAP_PX / 2) continue;
+        consumedLeftover.add(i);
+        const trimmedLine = trimColumnGap(line);
+        const text = wordsToText(trimmedLine);
+        if (text) {
+          continuationTexts.push(text);
+          continuationWordsAll.push(...trimmedLine);
         }
       }
+      if (continuationTexts.length > 0) {
+        raw.location = [raw.location, ...continuationTexts].join(' ');
+        resolutionMeta.location = {
+          strategy: locationMeta.strategy,
+          words: [...locationMeta.words, ...continuationWordsAll]
+        };
+      }
     }
+    gatherLocationContinuation();
 
     // ---- Pass B: labels-block-then-values-block fallback ----
     // Any label that had no inline value (a label-only line) is resolved
@@ -1691,6 +1730,17 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       if (lineIdx !== null) assignGroup(group.groupKeys, lineIdx, group.groupIdxs);
     }
 
+    // ROUND 5 FIX 2, second call: catches the case gatherLocationContinuation()'s
+    // pre-Pass-B call above cannot — "Location:" only resolved via Pass
+    // B's block-column pairing (assignGroup, just above), not Pass A
+    // inline. Safe to call unconditionally: a no-op if raw.location is
+    // still unset, and idempotent for the inline case (its continuation
+    // row(s) are already in consumedLeftover from the first call). Must
+    // run before the leftover-line pool below (candidatePool) is built,
+    // so a claimed continuation row is never also offered to some other
+    // field's date/phone pool fallback.
+    gatherLocationContinuation();
+
     // ---- Pattern anchors: NPI / NDC, independent of any label ----
     // Per branch brief: NPI/NDC have no reliable label at all (or their
     // labeled slot can land on the wrong value after a block-layout
@@ -1712,9 +1762,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // "Refills Remaining"/"Total fills" label match from Pass A/B above
     // always wins (raw.refills already set); this only fires when the
     // label itself was dropped by OCR entirely and nothing above found
-    // anything at all. See findTotalFillsPhraseValue.
+    // anything at all. See findTotalFillsPhraseValue. Scans
+    // linesBeforeChromeFilter (round 5 fix 1), not the post-filter
+    // `lines` — the defensive chrome filter above can drop the phrase's
+    // entire physical row (e.g. "Fills" fuzzy-matching the "Fill" chrome
+    // token) before this fallback would otherwise ever see it.
     if (raw.refills === undefined) {
-      const totalFillsPhrase = findTotalFillsPhraseValue(lines);
+      const totalFillsPhrase = findTotalFillsPhraseValue(linesBeforeChromeFilter);
       if (totalFillsPhrase !== undefined) {
         raw.refills = totalFillsPhrase;
         refillsResolvedCanonical = 'totalfills';
@@ -1766,7 +1820,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     }
 
     function resolveDateField(
-      key: 'dob' | 'written'
+      key: 'dob' | 'written' | 'available'
     ): { value: string | undefined; strategy: FieldDiagnostic['strategy']; pos?: OcrWord } {
       const current = raw[key];
       if (current) {
@@ -1780,6 +1834,21 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         const repaired = repairMangledDate(current, true);
         if (repaired && parseDate(repaired)) return { value: repaired, strategy: meta?.strategy, pos };
       }
+      // Round 5 fix 3: deliberately NOT extended to 'available'. The
+      // pool-fallback below scans every still-unclaimed leftover line for
+      // ANY date-shaped text — safe for dob/written because nearly every
+      // e-script shows both, so the fallback is really "which leftover
+      // row is the real one" rather than "does this field exist at all".
+      // availableDate only exists on a MINORITY of scripts (refill-
+      // response layouts); applying the same blind scan to it would
+      // spuriously invent an Available date out of some unrelated
+      // leftover date-shaped text (e.g. a stray date elsewhere on the
+      // page) on ordinary scripts that never showed an "Available" label
+      // at all — exactly the kind of confidently-wrong value the
+      // NO-GUESS policy above exists to prevent. availableDate only ever
+      // resolves when explicitly label-anchored (raw.available already
+      // set by Pass A/B recognizing the "Available" label).
+      if (key === 'available') return { value: undefined, strategy: undefined };
       for (const candidate of candidatePool) {
         if (claimedFromPool.has(candidate.text)) continue;
         if (parseDate(candidate.text)) {
@@ -1807,8 +1876,10 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
 
     const dobResolved = resolveDateField('dob');
     const writtenResolved = resolveDateField('written');
+    const availableResolved = resolveDateField('available');
     const dob = dobResolved.value;
     const written = writtenResolved.value;
+    const available = availableResolved.value;
 
     // ---- Diagnostics helpers (item 4) ----
     function labelDiag(key: LabelKey): FieldDiagnostic['label'] {
@@ -1865,6 +1936,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       pushResolved('dateWritten', 'written', written, writtenResolved.strategy);
     } else {
       pushMiss('dateWritten', 'written', raw.written ? 'validation-failed:date-shape' : 'no-value-paired');
+    }
+
+    if (available) {
+      record.availableDate = available;
+      pushResolved('availableDate', 'available', available, availableResolved.strategy);
+    } else {
+      pushMiss('availableDate', 'available', raw.available ? 'validation-failed:date-shape' : 'no-value-paired');
     }
 
     // "O." + a following digit is OCR splitting "0.X" (e.g. "0.5 ML") into

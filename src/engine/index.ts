@@ -16,7 +16,7 @@ import {
   type VerifyResult
 } from '../types.js';
 import { compareNames } from '../normalize/name.js';
-import { compareDates } from '../normalize/date.js';
+import { compareDates, compareWrittenOrAvailableDate } from '../normalize/date.js';
 import { compareAddresses } from '../normalize/address.js';
 import { compareSigs, parseSig } from '../sig/index.js';
 import { compareDrugs, type RxNormProvider } from '../drug/index.js';
@@ -144,7 +144,11 @@ export function verify(
   const prescriberNpiResult = comparePrescriberNpi(source.prescriber?.npi, entered.prescriber?.npi);
   const prescriberPhoneResult = comparePrescriberPhone(source.prescriber?.phone, entered.prescriber?.phone);
   const prescriberAddressResult = comparePrescriberAddress(source.prescriber?.address, entered.prescriber?.address);
-  const dateWrittenResult = compareDates(source.dateWritten, entered.dateWritten);
+  // Round 5, fix 3: folds source.availableDate awareness into the
+  // dateWritten verdict — see compareWrittenOrAvailableDate's doc
+  // (normalize/date.ts). Behaves exactly like plain compareDates when
+  // source.availableDate is absent.
+  const dateWrittenResult = compareWrittenOrAvailableDate(source.dateWritten, source.availableDate, entered.dateWritten);
   const drugResult = options.skipDrugLookup
     ? {
         status: 'yellow' as const,
@@ -162,6 +166,12 @@ export function verify(
   );
   const refillsResult = compareRefills(source.refills, entered.refills, source.refillsFromTotalFills);
   const dawResult = compareDaw(source.substitutionsNotAllowed, entered.daw);
+
+  // Round 5, fix 3: whether the conditional 'availableDate' verdict row
+  // is rendered — computed once and reused both at construction (below)
+  // and in the completeness assertion (further down), so the two can
+  // never drift apart.
+  const includeAvailableDate = stringifyScalar(source.availableDate) !== null;
 
   const verdicts: FieldVerdict[] = [
     {
@@ -212,6 +222,22 @@ export function verify(
       sourceValue: stringifyScalar(source.dateWritten),
       enteredValue: stringifyScalar(entered.dateWritten)
     },
+    // Round 5, fix 3: conditional — only rendered when the source
+    // actually shows an Available date (see FIELD_ORDER's doc, types.ts).
+    // Purely informational: mirrors dateWrittenResult (the SAME
+    // comparison already folds Available-awareness in, above) so the
+    // overlay can show which source date the Written verdict was
+    // actually checked against.
+    ...(includeAvailableDate
+      ? [
+          {
+            field: 'availableDate' as const,
+            ...dateWrittenResult,
+            sourceValue: stringifyScalar(source.availableDate),
+            enteredValue: stringifyScalar(entered.dateWritten)
+          }
+        ]
+      : []),
     {
       field: 'quantity',
       ...quantityResult,
@@ -244,14 +270,44 @@ export function verify(
     }
   ];
 
-  // Sanity check: verdicts must be in FIELD_ORDER. This is a hard
-  // product requirement, so we assert it rather than silently trusting
-  // the literal array above.
-  verdicts.forEach((v, i) => {
-    if (v.field !== FIELD_ORDER[i]) {
-      throw new Error(`Engine output order violation: expected ${FIELD_ORDER[i]} at index ${i}, got ${v.field}`);
+  // Sanity check: verdicts must appear in FIELD_ORDER's relative order.
+  // This is a hard product requirement, so we assert it rather than
+  // silently trusting the literal array above. A strict index-for-index
+  // match no longer works as of round 5 fix 3 — 'availableDate' is
+  // CONDITIONAL (only present when source.availableDate is set, see
+  // FIELD_ORDER's doc in types.ts) and every other field is always
+  // present, so instead this walks FIELD_ORDER once, advancing past any
+  // field verdicts skips, and fails only if a verdict's field is missing
+  // from FIELD_ORDER entirely or shows up OUT of relative order.
+  let fieldOrderCursor = 0;
+  verdicts.forEach((v) => {
+    while (fieldOrderCursor < FIELD_ORDER.length && FIELD_ORDER[fieldOrderCursor] !== v.field) {
+      fieldOrderCursor++;
     }
+    if (fieldOrderCursor >= FIELD_ORDER.length) {
+      throw new Error(`Engine output order violation: ${v.field} is missing from FIELD_ORDER or appears out of order.`);
+    }
+    fieldOrderCursor++;
   });
+
+  // NON-BLOCKING HARDENING (reviewer, round 5 fix 3 follow-up): the
+  // subsequence check above only catches a field appearing OUT of
+  // relative order or missing from FIELD_ORDER entirely — it does NOT
+  // catch a mandatory field silently dropped from the verdicts array
+  // (e.g. a future edit that accidentally deletes the 'quantity' entry
+  // above), since a shorter subsequence is still a valid subsequence.
+  // Restores that fail-fast guarantee explicitly: the verdict count must
+  // equal FIELD_ORDER's length, minus exactly the conditional fields
+  // that are legitimately absent (today: just 'availableDate', via the
+  // same includeAvailableDate flag construction used above — never
+  // computed independently, so this can't silently drift out of sync
+  // with which fields are actually conditional).
+  const expectedVerdictCount = FIELD_ORDER.length - (includeAvailableDate ? 0 : 1);
+  if (verdicts.length !== expectedVerdictCount) {
+    throw new Error(
+      `Engine output completeness violation: expected ${expectedVerdictCount} verdicts (FIELD_ORDER has ${FIELD_ORDER.length}, availableDate ${includeAvailableDate ? 'included' : 'excluded'}), got ${verdicts.length}.`
+    );
+  }
 
   const summary = {
     green: verdicts.filter((v) => v.status === 'green').length,

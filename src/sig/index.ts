@@ -29,6 +29,11 @@ export interface ParsedSig {
   timesPerDay: number | null;
   prn: boolean;
   durationDays: number | null;
+  /**
+   * Round 5, fix 4 (additive): meal-timing qualifier — 'ac' (before
+   * meals) / 'pc' (after meals). See MEAL_RELATION_MAP's doc.
+   */
+  mealRelation: string | null;
   /** true if we could not confidently extract enough structure. */
   ambiguous: boolean;
   /**
@@ -47,7 +52,45 @@ const ROUTE_MAP: Record<string, string> = {
   top: 'top', topically: 'top', topical: 'top',
   od: 'od', // right eye
   os: 'os', // left eye
-  ou: 'ou' // both eyes
+  ou: 'ou', // both eyes
+  // Round 5, fix 4 (additive): common, unambiguous injection/nasal/
+  // inhalation routes. "iv" ALSO happens to be ROMAN_MAP's roman numeral
+  // for 4 (pre-existing) — reviewer confirmed this produced a real false
+  // GREEN (extractDoseCount and extractRoute ran as independent scans,
+  // so a bare "iv" was read as BOTH doseCount=4 AND route='iv' at once,
+  // making an IV-route sig with no dose unit compare identically to an
+  // oral "iv tablets" = 4-tablets sig). Fixed at the extractor level —
+  // see extractDoseCount's doc — not by removing this entry; "iv" stays
+  // a fully valid route here.
+  im: 'im', // intramuscular
+  iv: 'iv', // intravenous
+  sc: 'sc', subq: 'sc', subcut: 'sc', subcutaneously: 'sc', // all fold to one canonical
+  // "in each nostril" is substituted (MULTI_WORD_TERMS) directly to the
+  // 'nasal' token below before tokenization.
+  nasal: 'nasal',
+  inhale: 'inh', inhalation: 'inh'
+};
+
+/**
+ * Round 5, fix 4 (additive): meal-timing qualifier — "ac" (before meals)
+ * / "pc" (after meals). Deliberately its own small field/map rather than
+ * folded into ROUTE_MAP or FREQ_MAP: it's neither a route nor a times-
+ * per-day count, it's an independent qualifier a sig can carry alongside
+ * either (e.g. "1 tab po bid ac"). Compared the same conservative way as
+ * route/frequency in compareSigs — both present and different is a
+ * contradiction (RED); only one side specifying it is indeterminate
+ * (YELLOW), never silently ignored.
+ *
+ * Deliberately NOT added: "qn" and "od" as a once-daily variant — both
+ * flagged ambiguous in the branch brief ("qn" collides with "qhs"/"qod"-
+ * style once-nightly/every-other-day shorthand depending on source; "od"
+ * is already this table's "right eye" route, and using it for "once
+ * daily" too would make a bare "od" token silently mean two different
+ * things depending on context).
+ */
+const MEAL_RELATION_MAP: Record<string, string> = {
+  ac: 'ac',
+  pc: 'pc'
 };
 
 /** Frequency abbreviations -> times per day. */
@@ -57,7 +100,15 @@ const FREQ_MAP: Record<string, number> = {
   bid: 2, 'b.i.d.': 2, 'twice daily': 2, 'twice a day': 2, twice: 2,
   tid: 3, 't.i.d.': 3, 'three times daily': 3, 'three times a day': 3,
   qid: 4, 'q.i.d.': 4, 'four times daily': 4, 'four times a day': 4,
-  q4h: 6, q6h: 4, q8h: 3, q12h: 2
+  q4h: 6, q6h: 4, q8h: 3, q12h: 2,
+  // Round 5, fix 4 (additive): longer-interval "every N hours"/weekly
+  // dosing, expressed as an equivalent times-per-day rate so they compare
+  // structurally against each other and against any other frequency the
+  // same way q4h/q6h/etc. already do.
+  q24h: 1, // once every 24h = once daily
+  q48h: 0.5, // once every 48h
+  q72h: 1 / 3, // once every 72h
+  qwk: 1 / 7, weekly: 1 / 7
 };
 
 const PRN_TOKENS = new Set(['prn', 'p.r.n.', 'as needed']);
@@ -66,7 +117,21 @@ const DOSE_UNIT_MAP: Record<string, string> = {
   tab: 'tab', tabs: 'tab', tablet: 'tab', tablets: 'tab',
   cap: 'cap', caps: 'cap', capsule: 'cap', capsules: 'cap',
   ml: 'ml', 'gtt': 'gtt', gtts: 'gtt', drop: 'gtt', drops: 'gtt',
-  g: 'g'
+  g: 'g',
+  // Round 5, fix 4 (additive): common, unambiguous dose-unit synonyms.
+  // "inhalation"/"inhalations" fold to the same canonical as puff (both
+  // describe one actuation of an inhaler) — see ROUTE_MAP's doc for why
+  // "inhalation" ALSO appears there as a route synonym: the two lookups
+  // are independent, so a single token can carry both meanings, exactly
+  // as casual sig shorthand does ("2 inhalations" is both a dose count
+  // unit and an implicit inhaled route).
+  tsp: 'tsp', teaspoon: 'tsp', teaspoons: 'tsp',
+  tbsp: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp',
+  oz: 'oz', ounce: 'oz', ounces: 'oz',
+  puff: 'puff', puffs: 'puff', inhalation: 'puff', inhalations: 'puff',
+  spray: 'spray', sprays: 'spray',
+  unit: 'unit', units: 'unit',
+  patch: 'patch', patches: 'patch'
 };
 
 const ROMAN_MAP: Record<string, number> = {
@@ -122,7 +187,10 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   // falls back to YELLOW sig_ambiguous — the same safe behavior this
   // input had before morning/evening folding was added at all.
   [/\b(in the morning|each morning|every morning)\b(?!\s+and\b)/g, 'qam'],
-  [/\b(in the evening|each evening|every evening)\b(?!\s+and\b)/g, 'qpm']
+  [/\b(in the evening|each evening|every evening)\b(?!\s+and\b)/g, 'qpm'],
+  // Round 5, fix 4 (additive): substituted directly to the 'nasal' route
+  // token (ROUTE_MAP), same pattern as "by mouth" -> 'po' above.
+  [/\bin each nostril\b/g, 'nasal']
 ];
 
 function preprocess(raw: string): string {
@@ -157,6 +225,31 @@ function extractDoseCount(tokens: string[]): { count: number | null; consumedIdx
       return { count: NUMBER_WORD_MAP[tok] as number, consumedIdx: i };
     }
     if (ROMAN_MAP[tok] !== undefined) {
+      // REVIEWER BLOCKER FIX (round 5, fix 4 hardening): "iv" collides
+      // with ROUTE_MAP's intravenous abbreviation — before this gate,
+      // extractDoseCount and extractRoute ran as two fully independent
+      // scans, so a bare "iv" was read as BOTH doseCount=4 (roman
+      // numeral) AND route='iv' simultaneously, on every sig containing
+      // it. That produced a confirmed false GREEN: 'give iv daily'
+      // (genuinely route=IV, no dose count at all) compared as
+      // structurally identical to 'take iv tablets daily' (genuinely
+      // doseCount=4 "iv tablets", no route) because BOTH sides
+      // coincidentally resolved to the exact same {doseCount:4,
+      // route:'iv'} pair.
+      //
+      // Every OTHER roman numeral (i/ii/iii/v/vi/vii/viii) has no
+      // ROUTE_MAP collision at all and is accepted unconditionally,
+      // unchanged from before. Only for "iv" specifically: it's accepted
+      // as a roman-numeral dose count ONLY when the very next token is a
+      // recognized dose-unit word ("iv tablets", "iv caps") — a roman
+      // numeral with nothing to quantify is far more likely to be the
+      // route. When the adjacency check fails, this candidate is
+      // skipped (not consumed) so extractRoute's own scan below picks it
+      // up as a route instead.
+      if (ROUTE_MAP[tok] !== undefined) {
+        const next = tokens[i + 1];
+        if (!next || !DOSE_UNIT_MAP[next]) continue;
+      }
       return { count: ROMAN_MAP[tok] as number, consumedIdx: i };
     }
   }
@@ -170,8 +263,20 @@ function extractDoseUnit(tokens: string[]): string | null {
   return null;
 }
 
-function extractRoute(tokens: string[]): string | null {
-  for (const tok of tokens) {
+/**
+ * REVIEWER BLOCKER FIX (round 5, fix 4 hardening): `excludeIdx` is the
+ * token index extractDoseCount actually consumed (see its doc) —
+ * skipped here so the SAME token can never be double-read as both a
+ * roman-numeral dose count AND a route (the "iv" collision). Every
+ * other caller of route extraction (there's only ever the one, from
+ * parseSig) always passes doseCount's real consumedIdx, so this is not
+ * an optional safety net — it's load-bearing for every sig, not just
+ * ones containing "iv".
+ */
+function extractRoute(tokens: string[], excludeIdx: number = -1): string | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (i === excludeIdx) continue;
+    const tok = tokens[i] as string;
     if (ROUTE_MAP[tok]) return ROUTE_MAP[tok] as string;
   }
   return null;
@@ -186,6 +291,14 @@ function extractFrequency(tokens: string[]): number | null {
 
 function extractPrn(tokens: string[]): boolean {
   return tokens.some((t) => PRN_TOKENS.has(t));
+}
+
+/** Round 5, fix 4 (additive) — see MEAL_RELATION_MAP's doc. */
+function extractMealRelation(tokens: string[]): string | null {
+  for (const tok of tokens) {
+    if (MEAL_RELATION_MAP[tok]) return MEAL_RELATION_MAP[tok] as string;
+  }
+  return null;
 }
 
 /**
@@ -204,11 +317,15 @@ export function parseSig(raw: string): ParsedSig {
     .map((t) => t.replace(/[.]+$/, ''))
     .filter(Boolean);
 
-  const { count: doseCount } = extractDoseCount(tokens);
+  const { count: doseCount, consumedIdx } = extractDoseCount(tokens);
   const doseUnit = extractDoseUnit(tokens);
-  const route = extractRoute(tokens);
+  // REVIEWER BLOCKER FIX (round 5, fix 4 hardening): pass doseCount's
+  // consumed token index so the same token can never double as both a
+  // roman-numeral dose count and a route — see extractRoute's doc.
+  const route = extractRoute(tokens, consumedIdx);
   const timesPerDay = extractFrequency(tokens);
   const prn = extractPrn(tokens);
+  const mealRelation = extractMealRelation(tokens);
 
   // Detect frequency-LOOKING tokens we don't recognize (e.g. "q5h",
   // a misspelled "qhd"). These make the frequency indeterminate.
@@ -220,11 +337,25 @@ export function parseSig(raw: string): ParsedSig {
   );
 
   // Ambiguous if we're missing dose count AND route AND frequency —
-  // i.e. we extracted essentially nothing structural.
+  // i.e. we extracted essentially nothing structural. mealRelation is
+  // deliberately NOT part of this core triad (same treatment as
+  // doseUnit/durationDays/prn above it) — it's an optional qualifier
+  // layered on top, not itself enough to call a sig "structurally
+  // parsed".
   const foundCount = [doseCount, route, timesPerDay].filter((v) => v !== null).length;
   const ambiguous = foundCount === 0;
 
-  return { doseCount, doseUnit, route, timesPerDay, prn, durationDays, ambiguous, hasUnrecognizedFreqToken };
+  return {
+    doseCount,
+    doseUnit,
+    route,
+    timesPerDay,
+    prn,
+    durationDays,
+    mealRelation,
+    ambiguous,
+    hasUnrecognizedFreqToken
+  };
 }
 
 export function compareSigs(
@@ -288,6 +419,11 @@ export function compareSigs(
   checkComponent('route', a.route, b.route);
   checkComponent('frequency (per day)', a.timesPerDay, b.timesPerDay);
   checkComponent('duration (days)', a.durationDays, b.durationDays);
+  // Round 5, fix 4 (additive): meal-timing qualifier ("ac" vs "pc") — same
+  // indeterminate-if-only-one-side-specifies treatment as the rest of
+  // this core-ish set (see MEAL_RELATION_MAP's doc for why it's not part
+  // of the ambiguity triad, but IS still compared once both sides parse).
+  checkComponent('meal timing (before/after meals)', a.mealRelation, b.mealRelation);
 
   // Dose unit: both present and different (tab vs cap = different dose
   // forms) = contradiction; one side missing = no penalty.
