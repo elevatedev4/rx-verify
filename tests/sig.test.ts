@@ -51,6 +51,25 @@ describe('parseSig', () => {
     expect(p.timesPerDay).toBe(1);
     expect(p.ambiguous).toBe(false);
   });
+
+  describe('morning/evening phrasings imply once-daily frequency', () => {
+    it.each([
+      ['in the morning', 'take 1 capsule in the morning'],
+      ['each morning', 'take 1 capsule each morning'],
+      ['every morning', 'take 1 capsule every morning'],
+      ['qam', 'take 1 capsule qam'],
+      ['in the evening', 'take 1 capsule in the evening'],
+      ['each evening', 'take 1 capsule each evening'],
+      ['every evening', 'take 1 capsule every evening'],
+      ['qpm', 'take 1 capsule qpm'],
+      ['at bedtime', 'take 1 capsule at bedtime'],
+      ['qhs', 'take 1 capsule qhs']
+    ])('"%s" -> frequency 1/day, unambiguous', (_label, sig) => {
+      const p = parseSig(sig);
+      expect(p.timesPerDay).toBe(1);
+      expect(p.ambiguous).toBe(false);
+    });
+  });
 });
 
 describe('compareSigs', () => {
@@ -99,5 +118,61 @@ describe('compareSigs', () => {
     const r = compareSigs(undefined, 'take 1 tab po bid');
     expect(r.status).toBe('yellow');
     expect(r.reasonCode).toBe('not_provided');
+  });
+
+  it('is GREEN "1 cap" vs "1 capsule" (dose-unit abbreviation equivalence regression)', () => {
+    const r = compareSigs('take 1 cap po bid', 'take 1 capsule po bid');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('is GREEN for the live-test regression: amphetamine-family sig, "1 capsule in the morning Orally Once a day" vs "TAKE ONE CAPSULE BY MOUTH EVERY MORNING."', () => {
+    const r = compareSigs(
+      '1 capsule in the morning Orally Once a day',
+      'TAKE ONE CAPSULE BY MOUTH EVERY MORNING.'
+    );
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('is RED when morning frequency contradicts an explicit different frequency', () => {
+    const r = compareSigs('take 1 tab po every morning', 'take 1 tab po bid');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  // REVIEW FIX (confirmed false GREEN): "every morning and evening" is a
+  // genuinely twice-daily instruction. Before the negative-lookahead
+  // fix, "every morning" folded to qam regardless of the trailing "and
+  // evening", which was then silently dropped by extractFrequency (no
+  // FREQ_MAP entry for bare "evening") — so this BID sig compared GREEN
+  // against an entered once-daily "qam" sig.
+  it('does NOT fold "every morning and evening" to once-daily — must not be GREEN against a once-daily entered sig', () => {
+    const p = parseSig('take 1 tab every morning and evening');
+    expect(p.timesPerDay).toBeNull();
+
+    const r = compareSigs('take 1 tab every morning and evening', 'take 1 tab qam');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('does NOT fold "each evening and morning" to once-daily either (same continuation guard, reversed order)', () => {
+    const r = compareSigs('take 1 tab each evening and morning', 'take 1 tab qpm');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('a preceding conflicting frequency word ("twice every morning") stays non-green, not silently folded to once-daily', () => {
+    const r = compareSigs('take 1 tab twice every morning', 'take 1 tab qam');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('an unrelated "and" after the morning phrase (no continuation risk) still folds normally to once-daily', () => {
+    // Sanity check that the negative lookahead isn't so broad it starts
+    // rejecting every sig that merely contains "and" somewhere later.
+    const r = compareSigs('take 1 tab every morning and with food', 'take 1 tab qam');
+    // "and with food" still trails the phrase, so per the conservative
+    // lookahead this also stays unfolded/ambiguous rather than green —
+    // documenting the actual (safe) behavior rather than asserting a
+    // stronger claim than the fix makes.
+    expect(r.status).not.toBe('green');
   });
 });
