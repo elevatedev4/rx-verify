@@ -54,12 +54,14 @@ const ROUTE_MAP: Record<string, string> = {
   os: 'os', // left eye
   ou: 'ou', // both eyes
   // Round 5, fix 4 (additive): common, unambiguous injection/nasal/
-  // inhalation routes. "iv" also happens to be ROMAN_MAP's roman numeral
-  // for 4 (pre-existing, unrelated to this fix) — a bare "iv" token can
-  // therefore resolve as BOTH a dose-count guess and a route here; that
-  // ambiguity predates this change (ROMAN_MAP already had it) and is not
-  // introduced by adding the route entry, which only adds coverage where
-  // today there is none at all.
+  // inhalation routes. "iv" ALSO happens to be ROMAN_MAP's roman numeral
+  // for 4 (pre-existing) — reviewer confirmed this produced a real false
+  // GREEN (extractDoseCount and extractRoute ran as independent scans,
+  // so a bare "iv" was read as BOTH doseCount=4 AND route='iv' at once,
+  // making an IV-route sig with no dose unit compare identically to an
+  // oral "iv tablets" = 4-tablets sig). Fixed at the extractor level —
+  // see extractDoseCount's doc — not by removing this entry; "iv" stays
+  // a fully valid route here.
   im: 'im', // intramuscular
   iv: 'iv', // intravenous
   sc: 'sc', subq: 'sc', subcut: 'sc', subcutaneously: 'sc', // all fold to one canonical
@@ -223,6 +225,31 @@ function extractDoseCount(tokens: string[]): { count: number | null; consumedIdx
       return { count: NUMBER_WORD_MAP[tok] as number, consumedIdx: i };
     }
     if (ROMAN_MAP[tok] !== undefined) {
+      // REVIEWER BLOCKER FIX (round 5, fix 4 hardening): "iv" collides
+      // with ROUTE_MAP's intravenous abbreviation — before this gate,
+      // extractDoseCount and extractRoute ran as two fully independent
+      // scans, so a bare "iv" was read as BOTH doseCount=4 (roman
+      // numeral) AND route='iv' simultaneously, on every sig containing
+      // it. That produced a confirmed false GREEN: 'give iv daily'
+      // (genuinely route=IV, no dose count at all) compared as
+      // structurally identical to 'take iv tablets daily' (genuinely
+      // doseCount=4 "iv tablets", no route) because BOTH sides
+      // coincidentally resolved to the exact same {doseCount:4,
+      // route:'iv'} pair.
+      //
+      // Every OTHER roman numeral (i/ii/iii/v/vi/vii/viii) has no
+      // ROUTE_MAP collision at all and is accepted unconditionally,
+      // unchanged from before. Only for "iv" specifically: it's accepted
+      // as a roman-numeral dose count ONLY when the very next token is a
+      // recognized dose-unit word ("iv tablets", "iv caps") — a roman
+      // numeral with nothing to quantify is far more likely to be the
+      // route. When the adjacency check fails, this candidate is
+      // skipped (not consumed) so extractRoute's own scan below picks it
+      // up as a route instead.
+      if (ROUTE_MAP[tok] !== undefined) {
+        const next = tokens[i + 1];
+        if (!next || !DOSE_UNIT_MAP[next]) continue;
+      }
       return { count: ROMAN_MAP[tok] as number, consumedIdx: i };
     }
   }
@@ -236,8 +263,20 @@ function extractDoseUnit(tokens: string[]): string | null {
   return null;
 }
 
-function extractRoute(tokens: string[]): string | null {
-  for (const tok of tokens) {
+/**
+ * REVIEWER BLOCKER FIX (round 5, fix 4 hardening): `excludeIdx` is the
+ * token index extractDoseCount actually consumed (see its doc) —
+ * skipped here so the SAME token can never be double-read as both a
+ * roman-numeral dose count AND a route (the "iv" collision). Every
+ * other caller of route extraction (there's only ever the one, from
+ * parseSig) always passes doseCount's real consumedIdx, so this is not
+ * an optional safety net — it's load-bearing for every sig, not just
+ * ones containing "iv".
+ */
+function extractRoute(tokens: string[], excludeIdx: number = -1): string | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (i === excludeIdx) continue;
+    const tok = tokens[i] as string;
     if (ROUTE_MAP[tok]) return ROUTE_MAP[tok] as string;
   }
   return null;
@@ -278,9 +317,12 @@ export function parseSig(raw: string): ParsedSig {
     .map((t) => t.replace(/[.]+$/, ''))
     .filter(Boolean);
 
-  const { count: doseCount } = extractDoseCount(tokens);
+  const { count: doseCount, consumedIdx } = extractDoseCount(tokens);
   const doseUnit = extractDoseUnit(tokens);
-  const route = extractRoute(tokens);
+  // REVIEWER BLOCKER FIX (round 5, fix 4 hardening): pass doseCount's
+  // consumed token index so the same token can never double as both a
+  // roman-numeral dose count and a route — see extractRoute's doc.
+  const route = extractRoute(tokens, consumedIdx);
   const timesPerDay = extractFrequency(tokens);
   const prn = extractPrn(tokens);
   const mealRelation = extractMealRelation(tokens);

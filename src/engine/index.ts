@@ -167,6 +167,12 @@ export function verify(
   const refillsResult = compareRefills(source.refills, entered.refills, source.refillsFromTotalFills);
   const dawResult = compareDaw(source.substitutionsNotAllowed, entered.daw);
 
+  // Round 5, fix 3: whether the conditional 'availableDate' verdict row
+  // is rendered — computed once and reused both at construction (below)
+  // and in the completeness assertion (further down), so the two can
+  // never drift apart.
+  const includeAvailableDate = stringifyScalar(source.availableDate) !== null;
+
   const verdicts: FieldVerdict[] = [
     {
       field: 'patientName',
@@ -222,7 +228,7 @@ export function verify(
     // comparison already folds Available-awareness in, above) so the
     // overlay can show which source date the Written verdict was
     // actually checked against.
-    ...(stringifyScalar(source.availableDate) !== null
+    ...(includeAvailableDate
       ? [
           {
             field: 'availableDate' as const,
@@ -283,6 +289,25 @@ export function verify(
     }
     fieldOrderCursor++;
   });
+
+  // NON-BLOCKING HARDENING (reviewer, round 5 fix 3 follow-up): the
+  // subsequence check above only catches a field appearing OUT of
+  // relative order or missing from FIELD_ORDER entirely — it does NOT
+  // catch a mandatory field silently dropped from the verdicts array
+  // (e.g. a future edit that accidentally deletes the 'quantity' entry
+  // above), since a shorter subsequence is still a valid subsequence.
+  // Restores that fail-fast guarantee explicitly: the verdict count must
+  // equal FIELD_ORDER's length, minus exactly the conditional fields
+  // that are legitimately absent (today: just 'availableDate', via the
+  // same includeAvailableDate flag construction used above — never
+  // computed independently, so this can't silently drift out of sync
+  // with which fields are actually conditional).
+  const expectedVerdictCount = FIELD_ORDER.length - (includeAvailableDate ? 0 : 1);
+  if (verdicts.length !== expectedVerdictCount) {
+    throw new Error(
+      `Engine output completeness violation: expected ${expectedVerdictCount} verdicts (FIELD_ORDER has ${FIELD_ORDER.length}, availableDate ${includeAvailableDate ? 'included' : 'excluded'}), got ${verdicts.length}.`
+    );
+  }
 
   const summary = {
     green: verdicts.filter((v) => v.status === 'green').length,

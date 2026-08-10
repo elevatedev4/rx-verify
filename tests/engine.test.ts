@@ -20,6 +20,28 @@ describe('verify engine', () => {
     expect(result.verdicts.map((v) => v.field)).toEqual([...FIELD_ORDER]);
   });
 
+  // NON-BLOCKING HARDENING (reviewer, round 5 fix 3 follow-up): the
+  // order check alone (a monotonic-subsequence walk over FIELD_ORDER) no
+  // longer catches a mandatory field silently DROPPED from the verdicts
+  // array — a shorter subsequence is still a valid subsequence. verify()
+  // now also asserts verdicts.length === FIELD_ORDER.length minus
+  // exactly the conditional fields absent (today: just 'availableDate').
+  // These two pin that exact completeness invariant directly, for both
+  // states of the one existing conditional field — a fail-fast guard
+  // that would throw immediately if a future edit ever dropped e.g.
+  // 'quantity' from the array literal in engine/index.ts.
+  describe('completeness assertion (verdicts.length matches FIELD_ORDER.length minus conditional fields)', () => {
+    it('verdicts.length === FIELD_ORDER.length - 1 when availableDate is absent', () => {
+      const result = verify({}, {}, provider);
+      expect(result.verdicts.length).toBe(FIELD_ORDER.length - 1);
+    });
+
+    it('verdicts.length === FIELD_ORDER.length when availableDate is present', () => {
+      const result = verify({ availableDate: '07/19/2026' }, {}, provider);
+      expect(result.verdicts.length).toBe(FIELD_ORDER.length);
+    });
+  });
+
   it('every field is yellow not_provided when both sides are entirely empty', () => {
     const result = verify({}, {}, provider);
     expect(result.verdicts.every((v) => v.status === 'yellow')).toBe(true);

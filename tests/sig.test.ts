@@ -348,6 +348,49 @@ describe('Round 5, fix 4: additive sig abbreviation coverage', () => {
       expect(r.status).toBe('red');
       expect(r.reasonCode).toBe('sig_mismatch');
     });
+
+    // REVIEWER BLOCKER (round 5, fix 4 hardening): "iv" collides with
+    // ROMAN_MAP's pre-existing roman-numeral-4. Before the fix,
+    // extractDoseCount and extractRoute ran as fully independent scans,
+    // so a bare "iv" was read as BOTH doseCount=4 AND route='iv' at
+    // once — reproduced by the reviewer:
+    //   parseSig('give iv daily') -> {doseCount:4, route:'iv', ...}
+    //   parseSig('take iv tablets daily') -> {doseCount:4, route:'iv', ...}
+    //   compareSigs(...) -> green exact_match  // FALSE GREEN
+    // a genuinely-IV instruction compared GREEN against an oral tablet
+    // sig that used roman "iv" as dose-count-4, because dose-unit
+    // null-vs-tab is a no-penalty one-sided case and both sides
+    // coincidentally parsed the same spurious route+doseCount pair.
+    describe('"iv" / roman-numeral-4 collision (reviewer blocker)', () => {
+      it('FALSE GREEN regression: "give iv daily" (route) vs "take iv tablets daily" (roman-numeral dose count) must NOT be green', () => {
+        const r = compareSigs('give iv daily', 'take iv tablets daily');
+        expect(r.status).not.toBe('green');
+      });
+
+      it('"take iv tablets daily" resolves "iv" as roman-numeral doseCount 4, with NO route (adjacent dose-unit word disambiguates)', () => {
+        const p = parseSig('take iv tablets daily');
+        expect(p.doseCount).toBe(4);
+        expect(p.route).toBeNull();
+      });
+
+      it('"give iv daily" resolves "iv" as the route (intravenous), with NO dose count (nothing adjacent for it to quantify)', () => {
+        const p = parseSig('give iv daily');
+        expect(p.route).toBe('iv');
+        expect(p.doseCount).toBeNull();
+      });
+
+      it('a genuine "administer 1 ml iv daily" still gets route iv (explicit digit dose count leaves "iv" free for route)', () => {
+        const p = parseSig('administer 1 ml iv daily');
+        expect(p.doseCount).toBe(1);
+        expect(p.route).toBe('iv');
+      });
+
+      it('other roman numerals (unaffected by the "iv" gate) still resolve as plain dose counts, no adjacency requirement', () => {
+        const p = parseSig('take ii tabs po tid');
+        expect(p.doseCount).toBe(2);
+        expect(p.route).toBe('po');
+      });
+    });
   });
 
   describe('deliberately NOT added (ambiguous — see ROUTE_MAP/MEAL_RELATION_MAP docs)', () => {
