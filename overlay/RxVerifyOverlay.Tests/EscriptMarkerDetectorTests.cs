@@ -96,11 +96,45 @@ public class EscriptMarkerDetectorTests
     }
 
     [Fact]
-    public void ContainsMarkerFalseForWordOfDifferentLength()
+    public void ContainsMarkerFalseForWordOfDifferentLengthEvenAfterTrim()
     {
-        // Longer merged token (e.g. OCR ran the bracket into the word
-        // with no space) — exact length match is required, see class doc.
+        // "Escripts" has no trailing punctuation/digits to trim at all —
+        // it's just genuinely 8 letters, not 7, so it must stay rejected.
+        var words = new[] { Word("Escripts") };
+
+        Assert.False(EscriptMarkerDetector.ContainsMarker(words));
+    }
+
+    [Fact]
+    public void ContainsMarkerTrueForTrailingPeriodGlue()
+    {
+        // Post-review hardening: a trailing period (end-of-sentence-style
+        // OCR punctuation glued onto the word) must be trimmed before
+        // the length check, not treated as a length/content mismatch.
+        var words = new[] { Word("Escript.") };
+
+        Assert.True(EscriptMarkerDetector.ContainsMarker(words));
+    }
+
+    [Fact]
+    public void ContainsMarkerTrueForGluedBracketTabCountBadge()
+    {
+        // Post-review hardening: OCR sometimes runs the "[3]" tab-count
+        // badge directly into "Escript" with no separating space —
+        // trailing ']', the digit, and '[' must all be stripped before
+        // the length check (see TrimTrailingNonLetters doc).
         var words = new[] { Word("Escript[3]") };
+
+        Assert.True(EscriptMarkerDetector.ContainsMarker(words));
+    }
+
+    [Fact]
+    public void ContainsMarkerFalseForGlueGarbageAroundAGenuinelyWrongWord()
+    {
+        // Trimming the glued "[3]" badge must NOT loosen the fuzzy-match
+        // rule itself: "Excript" (s -> x, not a confusable substitution)
+        // stays rejected even once the trailing bracket noise is gone.
+        var words = new[] { Word("Excript[3]") };
 
         Assert.False(EscriptMarkerDetector.ContainsMarker(words));
     }

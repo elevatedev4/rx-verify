@@ -22,6 +22,19 @@ namespace RxVerifyOverlay.Ocr;
 /// matcher, which would also accept unrelated 1-2-letter-different words
 /// that have nothing to do with OCR noise.
 ///
+/// TRAILING GLUE (post-review hardening): before the length check, each
+/// candidate word has trailing non-letter characters stripped — this is
+/// the same "glued OCR token" class the rest of this codebase has hit
+/// repeatedly (see rx-verify's ocr-parse-escript.test.ts "fill)" /
+/// normalize-address.test.ts "StSte2050" precedents): a missed marker
+/// here blanks REAL verdicts, so it's worth being cheap and robust
+/// rather than requiring a perfectly space-delimited "Escript" token.
+/// Covers a trailing period ("Escript.") as well as a directly-glued
+/// tab-count badge with no separating space ("Escript[3]" — the ']' AND
+/// the digit '3' AND the '[' are all stripped, since none of them are
+/// letters and the marker itself is purely alphabetic). Only the
+/// TRAILING end is trimmed, never the front.
+///
 /// Pure/static, no UIA/WinRT/PHI — directly unit-testable, see
 /// Tests/EscriptMarkerDetectorTests.cs.
 /// </summary>
@@ -55,21 +68,26 @@ public static class EscriptMarkerDetector
 
     /// <summary>
     /// Case-insensitive fuzzy match of a single OCR word against
-    /// "escript". Requires an EXACT length match (7 characters) — OCR
-    /// tokenizes on whitespace, so the real "Escript" label and any
-    /// adjacent "[3]" bracket come through as separate words; requiring
-    /// exact length keeps this from accidentally matching a substring
-    /// inside an unrelated longer word.
+    /// "escript". Trailing non-letter characters are stripped first (see
+    /// class doc's TRAILING GLUE section), then requires an EXACT length
+    /// match (7 characters) against what remains — OCR tokenizes on
+    /// whitespace, so in the normal case the real "Escript" label and
+    /// any adjacent "[3]" bracket already come through as separate
+    /// words; the trim only matters when they're glued with no space.
+    /// Requiring exact length (post-trim) keeps this from accidentally
+    /// matching a substring inside an unrelated longer word.
     /// </summary>
     internal static bool IsMarkerWord(string? text)
     {
         if (string.IsNullOrEmpty(text)) return false;
-        if (text.Length != Marker.Length) return false;
+
+        var trimmed = TrimTrailingNonLetters(text);
+        if (trimmed.Length != Marker.Length) return false;
 
         var substitutions = 0;
         for (var i = 0; i < Marker.Length; i++)
         {
-            var candidateChar = char.ToLowerInvariant(text[i]);
+            var candidateChar = char.ToLowerInvariant(trimmed[i]);
             var markerChar = Marker[i];
             if (candidateChar == markerChar) continue;
 
@@ -80,6 +98,24 @@ public static class EscriptMarkerDetector
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Strips characters from the END of the word for as long as they
+    /// aren't letters — punctuation ("Escript." -> "Escript"), a glued
+    /// bracket badge ("Escript[3]" -> "Escript"), or any mix. Digits are
+    /// stripped too, deliberately: the marker itself is purely
+    /// alphabetic, so any trailing digit run only ever means glued-on
+    /// debris (a tab-count badge), never part of the marker word itself.
+    /// Only trims the trailing end — a leading garbage character would
+    /// mean OCR corrupted the word's actual first letter, which is a
+    /// different failure mode this function doesn't attempt to recover.
+    /// </summary>
+    private static string TrimTrailingNonLetters(string text)
+    {
+        var end = text.Length;
+        while (end > 0 && !char.IsLetter(text[end - 1])) end--;
+        return text[..end];
     }
 
     private static bool AreConfusable(char a, char b)
