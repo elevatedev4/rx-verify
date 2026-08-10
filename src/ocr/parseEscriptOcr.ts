@@ -1491,7 +1491,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // `raw.location` was only ever set at this point when Pass A had
     // already resolved the location's own row INLINE (label + street
     // value on the same physical OCR row). A live capture showed
-    // prescriber.address = "1811 Wakarusa Dr, Ste 102" with NO city/
+    // prescriber.address = "1811 Westbrook Dr, Ste 102" with NO city/
     // state/zip line at all, on a clinic that parses fine (city line
     // included) on other captures — traced to this exact gap: on that
     // capture "Location:" only resolved via PASS B's block-column

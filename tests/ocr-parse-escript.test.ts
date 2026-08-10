@@ -1426,7 +1426,7 @@ describe('parseEscriptOcr', () => {
   });
 
   // Round 5, Fix 2 (live report, W-T-round5): a real capture showed
-  // prescriber.address = "1811 Wakarusa Dr, Ste 102" with NO city/state/
+  // prescriber.address = "1811 Westbrook Dr, Ste 102" with NO city/state/
   // zip line, on a clinic that parses fine (city line included) on other
   // captures of the SAME clinic. Root cause: on this capture "Location:"
   // has no inline value (a label-only row) — the street address only
@@ -1452,7 +1452,7 @@ describe('parseEscriptOcr', () => {
     // pairs to the 'location' label by column.
     const streetValueRow: OcrWord[] = [
       { text: '1811', x: 120, y: 227, w: 32, h: 11 },
-      { text: 'Wakarusa', x: 160, y: 227, w: 68, h: 11 },
+      { text: 'Westbrook', x: 160, y: 227, w: 68, h: 11 },
       { text: 'Dr,', x: 260, y: 227, w: 22, h: 11 },
       { text: 'Ste', x: 290, y: 227, w: 26, h: 11 },
       { text: '102', x: 330, y: 227, w: 26, h: 11 }
@@ -1474,7 +1474,7 @@ describe('parseEscriptOcr', () => {
     const record = parseEscriptOcr(ocr);
 
     expect(record.prescriber?.address).toEqual({
-      street: '1811 Wakarusa Dr, Ste 102',
+      street: '1811 Westbrook Dr, Ste 102',
       city: 'Lawrence',
       state: 'KS',
       zip: '66049'
