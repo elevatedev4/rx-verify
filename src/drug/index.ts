@@ -77,6 +77,16 @@ export interface RxConcept {
  */
 export interface RxNormProvider {
   getConcept(ndcOrName: string): RxConcept | null;
+  /**
+   * OPTIONAL: every distinct normalized dosage form known for a given
+   * ingredient key (RxConcept.ingredient's normalized, semicolon-joined
+   * value — see LocalConcept.ingredient / deriveRxcui). Returns null
+   * when the provider doesn't track this (e.g. FixtureProvider) or the
+   * ingredient is unknown. Purely informational confirmation context —
+   * see compareDrugs' use of it — never a basis for a verdict on its
+   * own.
+   */
+  knownFormsFor?(ingredientKey: string): string[] | null;
 }
 
 /**
@@ -173,13 +183,22 @@ export class FixtureProvider implements RxNormProvider {
   }
 }
 
+interface LoadedDataset {
+  concepts: LocalConcept[];
+  ndcIndex: Map<string, number>;
+  /** Absent (empty Map) on an older bundle built before name lookup existed. */
+  nameIndex: Map<string, number[]>;
+  /** Absent (empty Map) on an older bundle built before this field existed. */
+  formsByIngredient: Map<string, string[]>;
+}
+
 /**
  * Loaded once per process and cached at module scope — the dataset is
  * ~130k concepts / ~250k NDCs, and every LocalNdcProvider instance
  * (e.g. one per test) should share it rather than re-parsing gzipped
  * JSON repeatedly.
  */
-let cachedDataset: { concepts: LocalConcept[]; ndcIndex: Map<string, number> } | null = null;
+let cachedDataset: LoadedDataset | null = null;
 
 function defaultDataPath(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -189,12 +208,180 @@ function defaultDataPath(): string {
   return path.join(here, '..', '..', 'data', 'ndc-data.json.gz');
 }
 
-function loadDataset(dataPath: string): { concepts: LocalConcept[]; ndcIndex: Map<string, number> } {
+function loadDataset(dataPath: string): LoadedDataset {
   const gz = readFileSync(dataPath);
   const json = gunzipSync(gz).toString('utf8');
   const parsed = JSON.parse(json) as LocalDrugData;
   const ndcIndex = new Map<string, number>(Object.entries(parsed.ndcIndex));
-  return { concepts: parsed.concepts, ndcIndex };
+  // nameIndex/formsByIngredient are OPTIONAL on LocalDrugData (a bundle
+  // built before this feature existed won't have them) — default to
+  // empty Maps rather than throwing, so an unrebuilt bundle keeps
+  // working exactly as before (name lookup just always misses, same as
+  // today's shipped behavior).
+  const nameIndex = new Map<string, number[]>(Object.entries(parsed.nameIndex ?? {}));
+  const formsByIngredient = new Map<string, string[]>(Object.entries(parsed.formsByIngredient ?? {}));
+  return { concepts: parsed.concepts, ndcIndex, nameIndex, formsByIngredient };
+}
+
+/**
+ * Max number of leading whitespace-separated tokens tried as a
+ * candidate nameIndex key (see resolveConceptByName below). Real
+ * brand/generic names in the dataset are almost always 1-2 words
+ * ("cariprazine", "Dextroamphetamine Saccharate"); a handful of combo
+ * generic names run longer ("amphetamine aspartate monohydrate..."), so
+ * 4 gives headroom without scanning the whole (possibly long) query
+ * string as false candidate keys.
+ */
+const MAX_NAME_KEY_TOKENS = 4;
+
+/**
+ * Release-RATE qualifier tokens this NAME-resolution safety check
+ * distinguishes: SR/XL/ER/IR/CR/DR. Same abbreviation vocabulary as
+ * RELEASE_ABBREVS/RELEASE_PHRASE_FOLDS further down this file (which
+ * FOLD a spelled-out phrase down to its abbreviation for the
+ * name-identity fast path), plus XL — which this codebase deliberately
+ * does NOT fold to/from ER anywhere (see RELEASE_PHRASE_FOLDS' own doc:
+ * "the codebase does not treat XL/XR as equivalent to ER anywhere
+ * else... this is a NEW equivalence class this branch is not authorized
+ * to introduce"). This set is used to DETECT, never to fold/equate:
+ * openFDA's `dosage_form` field does not distinguish SR from XL (both
+ * normalize to the same "tablet, extended release"-style text), so
+ * ingredient+strength+doseForm equality alone is NOT enough evidence
+ * that two name-resolved concepts are really the same product — see
+ * resolveConceptByName and compareDrugs' qualifierConflict guard below,
+ * both added after a confirmed live false GREEN: "Bupropion SR 300 MG"
+ * vs "Bupropion XL 300 MG" resolved to the same derived concept because
+ * the bare "bupropion" nameIndex key (reached when no "bupropion sr"/
+ * "bupropion xl" key exists) carries no qualifier text at all, and SR
+ * vs XL 300mg tablets share an identical openFDA dosage_form.
+ */
+const RELEASE_QUALIFIER_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl']);
+
+/**
+ * Extract the release-RATE qualifier stated in a free-text drug name —
+ * after the same normalizeDrugNameString folding everything else in
+ * this file uses, so a spelled-out phrase like "extended release"
+ * already reads as the token "er" by the time this runs (see
+ * RELEASE_PHRASE_FOLDS) — or null if none is stated. See
+ * RELEASE_QUALIFIER_TOKENS' doc for why this exists and both call
+ * sites (resolveConceptByName, compareDrugs) for how it's used.
+ */
+function extractReleaseQualifier(rawName: string): string | null {
+  const normalized = normalizeDrugNameString(rawName);
+  for (const tok of normalized.split(' ')) {
+    if (RELEASE_QUALIFIER_TOKENS.has(tok)) return tok;
+  }
+  return null;
+}
+
+/**
+ * Resolve a free-text drug name to AT MOST ONE unambiguous concept, or
+ * null. Conservative-by-design at every stage (a doubtful case returns
+ * null, never a guess):
+ *
+ * 1. FIND CANDIDATES: normalize the full query the same way
+ *    normalizeDrugNameString folds everything else in this engine, then
+ *    try the LEADING 1..MAX_NAME_KEY_TOKENS-word prefix (longest first)
+ *    against nameIndex. Brand/generic/ingredient names in this engine's
+ *    inputs always lead the string (strength/form/route follow) — see
+ *    FixtureProvider's own "leading word" convention above and
+ *    DOSAGE_FORM_WORDS' doc — so this mirrors existing, already-tested
+ *    behavior rather than inventing a new matching philosophy. The
+ *    FIRST (longest) prefix that hits the index wins; no match at any
+ *    length -> null (today's exact behavior, unchanged).
+ * 2. NARROW by a strength STATED in the raw query, when present (same
+ *    functions compareDrugs' own strength cross-check already uses).
+ *    A stated strength that matches none of the candidates -> null
+ *    (never fall back to the unnarrowed set and risk a wrong strength).
+ * 3. NARROW by a release-RATE QUALIFIER stated in the raw query
+ *    (RELEASE_QUALIFIER_TOKENS), when present: keep only candidates
+ *    whose OWN displayName also states that same qualifier. This is
+ *    what closes the Bupropion SR/XL gap above — a candidate reached
+ *    via a qualifier-blind key (like bare "bupropion") never carries
+ *    "sr" or "xl" in its own displayName, so a query that states one
+ *    correctly finds ZERO confirming candidates and misses rather than
+ *    guessing. A query that states NO qualifier is unaffected (this
+ *    step is skipped entirely) — e.g. the Vraylar/cariprazine
+ *    acceptance pair, which never mentions a release rate.
+ * 4. DISAMBIGUATE: collapse whatever candidates survive steps 2-3 to
+ *    their DISTINCT (ingredient, strength, doseForm) triples:
+ *      - exactly one distinct triple -> unambiguous, return it (even if
+ *        several duplicate product records share it — that's expected,
+ *        e.g. many labelers of the same generic).
+ *      - zero or more-than-one distinct triple -> ambiguous or an
+ *        unconfirmed strength/qualifier -> null. Per this feature's
+ *        IRON RULE, a miss/ambiguous hit here must never surface as
+ *        anything but "unresolved" to the caller.
+ */
+function resolveConceptByName(
+  rawName: string,
+  concepts: LocalConcept[],
+  nameIndex: Map<string, number[]>
+): LocalConcept | null {
+  const normalized = normalizeDrugNameString(rawName);
+  if (!normalized) return null;
+  const tokens = normalized.split(' ').filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  let candidateIndices: number[] | undefined;
+  for (let len = Math.min(MAX_NAME_KEY_TOKENS, tokens.length); len >= 1; len--) {
+    const key = tokens.slice(0, len).join(' ');
+    const hit = nameIndex.get(key);
+    if (hit && hit.length > 0) {
+      candidateIndices = hit;
+      break;
+    }
+  }
+  if (!candidateIndices) return null;
+
+  let candidates = candidateIndices.map((i) => concepts[i]).filter((c): c is LocalConcept => c !== undefined);
+  if (candidates.length === 0) return null;
+
+  // Narrow by a strength STATED in the raw query, when present. Reuses
+  // the same strength-normalization the rest of this file already
+  // trusts (extractStatedConcentrationStrength/extractStatedStrength),
+  // so "1.5mg" here means the same thing "1.5mg" means in
+  // LocalConcept.strength (see normalizeStrength in
+  // scripts/build-drug-data.ts — same compact digit+unit shape, no
+  // space).
+  const statedConcentration = extractStatedConcentrationStrength(rawName);
+  const statedSingle = statedConcentration ? null : extractStatedStrength(rawName);
+  const statedStrength = statedConcentration ?? statedSingle;
+  if (statedStrength) {
+    const narrowed = candidates.filter((c) => c.strength === statedStrength);
+    // Only trust the narrowed set when it actually narrowed to
+    // something — if the stated strength matches NONE of the
+    // candidates, that's a genuine signal something's off (wrong drug,
+    // or a strength this dataset doesn't have on record for that name);
+    // falling back to the unnarrowed candidate set here would risk
+    // silently picking a WRONG strength, which is exactly the false
+    // positive this whole feature must never produce. Treat it as a
+    // miss instead.
+    if (narrowed.length === 0) return null;
+    candidates = narrowed;
+  }
+
+  // Narrow by a release-RATE QUALIFIER stated in the raw query, when
+  // present — see RELEASE_QUALIFIER_TOKENS' doc for the live bug this
+  // closes (Bupropion SR vs XL). A candidate only counts as confirming
+  // the query's stated qualifier when the candidate's OWN displayName
+  // states that SAME qualifier; a candidate with no qualifier at all in
+  // its name (e.g. a bare "bupropion" record) never confirms one.
+  const statedQualifier = extractReleaseQualifier(rawName);
+  if (statedQualifier) {
+    const qualifierConfirmed = candidates.filter((c) => extractReleaseQualifier(c.displayName) === statedQualifier);
+    if (qualifierConfirmed.length === 0) return null;
+    candidates = qualifierConfirmed;
+  }
+
+  const distinctKey = (c: LocalConcept): string => `${c.ingredient}|${c.strength}|${c.doseForm}`;
+  const distinct = new Map<string, LocalConcept>();
+  for (const c of candidates) {
+    distinct.set(distinctKey(c), c);
+  }
+  if (distinct.size !== 1) return null; // ambiguous (or, with 0, unreachable) -> miss, never a guess
+
+  return [...distinct.values()][0] as LocalConcept;
 }
 
 /**
@@ -204,19 +391,25 @@ function loadDataset(dataPath: string): { concepts: LocalConcept[]; ndcIndex: Ma
  * scope) — every `getConcept` call afterward is a plain Map lookup.
  * ZERO network calls happen anywhere in this class or its callers.
  *
- * Name-based (non-NDC) lookup is intentionally NOT implemented here: a
- * real e-prescription/PioneerRx comparison almost always carries an
- * NDC, and building free-text matching against ~130k noisy openFDA
- * generic/brand strings risks a wrong match (a false green) if done
- * carelessly. Returning null for a name-only query is the conservative
- * choice — it falls through to the engine's existing `unknown_drug`
- * yellow verdict rather than guessing. Follow-on: a real name-search
- * index (tokenized, ingredient-aware) could remove this gap; flagged,
- * not implemented now.
+ * NAME-BASED lookup (getConcept called with a free-text drug name, not
+ * an NDC): resolves via the openFDA brand_name/generic_name -> concept
+ * index built at build time (nameIndex, see scripts/build-drug-data.ts)
+ * and narrowed at lookup time by resolveConceptByName above. This is
+ * still a HEURISTIC, not real RxNorm-CUI resolution — see this file's
+ * header for the same caveat that already applies to NDC-based
+ * resolution. Its safety rests entirely on resolveConceptByName's
+ * conservative-by-design behavior: any doubt (no hit, multiple distinct
+ * ingredient/strength/form candidates, a stated strength that matches
+ * none of them) resolves to null, exactly the same `unknown_drug`
+ * yellow this engine has always fallen back to for an unresolvable
+ * drug — never a guess, and per compareDrugs' handling of it (see that
+ * function's IRON RULE comment), never independently escalated to red.
  */
 export class LocalNdcProvider implements RxNormProvider {
   private readonly concepts: LocalConcept[];
   private readonly ndcIndex: Map<string, number>;
+  private readonly nameIndex: Map<string, number[]>;
+  private readonly formsByIngredient: Map<string, string[]>;
 
   constructor(dataPath?: string) {
     const isDefaultPath = dataPath === undefined;
@@ -228,14 +421,15 @@ export class LocalNdcProvider implements RxNormProvider {
     if (isDefaultPath) cachedDataset = dataset;
     this.concepts = dataset.concepts;
     this.ndcIndex = dataset.ndcIndex;
+    this.nameIndex = dataset.nameIndex;
+    this.formsByIngredient = dataset.formsByIngredient;
   }
 
   getConcept(ndcOrName: string): RxConcept | null {
     const parsed = parseNdc(ndcOrName);
-    if (!parsed) return null;
-    const index = this.ndcIndex.get(parsed.normalized11);
-    if (index === undefined) return null;
-    const concept = this.concepts[index];
+    const concept = parsed
+      ? this.conceptByNdc(parsed.normalized11)
+      : resolveConceptByName(ndcOrName, this.concepts, this.nameIndex);
     if (!concept) return null;
     return {
       rxcui: deriveRxcui(concept),
@@ -244,6 +438,17 @@ export class LocalNdcProvider implements RxNormProvider {
       strength: concept.strength,
       doseForm: concept.doseForm
     };
+  }
+
+  private conceptByNdc(normalized11: string): LocalConcept | null {
+    const index = this.ndcIndex.get(normalized11);
+    if (index === undefined) return null;
+    return this.concepts[index] ?? null;
+  }
+
+  /** See RxNormProvider.knownFormsFor's doc. */
+  knownFormsFor(ingredientKey: string): string[] | null {
+    return this.formsByIngredient.get(ingredientKey) ?? null;
   }
 }
 
@@ -912,6 +1117,47 @@ export function compareDrugs(
     };
   }
 
+  // Did AT LEAST ONE side's concept come from the NEW, approximate
+  // NAME-based resolution (LocalNdcProvider's openFDA nameIndex — see
+  // resolveConceptByName in this file — or FixtureProvider's pre-existing
+  // name lookup) rather than an NDC? NDC pins an exact product; a name
+  // match is a heuristic. Both the green upgrade below and the red-guard
+  // further down key off this.
+  const srcConceptViaName = srcConceptViaNdc === null && srcConcept !== null;
+  const entConceptViaName = entConceptViaNdc === null && entConcept !== null;
+  const nameResolutionUsed = srcConceptViaName || entConceptViaName;
+
+  // Confirmed live false GREEN, fixed here: openFDA's dosage_form does
+  // NOT distinguish release-RATE variants (SR vs XL both normalize to
+  // the same "tablet, extended release"-style text), so two name-
+  // resolved concepts can share an identical derived
+  // ingredient/strength/doseForm key while being CLINICALLY DIFFERENT,
+  // non-interchangeable products — e.g. "Bupropion Hydrochloride SR
+  // 150 MG" and "Bupropion Hydrochloride XL 150 MG" each resolve
+  // cleanly (resolveConceptByName confirms each against its OWN stated
+  // qualifier) but must never be treated as the same concept. Detect a
+  // GENUINE qualifier contradiction directly from the two RAW query
+  // strings (same extractReleaseQualifier used inside
+  // resolveConceptByName) and use it below to block the concept_match
+  // green even though the derived fields otherwise agree.
+  const srcQualifier = src.name ? extractReleaseQualifier(src.name) : null;
+  const entQualifier = ent.name ? extractReleaseQualifier(ent.name) : null;
+  // A side's release-rate qualifier is UNCONFIRMED when its concept came
+  // from NAME resolution (not NDC — an NDC pins the exact product
+  // regardless of whether a release qualifier is spelled out in text)
+  // AND its raw text states no qualifier at all. Mirrors the existing
+  // strengthUnverified precedent immediately below: asymmetric
+  // confirmation (one side's text states "SR", the other's name-resolved
+  // side says nothing about release rate at all) must not be silently
+  // treated as a match just because the resolved concepts happen to
+  // share a derived key.
+  const srcQualifierUnconfirmed = srcConceptViaName && srcQualifier === null;
+  const entQualifierUnconfirmed = entConceptViaName && entQualifier === null;
+  const qualifierConflict =
+    (srcQualifier !== null && entQualifier !== null && srcQualifier !== entQualifier) ||
+    (srcQualifier !== null && entQualifierUnconfirmed) ||
+    (entQualifier !== null && srcQualifierUnconfirmed);
+
   // A side's strength is VERIFIED if the concept came from an NDC (the
   // NDC pins the exact product) or its raw name states a strength. A
   // name-resolved side with no stated strength gives us no basis to
@@ -934,6 +1180,41 @@ export function compareDrugs(
         status: 'yellow',
         reasonCode: 'strength_unverified',
         explanation: `Both sides resolve to ${srcConcept.ingredient} ${srcConcept.doseForm}, but one side states no strength, so the strengths cannot be confirmed equal; needs human review.`
+      };
+    }
+    // NEW: at least one side reached this IDENTICAL derived concept via
+    // NAME resolution (not NDC), with a strength confirmed on both
+    // sides -- e.g. "Vraylar 1.5 Mg Capsule" / "CARIPRAZINE 1.5 MG ORAL
+    // CAPSULE" resolving to the same underlying openFDA product record.
+    // That's a stronger, more specific claim than the routine
+    // generic_substitution below (which is "same ingredient/strength/
+    // form, different actual product" — e.g. brand pinned by NDC vs a
+    // DIFFERENT manufacturer's generic resolved by name); surface it
+    // distinctly rather than folding it into the same message. A pair
+    // resolved entirely via NDC (nameResolutionUsed false) always falls
+    // through to the unchanged generic_substitution/pack_size behavior
+    // below, exactly as before this feature existed.
+    if (nameResolutionUsed) {
+      if (qualifierConflict) {
+        // openFDA's dosage_form data artifact (see qualifierConflict's
+        // doc above): the derived key matches, but the two RAW query
+        // strings state DIFFERENT release-rate qualifiers (e.g. SR vs
+        // XL) -- these are clinically different, non-interchangeable
+        // products. Never green, and don't even corroborate via
+        // generic_substitution (that message says "routine... dispensed
+        // under a different NDC/brand," which would be actively
+        // misleading here) -- fall to the same conservative
+        // unknown_drug yellow any other unresolved-via-name pair gets.
+        return {
+          status: 'yellow',
+          reasonCode: 'unknown_drug',
+          explanation: `Could not resolve one or both drugs to a known concept; needs human review (stated release-rate qualifier differs: ${srcQualifier ?? 'none stated'} vs ${entQualifier ?? 'none stated'}).`
+        };
+      }
+      return {
+        status: 'green',
+        reasonCode: 'concept_match',
+        explanation: `Both resolve to ${srcConcept.ingredient} ${srcConcept.strength} ${srcConcept.doseForm} ("${srcConcept.name}" / "${entConcept.name}").`
       };
     }
     return {
@@ -959,6 +1240,38 @@ export function compareDrugs(
       status: 'yellow',
       reasonCode: 'generic_substitution',
       explanation: `Same ingredient, strength, and form (${srcConcept.ingredient} ${srcConcept.strength} ${srcConcept.doseForm}), different product record — routine generic substitution.`
+    };
+  }
+
+  // IRON RULE for NAME-based concept resolution: this feature's lookup
+  // is heuristic (a free-text brand/generic match, not an exact NDC), so
+  // it may ONLY ever CONFIRM equivalence (the green branch above) or
+  // corroborate today's existing yellow — it must NEVER be the reason a
+  // pair that used to fall through to `unknown_drug` yellow (because
+  // LocalNdcProvider's old getConcept(name) always returned null, and
+  // still does whenever it can't confidently resolve — see
+  // resolveConceptByName's doc) instead turns red now that a name
+  // successfully resolves to a genuinely different concept. So: when at
+  // least one side's concept came from name resolution and the
+  // ingredient/strength/form genuinely differ, fall back to the EXACT
+  // SAME unknown_drug yellow this pair would have produced before this
+  // feature existed, optionally enriched with a formsByIngredient
+  // confirmation note (never changes status/reasonCode — see
+  // knownFormsFor's doc). A pair resolved entirely via NDC
+  // (nameResolutionUsed false) is unaffected and still reaches the
+  // unchanged drug_mismatch red below, exactly as before.
+  if (nameResolutionUsed) {
+    let note = '';
+    if (srcConcept.ingredient === entConcept.ingredient) {
+      const forms = provider.knownFormsFor?.(srcConcept.ingredient) ?? null;
+      if (forms && forms.length === 1) {
+        note = ` (for reference: ${srcConcept.ingredient} is only known to come as ${forms[0]} in this dataset)`;
+      }
+    }
+    return {
+      status: 'yellow',
+      reasonCode: 'unknown_drug',
+      explanation: `Could not resolve one or both drugs to a known concept; needs human review.${note}`
     };
   }
 

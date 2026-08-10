@@ -26,8 +26,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { parseNdc } from '../src/drug/index.js';
+import { parseNdc, normalizeDrugNameString } from '../src/drug/index.js';
 import type { LocalConcept, LocalDrugData } from '../src/drug/local-data-format.js';
 
 const SOURCE_URL = 'https://download.open.fda.gov/drug/ndc/drug-ndc-0001-of-0001.json.zip';
@@ -35,16 +36,16 @@ const SOURCE_URL = 'https://download.open.fda.gov/drug/ndc/drug-ndc-0001-of-0001
 // LocalNdcProvider in src/drug/index.ts for the runtime read side.
 const OUTPUT_PATH = path.join(import.meta.dirname, '..', 'data', 'ndc-data.json.gz');
 
-interface OpenFdaActiveIngredient {
+export interface OpenFdaActiveIngredient {
   name: string;
   strength: string;
 }
 
-interface OpenFdaPackaging {
+export interface OpenFdaPackaging {
   package_ndc: string;
 }
 
-interface OpenFdaProduct {
+export interface OpenFdaProduct {
   product_ndc?: string;
   generic_name?: string;
   brand_name?: string;
@@ -53,23 +54,23 @@ interface OpenFdaProduct {
   packaging?: OpenFdaPackaging[];
 }
 
-interface OpenFdaFile {
+export interface OpenFdaFile {
   results: OpenFdaProduct[];
 }
 
 /** "50 mg/1" -> "50mg"; "1.25 mg/3mL" -> "1.25mg/3ml"; strips the "/1"
  * unit denominator (implicit "per one unit") to match the compact
  * "10mg" style strengths used elsewhere in this codebase. */
-function normalizeStrength(raw: string): string {
+export function normalizeStrength(raw: string): string {
   const cleaned = raw.replace(/\s+/g, '').toLowerCase();
   return cleaned.replace(/\/1$/, '');
 }
 
-function normalizeIngredientName(raw: string): string {
+export function normalizeIngredientName(raw: string): string {
   return raw.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function buildConcept(product: OpenFdaProduct): LocalConcept | null {
+export function buildConcept(product: OpenFdaProduct): LocalConcept | null {
   const ingredients = product.active_ingredients;
   if (!product.product_ndc || !ingredients || ingredients.length === 0 || !product.dosage_form) {
     return null;
@@ -96,6 +97,132 @@ function buildConcept(product: OpenFdaProduct): LocalConcept | null {
   return { displayName, ingredient: ingredientJoined, strength: strengthJoined, doseForm };
 }
 
+/**
+ * Extract the normalized name(s) a product record should be findable by
+ * in `nameIndex` — its brand_name AND generic_name, when present, each
+ * normalized with the SAME normalizeDrugNameString the runtime
+ * (LocalNdcProvider.getConcept / compareDrugs, src/drug/index.ts) uses
+ * to fold a free-text query name before probing the index. Sharing the
+ * exact normalizer is what keeps build-time keys and runtime queries
+ * comparable — a mismatch here would silently make name lookup miss
+ * everything (safe, per the IRON RULE, but useless).
+ *
+ * Returns a deduplicated list (a product whose brand_name and
+ * generic_name coincidentally normalize to the same string, or that
+ * repeats the same value in both fields, should only be indexed once).
+ */
+export function extractNameKeys(product: OpenFdaProduct): string[] {
+  const raw = [product.brand_name, product.generic_name].filter(
+    (v): v is string => typeof v === 'string' && v.trim().length > 0
+  );
+  const keys = new Set<string>();
+  for (const value of raw) {
+    const normalized = normalizeDrugNameString(value);
+    if (normalized) keys.add(normalized);
+  }
+  return [...keys];
+}
+
+export interface BuildDatasetStats {
+  skippedProducts: number;
+  skippedPackages: number;
+  productCount: number;
+  conceptCount: number;
+  ndcCount: number;
+  nameKeyCount: number;
+  ingredientCount: number;
+}
+
+export interface BuildDatasetResult {
+  data: LocalDrugData;
+  stats: BuildDatasetStats;
+}
+
+/**
+ * Pure in-memory transform: openFDA product records -> the full
+ * LocalDrugData shape (concepts, ndcIndex, nameIndex, formsByIngredient).
+ * No network/filesystem access, so this is what tests call directly
+ * against a small synthetic fixture array — the download/unzip/gzip
+ * machinery in main() below is untestable-by-design (network) and kept
+ * to the thinnest possible wrapper around this function.
+ */
+export function buildDataset(
+  products: OpenFdaProduct[],
+  opts: { generatedAt?: string; source?: string } = {}
+): BuildDatasetResult {
+  const concepts: LocalConcept[] = [];
+  const ndcIndex: Record<string, number> = {};
+  const nameIndex: Record<string, number[]> = {};
+  const formsByIngredient = new Map<string, Set<string>>();
+  let skippedProducts = 0;
+  let skippedPackages = 0;
+
+  for (const product of products) {
+    const concept = buildConcept(product);
+    if (!concept) {
+      skippedProducts++;
+      continue;
+    }
+    const conceptIndex = concepts.length;
+    concepts.push(concept);
+
+    for (const pkg of product.packaging ?? []) {
+      const parsedNdc = parseNdc(pkg.package_ndc);
+      if (!parsedNdc) {
+        skippedPackages++;
+        continue;
+      }
+      // If two products somehow claim the same package NDC, keep the
+      // first (openFDA is expected to be internally consistent here).
+      if (!(parsedNdc.normalized11 in ndcIndex)) {
+        ndcIndex[parsedNdc.normalized11] = conceptIndex;
+      }
+    }
+
+    for (const key of extractNameKeys(product)) {
+      const bucket = nameIndex[key] ?? (nameIndex[key] = []);
+      // A single product can't legitimately appear twice for the same
+      // key (extractNameKeys already dedupes brand==generic), but guard
+      // anyway rather than ever push a duplicate index.
+      if (bucket[bucket.length - 1] !== conceptIndex) bucket.push(conceptIndex);
+    }
+
+    let forms = formsByIngredient.get(concept.ingredient);
+    if (!forms) {
+      forms = new Set<string>();
+      formsByIngredient.set(concept.ingredient, forms);
+    }
+    forms.add(concept.doseForm);
+  }
+
+  const formsByIngredientOut: Record<string, string[]> = {};
+  for (const [ingredient, forms] of formsByIngredient) {
+    formsByIngredientOut[ingredient] = [...forms].sort((a, b) => a.localeCompare(b));
+  }
+
+  const data: LocalDrugData = {
+    generatedAt: opts.generatedAt ?? new Date().toISOString(),
+    source: opts.source ?? SOURCE_URL,
+    concepts,
+    ndcIndex,
+    nameIndex,
+    formsByIngredient: formsByIngredientOut
+  };
+
+  return {
+    data,
+    stats: {
+      skippedProducts,
+      skippedPackages,
+      productCount: products.length,
+      conceptCount: concepts.length,
+      ndcCount: Object.keys(ndcIndex).length,
+      nameKeyCount: Object.keys(nameIndex).length,
+      ingredientCount: formsByIngredient.size
+    }
+  };
+}
+
 function main(): void {
   console.log(`Downloading ${SOURCE_URL} ...`);
   const workDir = mkdtempSync(path.join(tmpdir(), 'rx-verify-ndc-'));
@@ -114,47 +241,15 @@ function main(): void {
     const parsed = JSON.parse(raw) as OpenFdaFile;
     console.log(`${parsed.results.length} product records`);
 
-    const concepts: LocalConcept[] = [];
-    const ndcIndex: Record<string, number> = {};
-    let skippedProducts = 0;
-    let skippedPackages = 0;
+    const { data, stats } = buildDataset(parsed.results);
 
-    for (const product of parsed.results) {
-      const concept = buildConcept(product);
-      if (!concept) {
-        skippedProducts++;
-        continue;
-      }
-      const conceptIndex = concepts.length;
-      concepts.push(concept);
-
-      for (const pkg of product.packaging ?? []) {
-        const parsedNdc = parseNdc(pkg.package_ndc);
-        if (!parsedNdc) {
-          skippedPackages++;
-          continue;
-        }
-        // If two products somehow claim the same package NDC, keep the
-        // first (openFDA is expected to be internally consistent here).
-        if (!(parsedNdc.normalized11 in ndcIndex)) {
-          ndcIndex[parsedNdc.normalized11] = conceptIndex;
-        }
-      }
-    }
-
-    const out: LocalDrugData = {
-      generatedAt: new Date().toISOString(),
-      source: SOURCE_URL,
-      concepts,
-      ndcIndex
-    };
-
-    const compressed = gzipSync(Buffer.from(JSON.stringify(out), 'utf8'), { level: 9 });
+    const compressed = gzipSync(Buffer.from(JSON.stringify(data), 'utf8'), { level: 9 });
     writeFileSync(OUTPUT_PATH, compressed);
     console.log(`Wrote ${OUTPUT_PATH} (${(compressed.length / 1024 / 1024).toFixed(1)} MB gzipped)`);
     console.log(
-      `${concepts.length} concepts, ${Object.keys(ndcIndex).length} NDCs indexed ` +
-        `(skipped ${skippedProducts} products with missing fields, ${skippedPackages} unparseable package NDCs)`
+      `${stats.conceptCount} concepts, ${stats.ndcCount} NDCs indexed, ` +
+        `${stats.nameKeyCount} name keys, ${stats.ingredientCount} ingredient keys ` +
+        `(skipped ${stats.skippedProducts} products with missing fields, ${stats.skippedPackages} unparseable package NDCs)`
     );
   } finally {
     rmSync(workDir, { recursive: true, force: true });
@@ -169,4 +264,11 @@ function execSyncDownload(url: string): Buffer {
   return execFileSync('curl', ['-sL', '--max-time', '120', url], { maxBuffer: 1024 * 1024 * 1024 });
 }
 
-main();
+// Only run when executed directly (`npx tsx scripts/build-drug-data.ts`),
+// never when this module is imported — tests import buildDataset/
+// buildConcept/etc against small synthetic fixtures and must never
+// trigger a real network download as a side effect of that import.
+const isMainModule = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;
+if (isMainModule) {
+  main();
+}
