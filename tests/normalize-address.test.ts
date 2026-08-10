@@ -654,4 +654,131 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('unit_differs');
     });
   });
+
+  describe('Round 6, fix 9: address garbles', () => {
+    describe('9a: glued street-suffix + unit-designator + digits ("StSte2050")', () => {
+      it('is GREEN when the suffix, unit designator, and unit number are all glued with no spaces at all', () => {
+        const r = compareAddresses(
+          { street: '742 N Elm StSte2050', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '742 N Elm St Ste 2050', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('green');
+      });
+
+      it('regression: still flags unit_differs when the glued unit number genuinely differs from the other side\'s', () => {
+        const r = compareAddresses(
+          { street: '742 N Elm StSte2050', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '742 N Elm St Ste 2099', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('yellow');
+        expect(r.reasonCode).toBe('unit_differs');
+      });
+    });
+
+    describe('9b: digit-fraction glued onto a house number ("7291/2")', () => {
+      it('is GREEN: "7291/2 ... St 210" (glued fraction, bare trailing unit number) vs "729 1/2 ... St, Ste 210" (spaced fraction, explicit Ste)', () => {
+        const r = compareAddresses(
+          { street: '7291/2 Ridgemont St 210', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '729 1/2 Ridgemont St, Ste 210', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('green');
+      });
+
+      it('is GREEN with no unit involved at all — just confirming the fraction split alone (no one-sided-suite leniency needed)', () => {
+        const r = compareAddresses(
+          { street: '7291/2 Ridgemont St', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '729 1/2 Ridgemont St', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('green');
+      });
+
+      it('regression: a genuinely different house number is NOT swallowed by the fraction split ("729 1/2" vs "731 1/2")', () => {
+        const r = compareAddresses(
+          { street: '7291/2 Ridgemont St', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '731 1/2 Ridgemont St', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('yellow');
+        expect(r.reasonCode).toBe('address_differs');
+      });
+
+      it('regression: BOTH sides stating a DIFFERENT explicit unit number after the fraction-split house number still flags unit_differs', () => {
+        const r = compareAddresses(
+          { street: '7291/2 Ridgemont St, Ste 210', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '729 1/2 Ridgemont St, Ste 299', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('yellow');
+        expect(r.reasonCode).toBe('unit_differs');
+      });
+    });
+
+    describe('9c: truncated street-suffix word, prefix match', () => {
+      it('is GREEN: "Parkwa" (truncated) matches "Parkway"', () => {
+        const r = compareAddresses(
+          { street: '3310 Kestrel Parkwa', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '3310 Kestrel Parkway', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('green');
+      });
+
+      it('covers each listed suffix word whose 1-letter truncation is still >=5 chars', () => {
+        // "≥5-char prefix" is a hard floor: of the brief's 12-word list,
+        // only the ones that are themselves >=6 letters (parkway, avenue,
+        // boulevard, street, circle, terrace, highway) can ever have a
+        // 1-letter truncation that still clears the threshold. The 5-and-
+        // under words (drive, court, place, road, lane) are covered by
+        // the two regression cases below instead — for THOSE words, no
+        // truncation can ever qualify, by construction of the rule, not
+        // as a gap in this test.
+        const pairs: Array<[string, string]> = [
+          ['100 Birch Avenu', '100 Birch Avenue'],
+          ['100 Birch Boulevar', '100 Birch Boulevard'],
+          ['100 Birch Stree', '100 Birch Street'],
+          ['100 Birch Circl', '100 Birch Circle'],
+          ['100 Birch Terrac', '100 Birch Terrace'],
+          ['100 Birch Highwa', '100 Birch Highway']
+        ];
+        for (const [truncated, full] of pairs) {
+          const r = compareAddresses(
+            { street: truncated, city: 'Lawrence', state: 'KS', zip: '66047' },
+            { street: full, city: 'Lawrence', state: 'KS', zip: '66047' }
+          );
+          expect(r.status, `${truncated} vs ${full}`).toBe('green');
+        }
+      });
+
+      it('regression: a truncation SHORTER than 5 characters is NOT tolerated ("Driv" for "Drive", only 4 chars)', () => {
+        const r = compareAddresses(
+          { street: '100 Main St Driv', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '100 Main St Drive', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('yellow');
+        expect(r.reasonCode).toBe('address_differs');
+      });
+
+      it('regression: "Cour"/"Plac" (4-char truncations of the 5-letter words "Court"/"Place") are likewise NOT tolerated', () => {
+        const rCourt = compareAddresses(
+          { street: '100 Main Cour', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '100 Main Court', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(rCourt.status).toBe('yellow');
+        expect(rCourt.reasonCode).toBe('address_differs');
+
+        const rPlace = compareAddresses(
+          { street: '100 Main Plac', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '100 Main Place', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(rPlace.status).toBe('yellow');
+        expect(rPlace.reasonCode).toBe('address_differs');
+      });
+
+      it('regression: an unrelated street name is not mistaken for a truncated suffix', () => {
+        const r = compareAddresses(
+          { street: '100 Main St', city: 'Lawrence', state: 'KS', zip: '66047' },
+          { street: '200 Oak Ave', city: 'Lawrence', state: 'KS', zip: '66047' }
+        );
+        expect(r.status).toBe('yellow');
+        expect(r.reasonCode).toBe('address_differs');
+      });
+    });
+  });
 });

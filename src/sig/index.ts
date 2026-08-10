@@ -108,7 +108,15 @@ const FREQ_MAP: Record<string, number> = {
   q24h: 1, // once every 24h = once daily
   q48h: 0.5, // once every 48h
   q72h: 1 / 3, // once every 72h
-  qwk: 1 / 7, weekly: 1 / 7
+  qwk: 1 / 7, weekly: 1 / 7,
+  // Round 6, fix 6 (additive): "qday"/"qdaily" is a common informal
+  // once-daily shorthand (not the standard "qd" abbreviation, but seen
+  // verbatim in live e-scripts) — same rate as qd/daily above. "q.day"
+  // included too (trivial punctuation variant); unlike qd/bid/etc, the
+  // internal "." here isn't stripped by preprocess()'s punctuation
+  // cleanup, so it's listed as its own literal key rather than relying
+  // on that pass.
+  qday: 1, qdaily: 1, 'q.day': 1
 };
 
 const PRN_TOKENS = new Set(['prn', 'p.r.n.', 'as needed']);
@@ -186,8 +194,16 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   // timesPerDay unextracted for that continuation form, which correctly
   // falls back to YELLOW sig_ambiguous — the same safe behavior this
   // input had before morning/evening folding was added at all.
-  [/\b(in the morning|each morning|every morning)\b(?!\s+and\b)/g, 'qam'],
-  [/\b(in the evening|each evening|every evening)\b(?!\s+and\b)/g, 'qpm'],
+  // Round 6, fix 7 (additive): tolerate the specific OCR confusable
+  // "moming"/"evenmg" — OCR routinely misreads "rn" as "m" (and, in the
+  // evening case, drops/misreads the trailing "in" as "m"), producing
+  // "moming" for "morning" and "evenmg" for "evening". Scoped to exactly
+  // these two literal misreadings inside this phrase alternation (never a
+  // general fuzzy-match pass elsewhere in the sig) — the negative
+  // lookahead guarding "and evening"/"and morning" continuations still
+  // applies to both the correct and confusable spellings.
+  [/\b(in the (?:morning|moming)|each (?:morning|moming)|every (?:morning|moming))\b(?!\s+and\b)/g, 'qam'],
+  [/\b(in the (?:evening|evenmg)|each (?:evening|evenmg)|every (?:evening|evenmg))\b(?!\s+and\b)/g, 'qpm'],
   // Round 5, fix 4 (additive): substituted directly to the 'nasal' route
   // token (ROUTE_MAP), same pattern as "by mouth" -> 'po' above.
   [/\bin each nostril\b/g, 'nasal']
@@ -377,6 +393,30 @@ export function compareSigs(
       status: 'yellow',
       reasonCode: 'not_provided',
       explanation: 'No sig/directions were entered in PioneerRx to compare against the source.'
+    };
+  }
+
+  // Round 6, fix 1 (highest priority): IDENTICAL-SIG FAST PATH, checked
+  // BEFORE any structured parsing. Two sigs that are the same text after
+  // only trivial normalization (case, whitespace, trailing punctuation)
+  // are definitionally a match — whether or not this engine's structured
+  // parser can extract dose/route/frequency from that text is irrelevant
+  // when both sides state the exact same instructions verbatim. Without
+  // this, a sig neither side's parser can structure (e.g. "Inject 12.5mg
+  // under the skin every week.") fell to yellow sig_ambiguous even when
+  // literally identical on both sides.
+  const trivialNormalize = (s: string) =>
+    s
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ')
+      .replace(/[.,;:!]+$/, '')
+      .trim();
+  if (trivialNormalize(sourceRaw) === trivialNormalize(enteredRaw)) {
+    return {
+      status: 'green',
+      reasonCode: 'verbatim_match',
+      explanation: 'Sig text is identical after case/whitespace/trailing-punctuation normalization — an exact verbatim match, regardless of whether it could be structurally parsed.'
     };
   }
 

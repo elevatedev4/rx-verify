@@ -282,8 +282,29 @@ type SurnameMatchLevel = 'exact' | 'partial' | 'none';
  * hyphenated surname (Garcia-Lopez vs Garcia) = partial — that is NEVER
  * treated as green; it needs human attention. No overlap = none.
  */
+/**
+ * Round 6, fix 8: compound surnames that differ only in SEPARATOR
+ * (space/hyphen/none at all) are the same surname — field report shape
+ * (synthetic surname here — see tests/normalize-name.test.ts): source
+ * surname "smith jones" vs entered "smithjones" (PioneerRx entry glued
+ * the two words with no space at all) was flagged RED surname_mismatch.
+ * Hyphens are already normalized to spaces earlier in parseName, so only
+ * the glued-vs-spaced distinction needs stripping here.
+ */
+function collapseSeparators(s: string): string {
+  return s.replace(/[\s-]/g, '');
+}
+
 function surnameMatchLevel(a: ParsedName, b: ParsedName): SurnameMatchLevel {
   if (a.last && a.last === b.last) return 'exact';
+  // Fallback (round 6, fix 8): same surname with separators stripped —
+  // checked AFTER the exact-string check and BEFORE any partial/none
+  // determination, so a genuinely different surname (e.g. "smith jones"
+  // vs "smyth jones") still falls through to the normal comparison below
+  // unaffected.
+  if (a.last && b.last && collapseSeparators(a.last) === collapseSeparators(b.last)) {
+    return 'exact';
+  }
   if (a.lastParts.length === 0 || b.lastParts.length === 0) return 'none';
   const bSet = new Set(b.lastParts);
   for (const part of a.lastParts) {
