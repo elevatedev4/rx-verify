@@ -17,7 +17,25 @@ import type { LocalConcept, LocalDrugData } from '../src/drug/local-data-format.
  * a future rebuild.
  *
  * All drug names here are invented (zylodrine, bimoxatin, foxamine,
- * zenthorel, yentaprol) — not real substances.
+ * zenthorel, yentaprol, rendafexine) — not real substances.
+ *
+ * Concepts 8-10 (rendafexine) reproduce, deterministically, the
+ * confirmed live false GREEN this fixture was extended to guard against:
+ * "Bupropion SR 300 MG" vs "Bupropion XL 300 MG" resolved to the same
+ * concept in the real bundle because (a) the real openFDA generic name
+ * is "Bupropion HYDROCHLORIDE SR" -- the SALT NAME sits between the
+ * ingredient and the qualifier, so a short "bupropion sr" query never
+ * prefix-matches that key and instead falls through to the bare,
+ * qualifier-blind "bupropion" key (mirrored here as "Rendafex Sulfate
+ * SR"/"...XL", reachable only via the 3-token key, vs the bare
+ * 1-token "rendafex" key with no qualifier at all), and (b) two records
+ * that legitimately DO carry the SR/XL qualifier in their own name can
+ * still share an identical ingredient/strength/doseForm triple (openFDA's
+ * dosage_form text doesn't distinguish release-rate variants). Real
+ * openFDA data doesn't hand back a clean, deterministic case for (b) at
+ * any one strength (see the real-bundle tests in
+ * local-ndc-provider.test.ts for the (a)-shaped repro against real data
+ * instead) — hence synthetic here.
  */
 const CONCEPTS: LocalConcept[] = [
   { displayName: 'Zylo', ingredient: 'zylodrine', strength: '5mg', doseForm: 'tablet' }, // 0
@@ -27,7 +45,10 @@ const CONCEPTS: LocalConcept[] = [
   { displayName: 'Crosstag', ingredient: 'zenthorel', strength: '50mg', doseForm: 'tablet' }, // 4 -- genuinely different drug
   { displayName: 'Yenta', ingredient: 'yentaprol', strength: '5mg', doseForm: 'tablet' }, // 5
   { displayName: 'Yentaprol Generic Co', ingredient: 'yentaprol', strength: '10mg', doseForm: 'tablet' }, // 6
-  { displayName: 'Bimo Labs', ingredient: 'bimoxatin', strength: '25mg', doseForm: 'capsule' } // 7 -- 2nd labeler, same triple as 2
+  { displayName: 'Bimo Labs', ingredient: 'bimoxatin', strength: '25mg', doseForm: 'capsule' }, // 7 -- 2nd labeler, same triple as 2
+  { displayName: 'Rendafex', ingredient: 'rendafexine', strength: '150mg', doseForm: 'tablet, extended release' }, // 8 -- bare, qualifier-blind record (mirrors the real bare "bupropion" key)
+  { displayName: 'Rendafex Sulfate SR', ingredient: 'rendafexine', strength: '150mg', doseForm: 'tablet, extended release' }, // 9 -- genuinely SR, but SAME derived triple as 10
+  { displayName: 'Rendafex Sulfate XL', ingredient: 'rendafexine', strength: '150mg', doseForm: 'tablet, extended release' } // 10 -- genuinely XL, SAME derived triple as 9 (the openFDA data-artifact collision)
 ];
 
 const DATA: LocalDrugData = {
@@ -46,12 +67,17 @@ const DATA: LocalDrugData = {
     foxamine: [3],
     zenthorel: [4],
     yenta: [5],
-    yentaprol: [6]
+    yentaprol: [6],
+    rendafex: [8], // bare key -- only the qualifier-blind record; a short "rendafex sr"/"rendafex xl" query never matches the longer salt-name keys below, exactly like real "bupropion sr" vs "bupropion hydrochloride sr"
+    'rendafex sulfate sr': [9],
+    'rendafexine sulfate sr': [9], // simulates the same product's generic_name also being indexed
+    'rendafex sulfate xl': [10]
   },
   formsByIngredient: {
     zylodrine: ['tablet'],
     bimoxatin: ['capsule'],
-    yentaprol: ['tablet']
+    yentaprol: ['tablet'],
+    rendafexine: ['tablet, extended release']
   }
 };
 
@@ -119,6 +145,27 @@ describe('LocalNdcProvider.getConcept name resolution (synthetic fixture)', () =
     expect(provider.knownFormsFor('zylodrine')).toEqual(['tablet']);
     expect(provider.knownFormsFor('does-not-exist')).toBeNull();
   });
+
+  describe('release-rate qualifier safety (SR/XL/ER/IR/CR/DR) -- regression for a confirmed live false GREEN', () => {
+    it('a stated qualifier (SR) is a MISS against a candidate reached ONLY via a qualifier-blind key -- never silently drops the qualifier', () => {
+      // "Rendafex 150mg Tablet" (no qualifier stated) resolves fine --
+      // the bare key is a legitimate match for an UNqualified query.
+      expect(provider.getConcept('Rendafex 150mg Tablet')?.doseForm).toBe('tablet, extended release');
+      // But "Rendafex SR 150mg Tablet" must NOT silently resolve to that
+      // same qualifier-blind record just because strength narrows to a
+      // single triple -- concept 8's own displayName ("Rendafex") states
+      // no qualifier at all, so it can never CONFIRM "SR".
+      expect(provider.getConcept('Rendafex SR 150mg Tablet')).toBeNull();
+      expect(provider.getConcept('Rendafex XL 150mg Tablet')).toBeNull();
+    });
+
+    it('resolves cleanly when the matched nameIndex key itself carries the stated qualifier', () => {
+      const sr = provider.getConcept('Rendafex Sulfate SR 150mg Tablet');
+      expect(sr?.ingredient).toBe('rendafexine');
+      const xl = provider.getConcept('Rendafex Sulfate XL 150mg Tablet');
+      expect(xl?.ingredient).toBe('rendafexine');
+    });
+  });
 });
 
 describe('compareDrugs concept_match GREEN (synthetic fixture)', () => {
@@ -172,5 +219,66 @@ describe('compareDrugs concept_match GREEN (synthetic fixture)', () => {
     const r = compareDrugs({ ndc: '00000000001' }, { ndc: '00000000001' }, provider);
     expect(r.status).toBe('green');
     expect(r.reasonCode).toBe('exact_match');
+  });
+
+  describe('release-rate qualifier safety -- regression for the confirmed live false GREEN (Bupropion SR vs XL)', () => {
+    it('REGRESSION: two sides that EACH cleanly resolve via name, to the identical derived concept, but state DIFFERENT release-rate qualifiers, must NOT green -- openFDA dosage_form does not distinguish SR from XL', () => {
+      // Both "Rendafex Sulfate SR 150mg Tablet" and "Rendafex Sulfate XL
+      // 150mg Tablet" resolve individually (see the getConcept tests
+      // above) to concepts sharing the EXACT SAME ingredient/strength/
+      // doseForm -- the real-data artifact this fix guards against. Both
+      // state the same "150mg" so the earlier raw-text strength
+      // cross-check doesn't intervene first; this isolates the
+      // qualifierConflict guard.
+      const r = compareDrugs(
+        { name: 'Rendafex Sulfate SR 150mg Tablet' },
+        { name: 'Rendafex Sulfate XL 150mg Tablet' },
+        provider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+      expect(r.explanation).toContain('sr vs xl');
+    });
+
+    it('does NOT over-block: two DIFFERENT strings that both confirm the SAME qualifier still GREEN concept_match', () => {
+      const r = compareDrugs(
+        { name: 'Rendafex Sulfate SR 150mg Tablet' },
+        { name: 'Rendafexine Sulfate SR 150mg Tablet' },
+        provider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('concept_match');
+    });
+
+    it('a query stating NO qualifier at all is completely unaffected by this guard (e.g. the Vraylar/cariprazine acceptance shape has no qualifier)', () => {
+      // "Bimo 25mg Capsule" / "Bimoxatin 25mg Capsule" state no release
+      // qualifier -- qualifierConflict must be false (both null), so the
+      // existing concept_match green from earlier in this file is
+      // unaffected by this fix.
+      const r = compareDrugs({ name: 'Bimo 25mg Capsule' }, { name: 'Bimoxatin 25mg Capsule' }, provider);
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('concept_match');
+    });
+
+    it('one-sided qualifier confirmation (SR stated + confirmed on one side, no qualifier at all stated on the other) falls to yellow, never a guessed green', () => {
+      // "Rendafex Sulfate SR 150mg Tablet" resolves with a CONFIRMED SR
+      // qualifier; "Rendafex 150mg Tablet" (bare, no qualifier stated)
+      // ALSO resolves fine on its own (a legitimately unqualified query)
+      // to a concept with the SAME derived fields -- but we have no
+      // information that the second side is actually SR (it could be
+      // XL, or something else entirely; the bare record doesn't say).
+      // Mirrors the codebase's existing strengthUnverified precedent:
+      // asymmetric confirmation must not be silently treated as a match.
+      const r = compareDrugs(
+        { name: 'Rendafex Sulfate SR 150mg Tablet' },
+        { name: 'Rendafex 150mg Tablet' },
+        provider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+      expect(r.explanation).toContain('sr vs none stated');
+    });
   });
 });

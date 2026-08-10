@@ -235,9 +235,49 @@ function loadDataset(dataPath: string): LoadedDataset {
 const MAX_NAME_KEY_TOKENS = 4;
 
 /**
+ * Release-RATE qualifier tokens this NAME-resolution safety check
+ * distinguishes: SR/XL/ER/IR/CR/DR. Same abbreviation vocabulary as
+ * RELEASE_ABBREVS/RELEASE_PHRASE_FOLDS further down this file (which
+ * FOLD a spelled-out phrase down to its abbreviation for the
+ * name-identity fast path), plus XL — which this codebase deliberately
+ * does NOT fold to/from ER anywhere (see RELEASE_PHRASE_FOLDS' own doc:
+ * "the codebase does not treat XL/XR as equivalent to ER anywhere
+ * else... this is a NEW equivalence class this branch is not authorized
+ * to introduce"). This set is used to DETECT, never to fold/equate:
+ * openFDA's `dosage_form` field does not distinguish SR from XL (both
+ * normalize to the same "tablet, extended release"-style text), so
+ * ingredient+strength+doseForm equality alone is NOT enough evidence
+ * that two name-resolved concepts are really the same product — see
+ * resolveConceptByName and compareDrugs' qualifierConflict guard below,
+ * both added after a confirmed live false GREEN: "Bupropion SR 300 MG"
+ * vs "Bupropion XL 300 MG" resolved to the same derived concept because
+ * the bare "bupropion" nameIndex key (reached when no "bupropion sr"/
+ * "bupropion xl" key exists) carries no qualifier text at all, and SR
+ * vs XL 300mg tablets share an identical openFDA dosage_form.
+ */
+const RELEASE_QUALIFIER_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl']);
+
+/**
+ * Extract the release-RATE qualifier stated in a free-text drug name —
+ * after the same normalizeDrugNameString folding everything else in
+ * this file uses, so a spelled-out phrase like "extended release"
+ * already reads as the token "er" by the time this runs (see
+ * RELEASE_PHRASE_FOLDS) — or null if none is stated. See
+ * RELEASE_QUALIFIER_TOKENS' doc for why this exists and both call
+ * sites (resolveConceptByName, compareDrugs) for how it's used.
+ */
+function extractReleaseQualifier(rawName: string): string | null {
+  const normalized = normalizeDrugNameString(rawName);
+  for (const tok of normalized.split(' ')) {
+    if (RELEASE_QUALIFIER_TOKENS.has(tok)) return tok;
+  }
+  return null;
+}
+
+/**
  * Resolve a free-text drug name to AT MOST ONE unambiguous concept, or
- * null. Two-stage, both stages conservative-by-design (a doubtful case
- * returns null, never a guess):
+ * null. Conservative-by-design at every stage (a doubtful case returns
+ * null, never a guess):
  *
  * 1. FIND CANDIDATES: normalize the full query the same way
  *    normalizeDrugNameString folds everything else in this engine, then
@@ -249,20 +289,29 @@ const MAX_NAME_KEY_TOKENS = 4;
  *    behavior rather than inventing a new matching philosophy. The
  *    FIRST (longest) prefix that hits the index wins; no match at any
  *    length -> null (today's exact behavior, unchanged).
- * 2. DISAMBIGUATE: a name key routinely maps to MANY product records
- *    (every labeler's copy of the same generic; every strength of the
- *    same brand). Narrow using whatever strength is STATED in the raw
- *    query (extractStatedStrength / extractStatedConcentrationStrength
- *    — the same functions compareDrugs' own cross-check already uses)
- *    when one is stated. After narrowing, collapse survivors to their
- *    DISTINCT (ingredient, strength, doseForm) triples:
+ * 2. NARROW by a strength STATED in the raw query, when present (same
+ *    functions compareDrugs' own strength cross-check already uses).
+ *    A stated strength that matches none of the candidates -> null
+ *    (never fall back to the unnarrowed set and risk a wrong strength).
+ * 3. NARROW by a release-RATE QUALIFIER stated in the raw query
+ *    (RELEASE_QUALIFIER_TOKENS), when present: keep only candidates
+ *    whose OWN displayName also states that same qualifier. This is
+ *    what closes the Bupropion SR/XL gap above — a candidate reached
+ *    via a qualifier-blind key (like bare "bupropion") never carries
+ *    "sr" or "xl" in its own displayName, so a query that states one
+ *    correctly finds ZERO confirming candidates and misses rather than
+ *    guessing. A query that states NO qualifier is unaffected (this
+ *    step is skipped entirely) — e.g. the Vraylar/cariprazine
+ *    acceptance pair, which never mentions a release rate.
+ * 4. DISAMBIGUATE: collapse whatever candidates survive steps 2-3 to
+ *    their DISTINCT (ingredient, strength, doseForm) triples:
  *      - exactly one distinct triple -> unambiguous, return it (even if
  *        several duplicate product records share it — that's expected,
  *        e.g. many labelers of the same generic).
  *      - zero or more-than-one distinct triple -> ambiguous or an
- *        unconfirmed strength -> null. Per this feature's IRON RULE, a
- *        miss/ambiguous hit here must never surface as anything but
- *        "unresolved" to the caller.
+ *        unconfirmed strength/qualifier -> null. Per this feature's
+ *        IRON RULE, a miss/ambiguous hit here must never surface as
+ *        anything but "unresolved" to the caller.
  */
 function resolveConceptByName(
   rawName: string,
@@ -310,6 +359,19 @@ function resolveConceptByName(
     // miss instead.
     if (narrowed.length === 0) return null;
     candidates = narrowed;
+  }
+
+  // Narrow by a release-RATE QUALIFIER stated in the raw query, when
+  // present — see RELEASE_QUALIFIER_TOKENS' doc for the live bug this
+  // closes (Bupropion SR vs XL). A candidate only counts as confirming
+  // the query's stated qualifier when the candidate's OWN displayName
+  // states that SAME qualifier; a candidate with no qualifier at all in
+  // its name (e.g. a bare "bupropion" record) never confirms one.
+  const statedQualifier = extractReleaseQualifier(rawName);
+  if (statedQualifier) {
+    const qualifierConfirmed = candidates.filter((c) => extractReleaseQualifier(c.displayName) === statedQualifier);
+    if (qualifierConfirmed.length === 0) return null;
+    candidates = qualifierConfirmed;
   }
 
   const distinctKey = (c: LocalConcept): string => `${c.ingredient}|${c.strength}|${c.doseForm}`;
@@ -1065,6 +1127,37 @@ export function compareDrugs(
   const entConceptViaName = entConceptViaNdc === null && entConcept !== null;
   const nameResolutionUsed = srcConceptViaName || entConceptViaName;
 
+  // Confirmed live false GREEN, fixed here: openFDA's dosage_form does
+  // NOT distinguish release-RATE variants (SR vs XL both normalize to
+  // the same "tablet, extended release"-style text), so two name-
+  // resolved concepts can share an identical derived
+  // ingredient/strength/doseForm key while being CLINICALLY DIFFERENT,
+  // non-interchangeable products — e.g. "Bupropion Hydrochloride SR
+  // 150 MG" and "Bupropion Hydrochloride XL 150 MG" each resolve
+  // cleanly (resolveConceptByName confirms each against its OWN stated
+  // qualifier) but must never be treated as the same concept. Detect a
+  // GENUINE qualifier contradiction directly from the two RAW query
+  // strings (same extractReleaseQualifier used inside
+  // resolveConceptByName) and use it below to block the concept_match
+  // green even though the derived fields otherwise agree.
+  const srcQualifier = src.name ? extractReleaseQualifier(src.name) : null;
+  const entQualifier = ent.name ? extractReleaseQualifier(ent.name) : null;
+  // A side's release-rate qualifier is UNCONFIRMED when its concept came
+  // from NAME resolution (not NDC — an NDC pins the exact product
+  // regardless of whether a release qualifier is spelled out in text)
+  // AND its raw text states no qualifier at all. Mirrors the existing
+  // strengthUnverified precedent immediately below: asymmetric
+  // confirmation (one side's text states "SR", the other's name-resolved
+  // side says nothing about release rate at all) must not be silently
+  // treated as a match just because the resolved concepts happen to
+  // share a derived key.
+  const srcQualifierUnconfirmed = srcConceptViaName && srcQualifier === null;
+  const entQualifierUnconfirmed = entConceptViaName && entQualifier === null;
+  const qualifierConflict =
+    (srcQualifier !== null && entQualifier !== null && srcQualifier !== entQualifier) ||
+    (srcQualifier !== null && entQualifierUnconfirmed) ||
+    (entQualifier !== null && srcQualifierUnconfirmed);
+
   // A side's strength is VERIFIED if the concept came from an NDC (the
   // NDC pins the exact product) or its raw name states a strength. A
   // name-resolved side with no stated strength gives us no basis to
@@ -1102,6 +1195,22 @@ export function compareDrugs(
     // through to the unchanged generic_substitution/pack_size behavior
     // below, exactly as before this feature existed.
     if (nameResolutionUsed) {
+      if (qualifierConflict) {
+        // openFDA's dosage_form data artifact (see qualifierConflict's
+        // doc above): the derived key matches, but the two RAW query
+        // strings state DIFFERENT release-rate qualifiers (e.g. SR vs
+        // XL) -- these are clinically different, non-interchangeable
+        // products. Never green, and don't even corroborate via
+        // generic_substitution (that message says "routine... dispensed
+        // under a different NDC/brand," which would be actively
+        // misleading here) -- fall to the same conservative
+        // unknown_drug yellow any other unresolved-via-name pair gets.
+        return {
+          status: 'yellow',
+          reasonCode: 'unknown_drug',
+          explanation: `Could not resolve one or both drugs to a known concept; needs human review (stated release-rate qualifier differs: ${srcQualifier ?? 'none stated'} vs ${entQualifier ?? 'none stated'}).`
+        };
+      }
       return {
         status: 'green',
         reasonCode: 'concept_match',
