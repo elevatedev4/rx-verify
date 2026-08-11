@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.Drawing;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Controls;
@@ -58,6 +60,27 @@ public sealed class IntegratedOverlayCoordinator
     /// </summary>
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    // ------------------------------------------------------------------
+    // OWNER FEEDBACK (round 2, item 1) — broader "is PioneerRx the
+    // foreground app" detection, independent of PioneerRxWindow.TryAttach's
+    // narrower title-prefix match (Pre-Check/Edit/New Rx specifically).
+    // See TryGetForegroundPioneerRxWindow below.
+    // ------------------------------------------------------------------
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect lpRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 
     // NOT readonly: MainWindow.xaml.cs's OnSaveSettingsClick rebuilds a
     // fresh OverlayViewModel whenever the engine paths change (a new
@@ -222,44 +245,71 @@ public sealed class IntegratedOverlayCoordinator
             return;
         }
 
+        // NARROW attach: a Pre-Check/Edit/New-Rx window specifically —
+        // required for the boxes layer, which needs real field rects to
+        // draw over (see FieldReader.ReadEnteredFieldRects). Unchanged
+        // from before this round.
         using var window = PioneerRxWindow.TryAttach();
-        var isAttached = window is not null;
+        var isRxScreenAttached = window is not null;
 
-        // REVIEW FIX (invisible-app trap): PioneerRx isn't open/attached
-        // at all — both integrated windows are about to hide below,
-        // which would otherwise leave the WHOLE APP invisible with no
-        // affordance to recover (wait for Pioneer, or switch back to
-        // Separate) or quit. Reveal the separate window's own existing
-        // "Waiting for a PioneerRx..." state instead — no new UI needed,
-        // and its own View toggle/close button double as the
-        // recover/quit affordance. See FallbackSeparateWindowRule for the
-        // pure edge-only Show/Hide decision (never fights a pharmacist
-        // who manually re-hides it, never hides a window they opened
-        // themselves via "Open full view").
-        ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: true, isPioneerAttached: isAttached, _fallbackSeparateWindowShown));
+        // BROAD foreground check (round 2, item 1): is PioneerRx the app
+        // the pharmacist is currently looking at, REGARDLESS of which
+        // screen (queue, search, dashboard, or a specific Rx) — see
+        // TryGetForegroundPioneerRxWindow. This is now what gates the
+        // control box AND the "PioneerRx isn't around at all" fallback;
+        // only the boxes layer still requires the narrower
+        // isRxScreenAttached above.
+        var hasForegroundPioneerWindow = TryGetForegroundPioneerRxWindow(out var foregroundHandle, out var foregroundBounds);
 
-        if (!isAttached)
+        // REVIEW FIX (invisible-app trap): PioneerRx isn't the foreground
+        // app AT ALL (closed, minimized, or the pharmacist alt-tabbed to
+        // a different application) — both integrated windows are about
+        // to hide below, which would otherwise leave the WHOLE APP
+        // invisible with no affordance to recover (wait for Pioneer, or
+        // switch back to Separate) or quit. Reveal the separate window's
+        // own existing "Waiting for a PioneerRx..." state instead — no
+        // new UI needed, and its own View toggle/close button double as
+        // the recover/quit affordance. See FallbackSeparateWindowRule for
+        // the pure edge-only Show/Hide decision (never fights a
+        // pharmacist who manually re-hides it, never hides a window they
+        // opened themselves via "Open full view").
+        ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: true, isPioneerAttached: hasForegroundPioneerWindow, _fallbackSeparateWindowShown));
+
+        if (!hasForegroundPioneerWindow)
         {
             HideControlBoxIfShown();
             HideBoxesIfShown();
             return;
         }
 
-        var isForeground = GetForegroundWindow() == window!.NativeWindowHandle;
-        var isMaximized = IsZoomed(window!.NativeWindowHandle);
-        var hasVerifiableContent = !_viewModel.HasNonEscriptMessage && _viewModel.Categories.Any(c => c.HasData);
+        // CONTROL BOX: anchors to the narrow Rx-screen window when one's
+        // open (same window either way, in practice — Pre-Check/Edit/New
+        // Rx are all the same PioneerRx shell window with a different
+        // title), otherwise to whichever window IS currently foreground,
+        // via the raw Win32 rect (no field data needed just to position
+        // a box in its ribbon corner).
+        var controlBoxHandle = isRxScreenAttached ? window!.NativeWindowHandle : foregroundHandle;
+        var controlBoxBounds = isRxScreenAttached ? window!.WindowBounds : foregroundBounds;
+        var isControlBoxMaximized = IsZoomed(controlBoxHandle);
 
-        var showControlBox = IntegratedVisibilityGate.ShouldShowControlBox(isAttached, isForeground);
-        var showBoxes = IntegratedVisibilityGate.ShouldShowBoxes(isAttached, isForeground, isMaximized, hasVerifiableContent);
-
-        if (showControlBox)
+        if (IntegratedVisibilityGate.ShouldShowControlBox(hasForegroundPioneerWindow))
         {
-            UpdateControlBox(window!, isMaximized);
+            UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
         }
         else
         {
             HideControlBoxIfShown();
         }
+
+        // BOXES: unchanged — still requires the NARROW Rx-screen attach,
+        // that specific window being foreground, maximized, and verified
+        // content. A pharmacist parked on PioneerRx's queue/search screen
+        // (isRxScreenAttached false) never draws boxes, since there's no
+        // specific Rx's fields to draw them over.
+        var isRxScreenForeground = isRxScreenAttached && GetForegroundWindow() == window!.NativeWindowHandle;
+        var isRxScreenMaximized = isRxScreenAttached && IsZoomed(window!.NativeWindowHandle);
+        var hasVerifiableContent = isRxScreenAttached && !_viewModel.HasNonEscriptMessage && _viewModel.Categories.Any(c => c.HasData);
+        var showBoxes = IntegratedVisibilityGate.ShouldShowBoxes(isRxScreenAttached, isRxScreenForeground, isRxScreenMaximized, hasVerifiableContent);
 
         if (showBoxes)
         {
@@ -269,6 +319,49 @@ public sealed class IntegratedOverlayCoordinator
         {
             HideBoxesIfShown();
         }
+    }
+
+    /// <summary>
+    /// OWNER FEEDBACK (round 2, item 1): broader "is PioneerRx the app
+    /// the pharmacist is currently looking at" check — unlike
+    /// PioneerRxWindow.TryAttach (which only matches a Pre-Check/Edit/
+    /// New-Rx TITLED window, needed for field-reading), this matches the
+    /// CURRENT FOREGROUND window purely by its owning PROCESS name
+    /// (FieldMap.TargetProcessName — declared but previously unused,
+    /// anticipating exactly this need), regardless of which PioneerRx
+    /// screen it's showing. Returns the foreground window's raw physical
+    /// bounds (plain Win32 GetWindowRect — no UIA needed, since only
+    /// x/y/width/height are wanted here) for positioning the control box
+    /// when there's no Pre-Check/Edit/New-Rx window to anchor to instead.
+    /// Never throws: any failure (process exited between calls, access
+    /// denied, etc.) is treated as "not PioneerRx" — Tick()'s own
+    /// try/catch is a backstop, not the expected path here.
+    /// </summary>
+    private static bool TryGetForegroundPioneerRxWindow(out IntPtr hwnd, out Rectangle bounds)
+    {
+        hwnd = GetForegroundWindow();
+        bounds = Rectangle.Empty;
+
+        if (hwnd == IntPtr.Zero) return false;
+
+        try
+        {
+            GetWindowThreadProcessId(hwnd, out var processId);
+            using var process = Process.GetProcessById((int)processId);
+            if (!string.Equals(process.ProcessName, FieldMap.TargetProcessName, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (!GetWindowRect(hwnd, out var rect)) return false;
+
+        bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+        return true;
     }
 
     /// <summary>Applies a FallbackSeparateWindowRule.Decide() result: updates the flag, then raises at most one of Show/HideSeparateWindowRequested per the decision.</summary>
@@ -295,12 +388,11 @@ public sealed class IntegratedOverlayCoordinator
 
     private IntegratedBoxesWindow EnsureBoxesWindow() => _boxesWindow ??= new IntegratedBoxesWindow();
 
-    private void UpdateControlBox(PioneerRxWindow window, bool isMaximized)
+    private void UpdateControlBox(IntPtr windowHandle, Rectangle bounds, bool isMaximized)
     {
         var box = EnsureControlBox();
-        var scale = DpiScaleFor(window);
+        var scale = DpiScaleFor(windowHandle);
 
-        var bounds = window.WindowBounds;
         var physicalX = bounds.Right - (int)Math.Round(ControlBoxRightInsetDip * scale);
         var physicalY = bounds.Top + (int)Math.Round(ControlBoxTopOffsetDip * scale);
         var physicalWidth = (int)Math.Round(ControlBoxWidthDip * scale);
@@ -337,7 +429,7 @@ public sealed class IntegratedOverlayCoordinator
             _boxesTopmostEstablished = true;
         }
 
-        var scale = DpiScaleFor(window);
+        var scale = DpiScaleFor(window.NativeWindowHandle);
 
         var boxes = _viewModel.Categories
             .SelectMany(c => c.Rows)
@@ -348,9 +440,9 @@ public sealed class IntegratedOverlayCoordinator
         boxesWindow.SetBoxes(boxes, bounds.Location, scale, scale);
     }
 
-    private static double DpiScaleFor(PioneerRxWindow window)
+    private static double DpiScaleFor(IntPtr windowHandle)
     {
-        var dpi = GetDpiForWindow(window.NativeWindowHandle);
+        var dpi = GetDpiForWindow(windowHandle);
         return dpi > 0 ? dpi / 96.0 : 1.0;
     }
 
