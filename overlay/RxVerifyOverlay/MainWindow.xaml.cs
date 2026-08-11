@@ -208,6 +208,15 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             await SafeRefreshAsync();
             SafeTickIntegratedOverlay();
         };
+        // Item 8: the control box's corner X button — routes through THIS
+        // window's own existing Close()/Closed cleanup path (engine/
+        // watcher dispose, _integratedOverlay.Shutdown(),
+        // Application.Current.Shutdown() — see the Closed handler below)
+        // rather than duplicating any of that here. Works the same way
+        // whether MainWindow is currently visible or hidden (Integrated
+        // mode) — Window.Close() doesn't require Show() to have been
+        // called first, and still raises Closed either way.
+        _integratedOverlay.CloseApplicationRequested += (_, _) => Close();
 
         // VerifyOCR capture-region override — see Models/OverlaySettings.cs
         // and MainWindow.xaml's "OCR capture region" section.

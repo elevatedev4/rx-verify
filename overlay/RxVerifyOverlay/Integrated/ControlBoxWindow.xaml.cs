@@ -67,6 +67,9 @@ public sealed partial class ControlBoxWindow : Window
 
     private bool _hotkeyRegistered;
 
+    /// <summary>Held so the Closed handler can explicitly remove the WM_HOTKEY hook (item 8 — "hook removal shouldn't throw on exit"), belt-and-suspenders alongside WPF's own teardown of the HwndSource when the window closes.</summary>
+    private HwndSource? _hwndSource;
+
     // Suppresses the Checked/Unchecked handlers while SetToggleState (or
     // the hotkey handler, for HideOverlayCheckBox specifically) is
     // programmatically syncing these controls to the current state —
@@ -85,6 +88,9 @@ public sealed partial class ControlBoxWindow : Window
     public event EventHandler? OpenSeparateWindowRequested;
     public event EventHandler? RefreshRequested;
 
+    /// <summary>Item 8: the corner X button — MainWindow.xaml.cs handles this by calling its own Close(), routing through its EXISTING Closed cleanup (engine/watcher dispose, IntegratedOverlayCoordinator.Shutdown(), Application.Current.Shutdown()) rather than duplicating any of that here.</summary>
+    public event EventHandler? CloseApplicationRequested;
+
     /// <summary>
     /// Item 2: raised with the NEW hidden state whenever HideOverlayCheckBox
     /// is clicked directly, or the `\` hotkey fires (which flips the
@@ -97,10 +103,29 @@ public sealed partial class ControlBoxWindow : Window
     {
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
-        Closed += (_, _) =>
+        Closed += OnClosed;
+    }
+
+    /// <summary>
+    /// Item 8 ("shutdown runs cleanly ... shouldn't throw on exit"):
+    /// unregisters the global hotkey and removes the WM_HOTKEY hook.
+    /// Wrapped — a P/Invoke or WPF teardown hiccup here must never
+    /// prevent the rest of the app's own shutdown sequence (MainWindow's
+    /// Closed handler, which is what actually calls this indirectly via
+    /// IntegratedOverlayCoordinator.Shutdown() -&gt; _controlBox.Close())
+    /// from completing.
+    /// </summary>
+    private void OnClosed(object? sender, EventArgs e)
+    {
+        try
         {
             if (_hotkeyRegistered) UnregisterHotKey(_hwnd, HideOverlayHotkeyId);
-        };
+            _hwndSource?.RemoveHook(WndProc);
+        }
+        catch
+        {
+            // Best-effort only — see method doc.
+        }
     }
 
     /// <summary>See the WS_EX_NOACTIVATE/WS_EX_TOOLWINDOW field doc above and ShowActivated="False" in the XAML — together these mean Show()/RepositionPhysical never steal focus from PioneerRx. Also registers the item-2 global hotkey and hooks WM_HOTKEY (see those fields' docs).</summary>
@@ -114,7 +139,8 @@ public sealed partial class ControlBoxWindow : Window
         // No status surfaced on failure — see the field doc above: the
         // checkbox is a complete substitute either way.
 
-        HwndSource.FromHwnd(_hwnd)?.AddHook(WndProc);
+        _hwndSource = HwndSource.FromHwnd(_hwnd);
+        _hwndSource?.AddHook(WndProc);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -216,4 +242,7 @@ public sealed partial class ControlBoxWindow : Window
         if (_suppressHideOverlayHandler) return;
         HideOverlayToggleRequested?.Invoke(this, HideOverlayCheckBox.IsChecked == true);
     }
+
+    /// <summary>Item 8: the corner X button — see CloseApplicationRequested's doc.</summary>
+    private void OnCloseClick(object sender, RoutedEventArgs e) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
 }

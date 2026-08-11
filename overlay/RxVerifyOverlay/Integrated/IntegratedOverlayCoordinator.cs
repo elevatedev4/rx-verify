@@ -129,6 +129,9 @@ public sealed class IntegratedOverlayCoordinator
     /// <summary>Item 1: raised when the control box's Refresh button is clicked — MainWindow.xaml.cs handles this identically to its own Refresh button (SafeRefreshAsync + SafeTickIntegratedOverlay).</summary>
     public event EventHandler? RefreshRequested;
 
+    /// <summary>Item 8: raised when the control box's corner X button is clicked — MainWindow.xaml.cs handles this by calling its own Close(), routing through its EXISTING Closed cleanup path rather than this coordinator duplicating any shutdown logic.</summary>
+    public event EventHandler? CloseApplicationRequested;
+
     /// <summary>Raised when the classic separate window (MainWindow) should become visible — either DisplayMode switched to Separate, or the control box's "Open full view" button was clicked (which does NOT change DisplayMode — see SetDisplayMode).</summary>
     public event EventHandler? ShowSeparateWindowRequested;
 
@@ -534,6 +537,7 @@ public sealed class IntegratedOverlayCoordinator
         _controlBox.CopyLogsNoHipaaRequested += (_, button) => CopyLogsNoHipaaRequested?.Invoke(this, button);
         _controlBox.OpenSeparateWindowRequested += (_, _) => ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.RefreshRequested += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
+        _controlBox.CloseApplicationRequested += (_, _) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.HideOverlayToggleRequested += (_, hidden) =>
         {
             // ITEM 2: update the session-only flag and re-evaluate
@@ -636,10 +640,20 @@ public sealed class IntegratedOverlayCoordinator
         _boxesShown = false;
     }
 
-    /// <summary>Called from MainWindow's Closed handler — releases both integrated windows if they were ever created.</summary>
+    /// <summary>
+    /// Called from MainWindow's Closed handler — releases both integrated
+    /// windows if they were ever created. Item 8 ("shutdown runs cleanly
+    /// ... window closes shouldn't throw on exit"): each Close() is
+    /// wrapped independently so a problem closing one window (e.g.
+    /// ControlBoxWindow's own hotkey-unregister cleanup — see its
+    /// OnClosed, which already guards itself, but this is a second layer)
+    /// can never stop the other from closing or block MainWindow's own
+    /// Closed handler (which calls this) from finishing its own shutdown
+    /// sequence, including the final Application.Current.Shutdown().
+    /// </summary>
     public void Shutdown()
     {
-        _boxesWindow?.Close();
-        _controlBox?.Close();
+        try { _boxesWindow?.Close(); } catch { /* best-effort only */ }
+        try { _controlBox?.Close(); } catch { /* best-effort only */ }
     }
 }

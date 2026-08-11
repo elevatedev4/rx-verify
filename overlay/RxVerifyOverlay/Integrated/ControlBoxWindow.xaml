@@ -113,5 +113,33 @@
         <Border x:Name="MaximizeNoteBorder" Background="#CC1E1E1E" CornerRadius="3" Padding="6,3" VerticalAlignment="Top" HorizontalAlignment="Stretch" Visibility="Collapsed">
             <TextBlock Text="Maximize PioneerRx to use integrated view" Foreground="#FFF9A825" FontSize="10" FontWeight="Bold" TextWrapping="Wrap" />
         </Border>
+
+        <!--
+            Item 8: terminates the whole app (Application.Current.Shutdown(),
+            via MainWindow's own existing Close()/Closed cleanup path — see
+            code-behind). Round-1 review flagged this as the missing
+            affordance: without it, integrated mode had no way to quit
+            without first opening the full separate view. Deliberately
+            plain/quiet (no red hover, no border, transparent at rest) —
+            this is a corner escape hatch, not an action button, and must
+            never draw the eye the way Refresh/Copy logs/toggles do.
+        -->
+        <Button x:Name="CloseButton" Content="✕" Click="OnCloseClick"
+                Width="18" Height="18" Padding="0" FontSize="9"
+                HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-6,-6,0"
+                Foreground="#FF888888" Background="Transparent" BorderThickness="0"
+                ToolTip="Close Rx Verify">
+            <Button.Style>
+                <Style TargetType="Button">
+                    <Setter Property="Cursor" Value="Hand" />
+                    <Style.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Foreground" Value="#FFCCCCCC" />
+                            <Setter Property="Background" Value="#FF4A1F1F" />
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </Button.Style>
+        </Button>
     </Grid>
 </Window>
