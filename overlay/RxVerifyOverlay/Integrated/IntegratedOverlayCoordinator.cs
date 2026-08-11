@@ -210,7 +210,13 @@ public sealed class IntegratedOverlayCoordinator
     {
         if (_settings.DisplayMode != DisplayMode.Integrated)
         {
-            HideFallbackSeparateWindowIfShown();
+            // RE-REVIEW FIX (see FallbackSeparateWindowRule's class doc
+            // for the confirmed regression this closes): leaving
+            // Integrated mode must clear the fallback bookkeeping WITHOUT
+            // raising HideSeparateWindowRequested — MainWindow's
+            // visibility for THIS transition is already owned by
+            // SetDisplayMode's own Show/HideSeparateWindowRequested call.
+            ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: false, isPioneerAttached: false, _fallbackSeparateWindowShown));
             HideBoxesIfShown();
             HideControlBoxIfShown();
             return;
@@ -219,23 +225,25 @@ public sealed class IntegratedOverlayCoordinator
         using var window = PioneerRxWindow.TryAttach();
         var isAttached = window is not null;
 
+        // REVIEW FIX (invisible-app trap): PioneerRx isn't open/attached
+        // at all — both integrated windows are about to hide below,
+        // which would otherwise leave the WHOLE APP invisible with no
+        // affordance to recover (wait for Pioneer, or switch back to
+        // Separate) or quit. Reveal the separate window's own existing
+        // "Waiting for a PioneerRx..." state instead — no new UI needed,
+        // and its own View toggle/close button double as the
+        // recover/quit affordance. See FallbackSeparateWindowRule for the
+        // pure edge-only Show/Hide decision (never fights a pharmacist
+        // who manually re-hides it, never hides a window they opened
+        // themselves via "Open full view").
+        ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: true, isPioneerAttached: isAttached, _fallbackSeparateWindowShown));
+
         if (!isAttached)
         {
-            // REVIEW FIX (invisible-app trap): PioneerRx isn't open/
-            // attached at all — both integrated windows are about to
-            // hide below, which would otherwise leave the WHOLE APP
-            // invisible with no affordance to recover (wait for Pioneer,
-            // or switch back to Separate) or quit. Reveal the separate
-            // window's own existing "Waiting for a PioneerRx..." state
-            // instead — no new UI needed, and its own View toggle/close
-            // button double as the recover/quit affordance.
-            ShowFallbackSeparateWindowIfNeeded();
             HideControlBoxIfShown();
             HideBoxesIfShown();
             return;
         }
-
-        HideFallbackSeparateWindowIfShown();
 
         var isForeground = GetForegroundWindow() == window!.NativeWindowHandle;
         var isMaximized = IsZoomed(window!.NativeWindowHandle);
@@ -263,20 +271,12 @@ public sealed class IntegratedOverlayCoordinator
         }
     }
 
-    /// <summary>See _fallbackSeparateWindowShown doc — only raises ShowSeparateWindowRequested on the not-attached EDGE, not every tick.</summary>
-    private void ShowFallbackSeparateWindowIfNeeded()
+    /// <summary>Applies a FallbackSeparateWindowRule.Decide() result: updates the flag, then raises at most one of Show/HideSeparateWindowRequested per the decision.</summary>
+    private void ApplyFallbackDecision(FallbackWindowDecision decision)
     {
-        if (_fallbackSeparateWindowShown) return;
-        _fallbackSeparateWindowShown = true;
-        ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
-    }
-
-    /// <summary>See _fallbackSeparateWindowShown doc — only raises HideSeparateWindowRequested if THIS coordinator was the one that showed it as a fallback (never hides a window the pharmacist opened themselves via "Open full view").</summary>
-    private void HideFallbackSeparateWindowIfShown()
-    {
-        if (!_fallbackSeparateWindowShown) return;
-        _fallbackSeparateWindowShown = false;
-        HideSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+        _fallbackSeparateWindowShown = decision.NewFallbackShown;
+        if (decision.RaiseShow) ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+        if (decision.RaiseHide) HideSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private ControlBoxWindow EnsureControlBox()
