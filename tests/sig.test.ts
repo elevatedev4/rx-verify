@@ -483,3 +483,66 @@ describe('Round 6 fixes', () => {
     });
   });
 });
+
+// Round 7, fix 1: live-test false GREEN — pharmacist-owner report. Source
+// (OCR, glued words): "Take 1 tab by mouth once in amand one at lunch
+// time. for30days"; entered: "TAKE ONE TABLET BY MOUTH EVERY MORNING AND
+// at noon." The engine returned GREEN exact_match. Root cause: neither
+// "lunch" nor "noon" was in any token table, so both were silently
+// dropped before comparison — dose count/route/unit happened to match,
+// and there was nothing left to notice the sigs disagree about WHEN the
+// dose is taken. Owner's ruling: "Lunchtime and noon are not the same
+// thing" — a false GREEN is the worst failure class for this app (it
+// tells the pharmacist not to look).
+describe('Round 7, fix 1: TIME_OF_DAY concept (lunch != noon false-GREEN)', () => {
+  it('reviewer/owner repro: the exact reported pair is NOT green — must be RED (lunch vs noon+morning are different time-of-day sets)', () => {
+    const source = 'Take 1 tab by mouth once in amand one at lunch time. for30days';
+    const entered = 'TAKE ONE TABLET BY MOUTH EVERY MORNING AND at noon.';
+    const r = compareSigs(source, entered);
+    expect(r.status).not.toBe('green');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  it('confirms glued-token handling did not regress: dose count/unit/route still extract correctly from the OCR-glued source text ("amand", "for30days")', () => {
+    const p = parseSig('Take 1 tab by mouth once in amand one at lunch time. for30days');
+    expect(p.doseCount).toBe(1);
+    expect(p.doseUnit).toBe('tab');
+    expect(p.route).toBe('po');
+    expect(p.ambiguous).toBe(false);
+  });
+
+  it('"1 tab po qam and at lunch" vs "1 tab po qam and at noon" is RED (lunch != noon, same root cause without OCR glue)', () => {
+    const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam and at noon');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  it('"take at noon" vs "take at midday" is GREEN — noon and midday ARE the same clock time', () => {
+    const r = compareSigs('take at noon', 'take at midday');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('parses "noon" and "midday" to the same time-of-day id', () => {
+    expect(parseSig('take at noon').timeOfDay).toEqual(['noon']);
+    expect(parseSig('take at midday').timeOfDay).toEqual(['noon']);
+  });
+
+  it('parses "at lunch time" to the "lunch" time-of-day id, distinct from "noon"', () => {
+    expect(parseSig('take 1 tab po at lunch time').timeOfDay).toEqual(['lunch']);
+  });
+
+  it('YELLOW sig_ambiguous for an unparseable/unrecognized time phrase on only one side — never a silent green (residual-token guard)', () => {
+    const r = compareSigs('take 1 tab po bid at teatime', 'take 1 tab po bid');
+    expect(r.status).not.toBe('green');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('sig_ambiguous');
+  });
+
+  it('GREEN still holds for a plain morning-phrasing pair unaffected by the new time-of-day logic', () => {
+    const r = compareSigs('take 1 capsule in the morning', 'TAKE ONE CAPSULE EVERY MORNING.');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+});
