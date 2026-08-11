@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
@@ -32,6 +33,16 @@ public sealed class VerdictRowViewModel
     public string ReasonCode { get; init; } = "";
     public string SourceValue { get; init; } = "";
     public string EnteredValue { get; init; } = "";
+
+    /// <summary>
+    /// INTEGRATED MODE (Integrated/IntegratedOverlayCoordinator.cs): the
+    /// entered field's on-screen physical-pixel bounds, from
+    /// FieldReader.ReadEnteredFieldRects — null (never a zero rect) when
+    /// no rect was captured for this field this refresh (element not
+    /// found, PioneerRx mid-redraw, etc.). The boxes layer only draws a
+    /// verdict outline for a row where this is non-null.
+    /// </summary>
+    public Rectangle? ScreenRect { get; init; }
 
     /// <summary>
     /// Fields whose values are digit sequences where transposed/dropped
@@ -372,6 +383,17 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     private IReadOnlyList<OcrWord> _lastOcrWords = Array.Empty<OcrWord>();
 
     /// <summary>
+    /// INTEGRATED MODE: the most recent ReadEnteredFieldRects() result
+    /// (see FieldReader), captured once per RefreshAsync call right after
+    /// ReadEntered() and consumed by BuildRow to populate each row's
+    /// ScreenRect. Empty (never null) before the first successful read or
+    /// after ClearCategories — see that method's doc for why every
+    /// per-refresh field like this one is reset on every early-return
+    /// branch.
+    /// </summary>
+    private IReadOnlyDictionary<string, Rectangle> _lastEnteredRects = new Dictionary<string, Rectangle>();
+
+    /// <summary>
     /// Latency fix instrumentation (see Diagnostics/RefreshTiming.cs) for
     /// the most recent refresh — null before the first successful
     /// refresh, or after ClearCategories resets it. Read by
@@ -473,6 +495,15 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             entered = reader.ReadEntered();
             timing.UiaFindMs = reader.LastReadFindMs;
             timing.UiaReadMs = reader.LastReadValueMs;
+
+            // INTEGRATED MODE: capture each entered field's on-screen
+            // rect right alongside its value, while the elements ReadEntered()
+            // just resolved are still cached (see FieldReader.ElementCache) —
+            // effectively free here, vs. a fresh find-by-AutomationId walk
+            // later. Populated regardless of Method (Ocr/Uia only affects
+            // the SOURCE side below) since entered-field rects never
+            // depend on which source-reading path is active.
+            _lastEnteredRects = reader.ReadEnteredFieldRects();
         }
         catch (Exception ex)
         {
@@ -788,7 +819,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         category.Status = CategoryRollup.RollUp(rollupStatuses);
     }
 
-    private static VerdictRowViewModel BuildRow(string field, FieldVerdict verdict) => new()
+    private VerdictRowViewModel BuildRow(string field, FieldVerdict verdict) => new()
     {
         FieldKey = field,
         DisplayName = FieldOrder.DisplayNames[field],
@@ -796,7 +827,11 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         Explanation = verdict.Explanation,
         ReasonCode = verdict.ReasonCode,
         SourceValue = verdict.SourceValue ?? "(not provided)",
-        EnteredValue = verdict.EnteredValue ?? "(not provided)"
+        EnteredValue = verdict.EnteredValue ?? "(not provided)",
+        // INTEGRATED MODE — see _lastEnteredRects doc. Not present
+        // (rather than default) when this field's rect wasn't captured
+        // this refresh.
+        ScreenRect = _lastEnteredRects.TryGetValue(field, out var rect) ? rect : null
     };
 
     /// <summary>
@@ -928,6 +963,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
         UpdateNotes(Array.Empty<string>());
         _lastOcrWords = Array.Empty<OcrWord>();
+        _lastEnteredRects = new Dictionary<string, Rectangle>();
         OcrStatusText = "OCR: not read yet.";
         LastOcrRawText = "";
         _lastTiming = null;

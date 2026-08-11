@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace RxVerifyOverlay.Uia;
 
 /// <summary>
@@ -230,4 +232,33 @@ public static class FieldMap
     /// EscriptTreeParser.ParseRefills / SplitKeyValue.
     /// </summary>
     public const string RefillsKeyPrefix = "Refills (";
+
+    // ------------------------------------------------------------------
+    // INTEGRATED MODE (Integrated/IntegratedOverlayCoordinator.cs) — maps
+    // every Models.FieldOrder.Fields key to the SAME entered-side
+    // AutomationId FieldReader.ReadEntered() already reads that field's
+    // VALUE from, so FieldReader.ReadEnteredFieldRects() can capture each
+    // field's on-screen BoundingRectangle (for drawing a verdict box over
+    // it) using the exact same element lookup/cache as the value read —
+    // never a second, independently-drifting mapping. Every FieldOrder
+    // field has a 1:1 entered-side control, so this dictionary is
+    // complete (see RxVerifyOverlay.Tests/FieldMapEnteredRectMappingTests.cs,
+    // which asserts that against FieldOrder.Fields directly).
+    // ------------------------------------------------------------------
+    public static readonly IReadOnlyDictionary<string, string> EnteredAutomationIdByField = new Dictionary<string, string>
+    {
+        ["patientName"] = EnteredPatientQuickSearchId,
+        ["patientDOB"] = EnteredPatientDobId,
+        ["patientAddress"] = EnteredPatientAddressId,
+        ["prescriberName"] = EnteredPrescriberQuickSearchId,
+        ["prescriberNpi"] = EnteredPrescriberNpiId,
+        ["prescriberPhone"] = EnteredPrescriberPhoneId,
+        ["prescriberAddress"] = EnteredPrescriberAddressId,
+        ["dateWritten"] = EnteredWrittenDateId,
+        ["quantity"] = EnteredQuantityId,
+        ["refills"] = EnteredRefillsId,
+        ["daw"] = EnteredDawId,
+        ["drug"] = EnteredItemQuickSearchId,
+        ["sig"] = EnteredDirectionsId
+    };
 }
