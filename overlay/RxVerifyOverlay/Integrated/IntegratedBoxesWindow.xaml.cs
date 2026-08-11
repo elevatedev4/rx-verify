@@ -122,6 +122,22 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// order, AFTER DPI conversion so their thresholds are in DIPs
     /// regardless of monitor scaling — see BoxLayoutAdjuster's own tests
     /// for the geometry itself.
+    ///
+    /// ROUND 6 (owner: "make the green boxes just be a thicker left side
+    /// only bar ... too distracting to have everything encircled. Leave
+    /// red boxes the way they are"): the SAME adjusted geometry above is
+    /// computed for every field regardless of color — this round only
+    /// changes the RENDER branch. Green fields' adjusted rects are
+    /// collected and handed to GreenBarGeometry.DeriveMergedBarRects
+    /// (left-edge bar per rect, merging any that are already flush-
+    /// stacked into one continuous bar — see that class's doc for why
+    /// merging, not just deriving, is what actually guarantees no seam);
+    /// red fields render EXACTLY as round 5 shipped, unchanged. Every
+    /// upstream gate (DAW box rule, the hide-overlay toggle, click-
+    /// through, the tab/Rx-identity staleness gates) already ran before
+    /// this method was ever called — see IntegratedOverlayCoordinator.
+    /// UpdateBoxes — so they apply to bars exactly as they did to boxes
+    /// without this file needing to know anything about them.
     /// </summary>
     public void SetBoxes(IReadOnlyList<(System.Drawing.Rectangle PhysicalRect, bool IsGreen)> boxes, System.Drawing.Point windowOriginPhysical, double dpiScaleX, double dpiScaleY)
     {
@@ -134,33 +150,64 @@ public sealed partial class IntegratedBoxesWindow : Window
         var flush = BoxLayoutAdjuster.SnapFlushAdjacentEdges(padded);
         var adjusted = BoxLayoutAdjuster.AlignColumnLeftEdges(flush);
 
+        var greenRects = new List<DipRect>();
         for (var i = 0; i < boxes.Count; i++)
         {
-            var dip = adjusted[i];
-            var isGreen = boxes[i].IsGreen;
-
-            var border = new Border
+            if (boxes[i].IsGreen)
             {
-                BorderBrush = isGreen ? GreenBrush : RedBrush,
-                BorderThickness = new Thickness(BoxStrokeThickness),
-                // ROUND 5: no CornerRadius set at all — square corners,
-                // WPF's own default. See BoxStrokeThickness's doc above.
-                // Round 4 item 4: fully transparent middle, no fill at
-                // all — explicit Brushes.Transparent (not left null) so
-                // it's unambiguous this is intentional, not an oversight.
-                // Doesn't affect click-through: IsHitTestVisible=false
-                // below is what actually matters at the WPF level, and
-                // the window itself is WS_EX_TRANSPARENT regardless (see
-                // OnSourceInitialized) — neither depends on Background.
-                Background = Brushes.Transparent,
-                Width = Math.Max(0, dip.Width),
-                Height = Math.Max(0, dip.Height),
-                IsHitTestVisible = false
-            };
-
-            Canvas.SetLeft(border, dip.X);
-            Canvas.SetTop(border, dip.Y);
-            BoxCanvas.Children.Add(border);
+                greenRects.Add(adjusted[i]);
+            }
+            else
+            {
+                AddRedBorder(adjusted[i]);
+            }
         }
+
+        foreach (var bar in GreenBarGeometry.DeriveMergedBarRects(greenRects))
+        {
+            AddGreenBar(bar);
+        }
+    }
+
+    /// <summary>RED fields: unchanged from round 5 — full encircling square border, no fill.</summary>
+    private void AddRedBorder(DipRect dip)
+    {
+        var border = new Border
+        {
+            BorderBrush = RedBrush,
+            BorderThickness = new Thickness(BoxStrokeThickness),
+            // No CornerRadius set at all — square corners, WPF's own
+            // default (round 5). Fully transparent middle, no fill at
+            // all — explicit Brushes.Transparent (not left null) so it's
+            // unambiguous this is intentional (round 4 item 4). Doesn't
+            // affect click-through: IsHitTestVisible=false below is what
+            // actually matters at the WPF level, and the window itself is
+            // WS_EX_TRANSPARENT regardless (see OnSourceInitialized) —
+            // neither depends on Background.
+            Background = Brushes.Transparent,
+            Width = Math.Max(0, dip.Width),
+            Height = Math.Max(0, dip.Height),
+            IsHitTestVisible = false
+        };
+
+        Canvas.SetLeft(border, dip.X);
+        Canvas.SetTop(border, dip.Y);
+        BoxCanvas.Children.Add(border);
+    }
+
+    /// <summary>GREEN fields (round 6): a solid left-edge bar, not an outline — this element IS the colored bar itself, so it's a solid Background fill (no BorderBrush/Thickness at all), sized/positioned exactly to <paramref name="dip"/> (already the merged bar geometry from GreenBarGeometry).</summary>
+    private void AddGreenBar(DipRect dip)
+    {
+        var bar = new Border
+        {
+            Background = GreenBrush,
+            Width = Math.Max(0, dip.Width),
+            Height = Math.Max(0, dip.Height),
+            IsHitTestVisible = false
+        };
+
+        Canvas.SetLeft(bar, dip.X);
+        Canvas.SetTop(bar, dip.Y);
+        BoxCanvas.Children.Add(bar);
     }
 }
