@@ -180,20 +180,83 @@ const TIME_OF_DAY_MAP: Record<string, { id: string; category: 'clock' | 'meal' }
 };
 
 /**
- * Round 7, fix 1: connector/instructional words that carry no dose/route/
- * frequency/time-of-day meaning on their own, so their presence on only
- * ONE side of a comparison must not, by itself, block a green verdict
- * (see the residual-guard in compareSigs). Deliberately a SHORT list —
- * every entry here was required to keep an existing, already-verified-
- * correct GREEN test passing (e.g. "2 tab po bid" vs "Take two tablets
- * by mouth twice daily." — "take" appears only on the worded side). The
- * bar for adding a new entry is the same: it must be a word that adds no
- * clinical information, never a word that merely happens to be common.
- * When in doubt, leave it OUT — an unnecessary residual token only ever
- * costs an extra YELLOW (safe); a wrongly-filtered one could hide a real
- * difference (the exact failure class this branch fixes).
+ * Round 7, fix 2 (reviewer-required — uses the `category` field rather
+ * than leaving it dead documentation): reverse id -> category lookup,
+ * used by compareSigs to explain a time-of-day mismatch in terms of the
+ * actual reason two ids can never be equal — one is meal-anchored, the
+ * other clock-anchored (or both clock-anchored but genuinely different
+ * clock times) — instead of just naming the ids and leaving the reader
+ * to infer why "lunch" and "noon" don't match.
  */
-const FILLER_WORDS = new Set(['take', 'by']);
+const TIME_OF_DAY_ID_CATEGORY: Record<string, 'clock' | 'meal'> = {};
+for (const entry of Object.values(TIME_OF_DAY_MAP)) {
+  TIME_OF_DAY_ID_CATEGORY[entry.id] = entry.category;
+}
+
+/** Round 7, fix 2 (additive) — see TIME_OF_DAY_ID_CATEGORY's doc. */
+function describeTimeOfDayIds(ids: string[]): string {
+  return ids.map((id) => `${id} (${TIME_OF_DAY_ID_CATEGORY[id] ?? 'unknown'})`).join(', ');
+}
+
+/**
+ * Round 7, fix 2 (reviewer-required widening — ed026b8 review): connector/
+ * instructional/boilerplate words that carry no dose/route/frequency/
+ * time-of-day/administration-manner meaning on their own, so their
+ * presence on only ONE side of a comparison must not, by itself, block a
+ * green verdict (see the residual-guard in compareSigs).
+ *
+ * The governing PRINCIPLE (not just "words seen in tests"): green
+ * requires CLINICAL equivalence. A word belongs here only if swapping it
+ * for nothing, or for any other word in this same set, changes NOTHING a
+ * pharmacist would act on — pure grammar/politeness/boilerplate, or an
+ * administration VERB that's fully redundant with the ROUTE field
+ * (ROUTE_MAP) once that field is compared separately. It must NEVER go
+ * here merely for being common in sig text.
+ *
+ *  - Grammar/connectors/boilerplate: "and" (also covers the comma-vs-
+ *    "and" list-separator case, since a comma already splits tokens the
+ *    same way whitespace does), "an" (frequent OCR misread of "and"),
+ *    "as/directed/please" (so "...bid as directed" vs "...bid" stays
+ *    GREEN — "as directed" restates deference to the sig, it doesn't add
+ *    a differing instruction), "of/the/a/per".
+ *  - Administration verbs: take/give/use/apply/administer/instill/
+ *    insert/inject. These describe HOW the dose physically gets to the
+ *    patient in words, but the actual route (oral/topical/IM/IV/optic/
+ *    otic/nasal/etc) is what this engine already compares via the
+ *    dedicated `route` field — if "apply" (topical) vs "inject" (IM/IV)
+ *    genuinely implies different routes, THAT mismatch is still caught
+ *    by the route component check; the verb itself is redundant with it,
+ *    not a second source of truth. (Empirically confirmed regression:
+ *    "Apply 1 patch..." vs "Use 1 patch..." with the same route/dose/
+ *    freq must be GREEN, not YELLOW.)
+ *
+ * Deliberately NOT here — these are MEANING-BEARING and must keep
+ * blocking a one-sided green:
+ *  - Administration MANNER: chew/crush/dissolve/sprinkle. Unlike the
+ *    verbs above, these are not redundant with any other field — "chew"
+ *    vs plain "take" is a genuinely different instruction (whole-tablet
+ *    swallowing vs chewing) with no dedicated structured field to catch
+ *    the difference elsewhere, so it must surface as residual.
+ *  - Food-timing phrases ("with food", "on an empty stomach"): these are
+ *    NOT folded into the existing ac/pc MEAL_RELATION_MAP concept here —
+ *    "with food" (concurrent) and "pc" (after meals) are close but not
+ *    proven identical, and this is a patient-safety comparison where an
+ *    unproven equivalence is worse than an extra review. Left unmapped,
+ *    they fall out exactly as the reviewer specified: appearing on only
+ *    one side surfaces as an asymmetric residual token -> YELLOW, never
+ *    a silent GREEN.
+ *  - PRN qualifiers (PRN_TOKENS) and all TIME_OF_DAY_MAP words: already
+ *    excluded from this list; both are load-bearing concepts elsewhere
+ *    in this file, not filler.
+ *
+ * When in doubt, leave a word OUT — an unnecessary residual token only
+ * ever costs an extra YELLOW (safe); a wrongly-filtered one could hide a
+ * real difference (the exact failure class this branch fixes).
+ */
+const FILLER_WORDS = new Set([
+  'and', 'an', 'as', 'directed', 'please', 'of', 'the', 'a', 'per',
+  'take', 'give', 'use', 'apply', 'administer', 'instill', 'insert', 'inject', 'by'
+]);
 
 /** Frequency abbreviations -> times per day. */
 const FREQ_MAP: Record<string, number> = {
@@ -459,26 +522,45 @@ function extractTimeOfDay(tokens: string[]): string[] | null {
 }
 
 /**
- * Round 7, fix 1 (additive): is this token accounted for by SOME known
- * vocabulary (dose count/unit, route, frequency, prn, meal relation,
- * time-of-day) or the FILLER_WORDS stoplist? Deliberately checks
- * vocabulary MEMBERSHIP, not which specific extractor actually consumed
- * this exact token instance — a sig that repeats a word already used
- * elsewhere (e.g. "daily" appearing after an earlier "qam" already set
- * the frequency) is redundant, not unrecognized, and must not be flagged
- * as residual. See extractResidualTokens' doc for how this is used.
+ * Round 7, fix 1 (additive), NARROWED in fix 2 (reviewer blocker — ed026b8
+ * review): is this token accounted for by SOME known vocabulary (dose
+ * unit, route, frequency, prn, meal relation, time-of-day), the
+ * FILLER_WORDS stoplist, or — for a NUMBER-shaped token specifically —
+ * is it the exact token index extractDoseCount actually consumed?
+ *
+ * Every non-numeric category is still checked by plain vocabulary
+ * MEMBERSHIP, not which specific extractor instance consumed it — a sig
+ * that repeats a word already used elsewhere (e.g. "daily" appearing
+ * after an earlier "qam" already set the frequency) is redundant, not
+ * unrecognized, and must not be flagged as residual.
+ *
+ * A number-shaped token (bare digit, spelled-out number word, or roman
+ * numeral) is different and needs the INDEX check: extractDoseCount only
+ * ever consumes the FIRST number-shaped token it finds (see its doc) and
+ * silently ignores any other — so a second one is a real, distinct piece
+ * of content (a second dose count, "...bid 2", "...daily two", "take ii
+ * tabs ... iii tabs") that membership-only checking would wave through
+ * as "just more digit-shaped vocabulary" instead of catching. Confirmed
+ * false GREEN (reviewer): compareSigs('take 1 tab po bid', 'take 1 tab
+ * po bid 2') — and the same with 'two' and 'ii'. The other vocabulary
+ * checks run FIRST and can still independently mark a number-shaped
+ * token known (e.g. "iv" is simultaneously ROMAN_MAP's 4 and ROUTE_MAP's
+ * intravenous — see extractRoute's doc for that collision) — the index
+ * restriction only applies once nothing else claims the token.
+ *
+ * See extractResidualTokens' doc for how this is used.
  */
-function isKnownSigToken(tok: string): boolean {
+function isKnownSigToken(tok: string, idx: number, doseCountConsumedIdx: number): boolean {
   if (FILLER_WORDS.has(tok)) return true;
-  if (/^\d+(\.\d+)?$/.test(tok)) return true;
-  if (NUMBER_WORD_MAP[tok] !== undefined) return true;
-  if (ROMAN_MAP[tok] !== undefined) return true;
   if (DOSE_UNIT_MAP[tok]) return true;
   if (ROUTE_MAP[tok]) return true;
   if (FREQ_MAP[tok] !== undefined) return true;
   if (PRN_TOKENS.has(tok)) return true;
   if (MEAL_RELATION_MAP[tok]) return true;
   if (TIME_OF_DAY_MAP[tok]) return true;
+  const isNumberShaped =
+    /^\d+(\.\d+)?$/.test(tok) || NUMBER_WORD_MAP[tok] !== undefined || ROMAN_MAP[tok] !== undefined;
+  if (isNumberShaped) return idx === doseCountConsumedIdx;
   return false;
 }
 
@@ -492,9 +574,14 @@ function isKnownSigToken(tok: string): boolean {
  * content on only one side (a second dose count, unrecognized OCR glue,
  * an unparseable time phrase) can never be silently dropped on the way
  * to a false GREEN — see compareSigs' residual-guard comment.
+ *
+ * `doseCountConsumedIdx` is extractDoseCount's own consumedIdx (-1 when
+ * no dose count was found at all) — threaded through so a second,
+ * uncounted number-shaped token is never silently waved through; see
+ * isKnownSigToken's doc.
  */
-function extractResidualTokens(tokens: string[]): string[] {
-  return tokens.filter((t) => !isKnownSigToken(t));
+function extractResidualTokens(tokens: string[], doseCountConsumedIdx: number): string[] {
+  return tokens.filter((t, idx) => !isKnownSigToken(t, idx, doseCountConsumedIdx));
 }
 
 /**
@@ -524,7 +611,7 @@ export function parseSig(raw: string): ParsedSig {
   const mealRelation = extractMealRelation(tokens);
   // Round 7, fix 1 (additive) — see TIME_OF_DAY_MAP's doc.
   const timeOfDay = extractTimeOfDay(tokens);
-  const residualTokens = extractResidualTokens(tokens);
+  const residualTokens = extractResidualTokens(tokens, consumedIdx);
 
   // Detect frequency-LOOKING tokens we don't recognize (e.g. "q5h",
   // a misspelled "qhd"). These make the frequency indeterminate.
@@ -674,12 +761,25 @@ export function compareSigs(
   // distinct strings — same graded treatment as every other structural
   // mismatch here (both present and different = contradiction/RED; one
   // side has it and the other doesn't = indeterminate/YELLOW).
+  //
+  // SET, not MULTISET, deliberately: extractTimeOfDay already de-dupes
+  // (it builds a Set before sorting to an array), so "take at noon and
+  // at noon" and "take at noon" produce the identical id list ['noon'].
+  // A multiset (counting repeats) would treat a redundant restatement of
+  // the SAME time-of-day as if it meant something — it doesn't; unlike
+  // FREQUENCY, where saying a rate twice could plausibly conflict (and
+  // extractFrequency's own first-match behavior, plus the residual guard
+  // above, already cover that case), repeating "noon" twice in one sig
+  // is not a second administration, just emphasis or OCR duplication.
+  // Set equality is the correct semantics for "which distinct times of
+  // day does this sig name", which is the only question compareSigs
+  // needs answered here.
   const aTod = a.timeOfDay ?? [];
   const bTod = b.timeOfDay ?? [];
   if (aTod.length > 0 && bTod.length > 0) {
     const sameSet = aTod.length === bTod.length && aTod.every((id, i) => id === bTod[i]);
     if (!sameSet) {
-      mismatches.push(`time of day [${aTod.join(', ')}] vs [${bTod.join(', ')}]`);
+      mismatches.push(`time of day [${describeTimeOfDayIds(aTod)}] vs [${describeTimeOfDayIds(bTod)}]`);
     }
   } else if (aTod.length > 0 || bTod.length > 0) {
     indeterminate.push('time of day');

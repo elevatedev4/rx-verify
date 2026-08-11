@@ -504,16 +504,24 @@ describe('Round 7, fix 1: TIME_OF_DAY concept (lunch != noon false-GREEN)', () =
     expect(r.reasonCode).toBe('sig_mismatch');
   });
 
-  it('confirms glued-token handling did not regress: dose count/unit/route still extract correctly from the OCR-glued source text ("amand", "for30days")', () => {
+  it('regression: OCR glue elsewhere in the sig ("amand", "for30days") does not corrupt unrelated dose count/unit/route extraction — this engine does NOT attempt to de-glue duration/time text, and says so honestly (durationDays stays null, the glued text surfaces in residualTokens) rather than silently dropping it', () => {
     const p = parseSig('Take 1 tab by mouth once in amand one at lunch time. for30days');
     expect(p.doseCount).toBe(1);
     expect(p.doseUnit).toBe('tab');
     expect(p.route).toBe('po');
     expect(p.ambiguous).toBe(false);
+    expect(p.durationDays).toBeNull();
+    expect(p.residualTokens).toContain('for30days');
   });
 
   it('"1 tab po qam and at lunch" vs "1 tab po qam and at noon" is RED (lunch != noon, same root cause without OCR glue)', () => {
     const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam and at noon');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  it('reversed direction: "1 tab po qam and at noon" vs "1 tab po qam and at lunch" is RED too (mismatch is symmetric, not an artifact of argument order)', () => {
+    const r = compareSigs('1 tab po qam and at noon', '1 tab po qam and at lunch');
     expect(r.status).toBe('red');
     expect(r.reasonCode).toBe('sig_mismatch');
   });
@@ -544,5 +552,102 @@ describe('Round 7, fix 1: TIME_OF_DAY concept (lunch != noon false-GREEN)', () =
     const r = compareSigs('take 1 capsule in the morning', 'TAKE ONE CAPSULE EVERY MORNING.');
     expect(r.status).toBe('green');
     expect(r.reasonCode).toBe('exact_match');
+  });
+});
+
+// Round 7, fix 2 (blocker — ed026b8 review, FINDING 1): confirmed false
+// GREEN. isKnownSigToken previously whitelisted ANY bare digit/number
+// word/roman numeral by vocabulary membership alone, but extractDoseCount
+// only ever consumes the FIRST number-shaped token it finds — so a
+// genuine SECOND dose-count-shaped token on only one side was invisible
+// to the residual guard. Fixed by restricting that whitelist to the
+// SPECIFIC index extractDoseCount actually consumed (same pattern as
+// extractRoute's excludeIdx).
+describe('Round 7, fix 2: a second, uncounted dose-count-shaped token must not be silently ignored', () => {
+  it('reviewer repro: a trailing bare digit on only one side is NOT green', () => {
+    const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid 2');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('reviewer repro: a trailing spelled-out number word on only one side is NOT green', () => {
+    const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid two');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('reviewer repro: a trailing roman numeral on only one side is NOT green', () => {
+    const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid ii');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('the extra number-shaped token shows up as residual, not silently accepted as "known" vocabulary', () => {
+    const p = parseSig('take 1 tab po bid 2');
+    expect(p.residualTokens).toContain('2');
+  });
+
+  it('regression: the pre-existing "iv"/roman-numeral-4 route collision still resolves correctly (route check runs before the number-shaped restriction)', () => {
+    const p = parseSig('give iv daily');
+    expect(p.route).toBe('iv');
+    expect(p.doseCount).toBeNull();
+  });
+});
+
+// Round 7, fix 2 (blocker — ed026b8 review, FINDING 2): the residual
+// guard added in fix 1 was too aggressive with only {take, by} as filler,
+// flipping routine CLINICALLY-EQUIVALENT phrasing pairs to YELLOW.
+// Widened FILLER_WORDS under one principle: neutral grammar/boilerplate
+// and administration verbs that are fully redundant with the `route`
+// field never block green; anything that is itself clinical information
+// (administration MANNER, food-timing) still can. See FILLER_WORDS' doc
+// for the full rationale.
+describe('Round 7, fix 2: FILLER_WORDS widened to neutral connectors/verbs only — meaning-bearing words still block green', () => {
+  describe('neutral — must stay/become GREEN', () => {
+    it('reviewer repro: "Apply..." vs "Use..." (same route/dose/frequency) is GREEN — interchangeable neutral administration verbs', () => {
+      const r = compareSigs('Apply 1 patch top daily', 'Use 1 patch top daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('"...bid as directed" vs "...bid" (one-sided "as directed") stays GREEN — deference boilerplate, not a differing instruction', () => {
+      const r = compareSigs('take 1 tab po bid as directed', 'take 1 tab po bid');
+      expect(r.status).toBe('green');
+    });
+
+    it('"and" vs no connector at all is GREEN (one-sided "and" is neutral grammar)', () => {
+      const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam at lunch');
+      expect(r.status).toBe('green');
+    });
+
+    it('"and" vs a comma list-separator is GREEN (both are pure grammar, not a content difference)', () => {
+      const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam, at lunch');
+      expect(r.status).toBe('green');
+    });
+
+    it('"give"/"administer"/"instill" verb variants over the same route/dose/frequency are GREEN', () => {
+      expect(compareSigs('give 1 ml im daily', 'administer 1 ml im daily').status).toBe('green');
+      expect(compareSigs('instill 1 gtt od bid', 'apply 1 gtt od bid').status).toBe('green');
+    });
+  });
+
+  describe('meaning-bearing — must NOT become green', () => {
+    it('"chew" vs plain "take" (same route/dose/frequency) is NOT green — administration MANNER is real clinical content, not filler', () => {
+      const r = compareSigs('chew 1 tab po bid', 'take 1 tab po bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('"crush" vs "dissolve" (same route/dose/frequency) is NOT green — different, and both are meaning-bearing', () => {
+      const r = compareSigs('crush 1 tab po bid', 'dissolve 1 tab po bid');
+      expect(r.status).not.toBe('green');
+    });
+
+    it('one-sided "with food" is NOT green — food-timing is meaning-bearing and deliberately NOT folded into ac/pc (see FILLER_WORDS\' doc)', () => {
+      const r = compareSigs('take 1 tab po bid with food', 'take 1 tab po bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('one-sided "on an empty stomach" is NOT green either', () => {
+      const r = compareSigs('take 1 tab po bid on an empty stomach', 'take 1 tab po bid');
+      expect(r.status).not.toBe('green');
+    });
   });
 });
