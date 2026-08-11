@@ -255,51 +255,75 @@ public sealed class IntegratedOverlayCoordinator
         // BROAD foreground check (round 2, item 1): is PioneerRx the app
         // the pharmacist is currently looking at, REGARDLESS of which
         // screen (queue, search, dashboard, or a specific Rx) — see
-        // TryGetForegroundPioneerRxWindow. This is now what gates the
-        // control box AND the "PioneerRx isn't around at all" fallback;
-        // only the boxes layer still requires the narrower
-        // isRxScreenAttached above.
+        // TryGetForegroundPioneerRxWindow. This is what gates the CONTROL
+        // BOX. It must NOT also gate the fallback-to-separate-window
+        // decision below (round-3 fix — see PioneerPresence's doc for the
+        // bug that caused: conflating "not in front right now" with
+        // "doesn't exist" popped the fallback window at every launch and
+        // on every alt-tab away from Pioneer).
         var hasForegroundPioneerWindow = TryGetForegroundPioneerRxWindow(out var foregroundHandle, out var foregroundBounds);
 
-        // REVIEW FIX (invisible-app trap): PioneerRx isn't the foreground
-        // app AT ALL (closed, minimized, or the pharmacist alt-tabbed to
-        // a different application) — both integrated windows are about
-        // to hide below, which would otherwise leave the WHOLE APP
-        // invisible with no affordance to recover (wait for Pioneer, or
-        // switch back to Separate) or quit. Reveal the separate window's
-        // own existing "Waiting for a PioneerRx..." state instead — no
-        // new UI needed, and its own View toggle/close button double as
-        // the recover/quit affordance. See FallbackSeparateWindowRule for
-        // the pure edge-only Show/Hide decision (never fights a
-        // pharmacist who manually re-hides it, never hides a window they
-        // opened themselves via "Open full view").
-        ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: true, isPioneerAttached: hasForegroundPioneerWindow, _fallbackSeparateWindowShown));
+        // ROUND 3 FIX: the fallback rule needs its OWN, broader signal —
+        // "does PioneerRx exist anywhere on the system" — independent of
+        // whether it's currently in front. isRxScreenAttached and
+        // hasForegroundPioneerWindow above already answer this for free
+        // when either is true; DoesPioneerRxProcessExist (a single
+        // process-name lookup, no window enumeration) is only called
+        // when BOTH are false, so this stays cheap on the common tick
+        // where Pioneer IS already known to be around. See
+        // PioneerPresence.Exists (pure) and FallbackSeparateWindowRule's
+        // own doc (unchanged — only the SIGNAL fed into it changes here).
+        var pioneerExists = PioneerPresence.Exists(isRxScreenAttached, hasForegroundPioneerWindow, !isRxScreenAttached && !hasForegroundPioneerWindow && DoesPioneerRxProcessExist());
 
-        if (!hasForegroundPioneerWindow)
+        // REVIEW FIX (invisible-app trap): PioneerRx doesn't exist
+        // anywhere on the system (closed entirely) — both integrated
+        // windows are about to hide below, which would otherwise leave
+        // the WHOLE APP invisible with no affordance to recover (wait for
+        // Pioneer, or switch back to Separate) or quit. Reveal the
+        // separate window's own existing "Waiting for a PioneerRx..."
+        // state instead — no new UI needed, and its own View toggle/
+        // close button double as the recover/quit affordance. See
+        // FallbackSeparateWindowRule for the pure edge-only Show/Hide
+        // decision (never fights a pharmacist who manually re-hides it,
+        // never hides a window they opened themselves via "Open full
+        // view").
+        ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: true, isPioneerAttached: pioneerExists, _fallbackSeparateWindowShown));
+
+        if (!pioneerExists)
         {
             HideControlBoxIfShown();
             HideBoxesIfShown();
             return;
         }
 
-        // CONTROL BOX: anchors to the narrow Rx-screen window when one's
-        // open (same window either way, in practice — Pre-Check/Edit/New
-        // Rx are all the same PioneerRx shell window with a different
-        // title), otherwise to whichever window IS currently foreground,
-        // via the raw Win32 rect (no field data needed just to position
-        // a box in its ribbon corner).
+        if (!hasForegroundPioneerWindow)
+        {
+            // ROUND 3 FIX: PioneerRx EXISTS but isn't the foreground app
+            // right now (launched from a terminal that's still focused,
+            // or the pharmacist alt-tabbed to something else briefly) —
+            // hide the integrated UI quietly, WITHOUT popping the
+            // fallback separate window (that's reserved for "Pioneer
+            // doesn't exist at all", handled above). The control box/
+            // boxes reappear on their own next tick once Pioneer regains
+            // focus.
+            HideControlBoxIfShown();
+            HideBoxesIfShown();
+            return;
+        }
+
+        // CONTROL BOX: reaching here already means
+        // IntegratedVisibilityGate.ShouldShowControlBox(hasForegroundPioneerWindow)
+        // is true (the !hasForegroundPioneerWindow branch above returned
+        // early) — anchors to the narrow Rx-screen window when one's open
+        // (same window either way, in practice — Pre-Check/Edit/New Rx
+        // are all the same PioneerRx shell window with a different
+        // title), otherwise to the foreground window's raw Win32 rect (no
+        // field data needed just to position a box in its ribbon corner).
         var controlBoxHandle = isRxScreenAttached ? window!.NativeWindowHandle : foregroundHandle;
         var controlBoxBounds = isRxScreenAttached ? window!.WindowBounds : foregroundBounds;
         var isControlBoxMaximized = IsZoomed(controlBoxHandle);
 
-        if (IntegratedVisibilityGate.ShouldShowControlBox(hasForegroundPioneerWindow))
-        {
-            UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
-        }
-        else
-        {
-            HideControlBoxIfShown();
-        }
+        UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
 
         // BOXES: unchanged — still requires the NARROW Rx-screen attach,
         // that specific window being foreground, maximized, and verified
@@ -362,6 +386,45 @@ public sealed class IntegratedOverlayCoordinator
 
         bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
         return true;
+    }
+
+    /// <summary>
+    /// ROUND 3 FIX: does a PioneerRx process exist ANYWHERE on the
+    /// system, foreground or not, minimized or not — a single process-
+    /// name lookup (no window enumeration at all), only ever called from
+    /// TickCore when both the narrow (isRxScreenAttached) and broad
+    /// (hasForegroundPioneerWindow) checks have already come back false,
+    /// so the common case (Pioneer already known to be around) never
+    /// pays for this. This is the signal PioneerPresence.Exists combines
+    /// with those other two to feed FallbackSeparateWindowRule — see that
+    /// class's doc for why the fallback needs THIS question, not "is
+    /// Pioneer in front right now". Every returned Process handle is
+    /// disposed; any failure (WMI hiccup, etc.) is treated as "doesn't
+    /// exist" rather than thrown.
+    /// </summary>
+    private static bool DoesPioneerRxProcessExist()
+    {
+        Process[] processes;
+        try
+        {
+            processes = Process.GetProcessesByName(FieldMap.TargetProcessName);
+        }
+        catch
+        {
+            return false;
+        }
+
+        try
+        {
+            return processes.Length > 0;
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
+        }
     }
 
     /// <summary>Applies a FallbackSeparateWindowRule.Decide() result: updates the flag, then raises at most one of Show/HideSeparateWindowRequested per the decision.</summary>
