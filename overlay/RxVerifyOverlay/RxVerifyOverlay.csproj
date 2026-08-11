@@ -43,6 +43,17 @@
     <!-- Add <ApplicationIcon>Assets\rxverify.ico</ApplicationIcon> once you
          have a real icon file; omitted for v0 so the project builds as-is. -->
     <!--
+      INTEGRATED DISPLAY MODE (Integrated/IntegratedOverlayCoordinator.cs):
+      declares this app genuinely per-monitor-DPI-aware — see
+      app.manifest's header comment for why this matters specifically for
+      the click-through boxes layer's pixel-exact positioning over
+      PioneerRx on a possibly-secondary, possibly-differently-scaled
+      monitor. Harmless for every other existing window/feature (Separate
+      mode, OCR capture, etc.) — none of them depended on the previous
+      implicit system-DPI-aware default in any way that this changes.
+    -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!--
       This app reads the local screen (via UI Automation AND, on this
       branch, a screen-region OCR capture of the on-screen e-script image
       — see Ocr/EscriptImageCapture.cs) and calls a local Node subprocess.

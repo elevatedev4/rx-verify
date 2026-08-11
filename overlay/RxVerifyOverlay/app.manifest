@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DPI CORRECTNESS for INTEGRATED display mode (Integrated/
+  IntegratedOverlayCoordinator.cs): without this manifest, an unpackaged
+  WPF app defaults to system-DPI-aware, meaning Windows bitmap-stretches
+  its whole window on any monitor whose scale factor differs from the
+  primary monitor's — which would silently mis-position/mis-size the
+  click-through boxes layer and control box on a pharmacy workstation
+  where PioneerRx lives on a secondary monitor running a different scale
+  than the primary one. PerMonitorV2 makes this app genuinely per-monitor
+  DPI aware, which is what lets VisualTreeHelper.GetDpi/DPI-changed
+  handling and this app's own SetWindowPos-in-physical-pixels positioning
+  (Integrated/NativeWindowPositioning.cs) behave correctly on every
+  monitor, not just the primary one. This is the standard manifest
+  snippet Microsoft documents for exactly this scenario; nothing here is
+  specific to this app beyond the assemblyIdentity name.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <assemblyIdentity version="1.0.0.0" name="RxVerifyOverlay.app" />
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10/11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+  <asmv3:application>
+    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
+      <dpiAware>true/pm</dpiAware>
+    </asmv3:windowsSettings>
+    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2017/WindowsSettings">
+      <dpiAwareness>PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>

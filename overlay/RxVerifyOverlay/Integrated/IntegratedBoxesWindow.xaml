@@ -1,0 +1,35 @@
+<Window x:Class="RxVerifyOverlay.Integrated.IntegratedBoxesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Rx Verify — Integrated"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        Focusable="False"
+        ShowActivated="False">
+    <!--
+        INTEGRATED MODE boxes layer (see
+        Integrated/IntegratedOverlayCoordinator.cs) — borderless and
+        transparent so it visually disappears except for the verdict
+        outlines it draws, and CLICK-THROUGH so the pharmacist keeps
+        typing/clicking into PioneerRx underneath it with zero difference
+        in behavior. AllowsTransparency/Background=Transparent here only
+        make the WINDOW itself paintable as see-through; click-through
+        itself is a separate Win32 extended style
+        (WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE) applied in
+        code-behind's OnSourceInitialized, since WPF has no first-class
+        API for it.
+
+        Positioned every refresh tick to exactly cover PioneerRx's own
+        window bounds (IntegratedOverlayCoordinator.UpdateBoxes ->
+        RepositionPhysical, in PHYSICAL pixels — see
+        NativeWindowPositioning.cs) — this Canvas is the coordinate space
+        every box (added in SetBoxes) is positioned within, in DIPs
+        relative to this window's own top-left.
+    -->
+    <Canvas x:Name="BoxCanvas" Background="Transparent" />
+</Window>
