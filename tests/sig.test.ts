@@ -483,3 +483,260 @@ describe('Round 6 fixes', () => {
     });
   });
 });
+
+// Round 7, fix 1: live-test false GREEN — pharmacist-owner report. Source
+// (OCR, glued words): "Take 1 tab by mouth once in amand one at lunch
+// time. for30days"; entered: "TAKE ONE TABLET BY MOUTH EVERY MORNING AND
+// at noon." The engine returned GREEN exact_match. Root cause: neither
+// "lunch" nor "noon" was in any token table, so both were silently
+// dropped before comparison — dose count/route/unit happened to match,
+// and there was nothing left to notice the sigs disagree about WHEN the
+// dose is taken. Owner's ruling: "Lunchtime and noon are not the same
+// thing" — a false GREEN is the worst failure class for this app (it
+// tells the pharmacist not to look).
+describe('Round 7, fix 1: TIME_OF_DAY concept (lunch != noon false-GREEN)', () => {
+  it('reviewer/owner repro: the exact reported pair is NOT green — must be RED (lunch vs noon+morning are different time-of-day sets)', () => {
+    const source = 'Take 1 tab by mouth once in amand one at lunch time. for30days';
+    const entered = 'TAKE ONE TABLET BY MOUTH EVERY MORNING AND at noon.';
+    const r = compareSigs(source, entered);
+    expect(r.status).not.toBe('green');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  it('regression: OCR glue elsewhere in the sig ("amand", "for30days") does not corrupt unrelated dose count/unit/route extraction — this engine does NOT attempt to de-glue duration/time text, and says so honestly (durationDays stays null, the glued text surfaces in residualTokens) rather than silently dropping it', () => {
+    const p = parseSig('Take 1 tab by mouth once in amand one at lunch time. for30days');
+    expect(p.doseCount).toBe(1);
+    expect(p.doseUnit).toBe('tab');
+    expect(p.route).toBe('po');
+    expect(p.ambiguous).toBe(false);
+    expect(p.durationDays).toBeNull();
+    expect(p.residualTokens).toContain('for30days');
+  });
+
+  it('"1 tab po qam and at lunch" vs "1 tab po qam and at noon" is RED (lunch != noon, same root cause without OCR glue)', () => {
+    const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam and at noon');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  it('reversed direction: "1 tab po qam and at noon" vs "1 tab po qam and at lunch" is RED too (mismatch is symmetric, not an artifact of argument order)', () => {
+    const r = compareSigs('1 tab po qam and at noon', '1 tab po qam and at lunch');
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('sig_mismatch');
+  });
+
+  it('"take at noon" vs "take at midday" is GREEN — noon and midday ARE the same clock time', () => {
+    const r = compareSigs('take at noon', 'take at midday');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  it('parses "noon" and "midday" to the same time-of-day id', () => {
+    expect(parseSig('take at noon').timeOfDay).toEqual(['noon']);
+    expect(parseSig('take at midday').timeOfDay).toEqual(['noon']);
+  });
+
+  it('parses "at lunch time" to the "lunch" time-of-day id, distinct from "noon"', () => {
+    expect(parseSig('take 1 tab po at lunch time').timeOfDay).toEqual(['lunch']);
+  });
+
+  it('YELLOW sig_ambiguous for an unparseable/unrecognized time phrase on only one side — never a silent green (residual-token guard)', () => {
+    const r = compareSigs('take 1 tab po bid at teatime', 'take 1 tab po bid');
+    expect(r.status).not.toBe('green');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('sig_ambiguous');
+  });
+
+  it('GREEN still holds for a plain morning-phrasing pair unaffected by the new time-of-day logic', () => {
+    const r = compareSigs('take 1 capsule in the morning', 'TAKE ONE CAPSULE EVERY MORNING.');
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+});
+
+// Round 7, fix 2 (blocker — ed026b8 review, FINDING 1): confirmed false
+// GREEN. isKnownSigToken previously whitelisted ANY bare digit/number
+// word/roman numeral by vocabulary membership alone, but extractDoseCount
+// only ever consumes the FIRST number-shaped token it finds — so a
+// genuine SECOND dose-count-shaped token on only one side was invisible
+// to the residual guard. Fixed by restricting that whitelist to the
+// SPECIFIC index extractDoseCount actually consumed (same pattern as
+// extractRoute's excludeIdx).
+describe('Round 7, fix 2: a second, uncounted dose-count-shaped token must not be silently ignored', () => {
+  it('reviewer repro: a trailing bare digit on only one side is NOT green', () => {
+    const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid 2');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('reviewer repro: a trailing spelled-out number word on only one side is NOT green', () => {
+    const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid two');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('reviewer repro: a trailing roman numeral on only one side is NOT green', () => {
+    const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid ii');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('the extra number-shaped token shows up as residual, not silently accepted as "known" vocabulary', () => {
+    const p = parseSig('take 1 tab po bid 2');
+    expect(p.residualTokens).toContain('2');
+  });
+
+  it('regression: the pre-existing "iv"/roman-numeral-4 route collision still resolves correctly (route check runs before the number-shaped restriction)', () => {
+    const p = parseSig('give iv daily');
+    expect(p.route).toBe('iv');
+    expect(p.doseCount).toBeNull();
+  });
+});
+
+// Round 7, fix 2 (blocker — ed026b8 review, FINDING 2): the residual
+// guard added in fix 1 was too aggressive with only {take, by} as filler,
+// flipping routine CLINICALLY-EQUIVALENT phrasing pairs to YELLOW.
+// Widened FILLER_WORDS under one principle: neutral grammar/boilerplate
+// and administration verbs that are fully redundant with the `route`
+// field never block green; anything that is itself clinical information
+// (administration MANNER, food-timing) still can. See FILLER_WORDS' doc
+// for the full rationale.
+describe('Round 7, fix 2: FILLER_WORDS widened to neutral connectors/verbs only — meaning-bearing words still block green', () => {
+  describe('neutral — must stay/become GREEN', () => {
+    it('reviewer repro: "Apply..." vs "Use..." (same route/dose/frequency) is GREEN — interchangeable neutral administration verbs', () => {
+      const r = compareSigs('Apply 1 patch top daily', 'Use 1 patch top daily');
+      expect(r.status).toBe('green');
+    });
+
+    it('"...bid as directed" vs "...bid" (one-sided "as directed") stays GREEN — deference boilerplate, not a differing instruction', () => {
+      const r = compareSigs('take 1 tab po bid as directed', 'take 1 tab po bid');
+      expect(r.status).toBe('green');
+    });
+
+    it('"and" vs no connector at all is GREEN (one-sided "and" is neutral grammar)', () => {
+      const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam at lunch');
+      expect(r.status).toBe('green');
+    });
+
+    it('"and" vs a comma list-separator is GREEN (both are pure grammar, not a content difference)', () => {
+      const r = compareSigs('1 tab po qam and at lunch', '1 tab po qam, at lunch');
+      expect(r.status).toBe('green');
+    });
+
+    it('"give"/"administer"/"instill" verb variants over the same route/dose/frequency are GREEN', () => {
+      expect(compareSigs('give 1 ml im daily', 'administer 1 ml im daily').status).toBe('green');
+      expect(compareSigs('instill 1 gtt od bid', 'apply 1 gtt od bid').status).toBe('green');
+    });
+  });
+
+  describe('meaning-bearing — must NOT become green', () => {
+    it('"chew" vs plain "take" (same route/dose/frequency) is NOT green — administration MANNER is real clinical content, not filler', () => {
+      const r = compareSigs('chew 1 tab po bid', 'take 1 tab po bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('"crush" vs "dissolve" (same route/dose/frequency) is NOT green — different, and both are meaning-bearing', () => {
+      const r = compareSigs('crush 1 tab po bid', 'dissolve 1 tab po bid');
+      expect(r.status).not.toBe('green');
+    });
+
+    it('one-sided "with food" is NOT green — food-timing is meaning-bearing and deliberately NOT folded into ac/pc (see FILLER_WORDS\' doc)', () => {
+      const r = compareSigs('take 1 tab po bid with food', 'take 1 tab po bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('one-sided "on an empty stomach" is NOT green either', () => {
+      const r = compareSigs('take 1 tab po bid on an empty stomach', 'take 1 tab po bid');
+      expect(r.status).not.toBe('green');
+    });
+  });
+});
+
+// Round 7, fix 3 (blocker — 8c36d6e review, "same failure class as
+// Finding 1"): extractDoseUnit/extractRoute/extractFrequency/
+// extractMealRelation are all first-match-wins, same as extractDoseCount
+// was before fix 2. isKnownSigToken's fix-2 version checked plain
+// vocabulary MEMBERSHIP for these categories, so a genuine SECOND,
+// one-sided token in the same vocabulary ("...bid ... tid...", "...1
+// tab ... cap...", "...po ... sl...", "...ac ... pc...") was silently
+// waved through as "known" and produced the exact same class of false
+// GREEN the owner originally reported. Fixed by threading each
+// extractor's own consumed index (or indices, for time-of-day, which
+// legitimately allows more than one) into a single consumedIndices set
+// that isKnownSigToken checks instead of re-testing table membership.
+describe('Round 7, fix 3: a second, uncounted token in ANY first-match-wins category must not be silently ignored', () => {
+  describe('one-sided extras — must NOT be green', () => {
+    it('reviewer repro: one-sided extra frequency token ("...bid" vs "...bid tid") is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid tid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('reviewer repro: one-sided extra dose-unit token ("...1 tab..." vs "...1 tab cap...") is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 1 tab cap po bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('reviewer repro: one-sided extra route token ("...po..." vs "...po sl...") is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 1 tab po sl bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('bonus: one-sided extra meal-relation token ("...ac" vs "...ac pc", a genuine self-contradiction) is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid ac', 'take 1 tab po bid ac pc');
+      expect(r.status).not.toBe('green');
+    });
+
+    it('each extra token surfaces in residualTokens rather than being silently absorbed by table membership', () => {
+      expect(parseSig('take 1 tab po bid tid').residualTokens).toContain('tid');
+      expect(parseSig('take 1 tab cap po bid').residualTokens).toContain('cap');
+      expect(parseSig('take 1 tab po sl bid').residualTokens).toContain('sl');
+    });
+  });
+
+  describe('sanity checks — must stay GREEN / correct', () => {
+    it('both-sides-same-extra sanity case stays GREEN (the "extra" is symmetric, not a one-sided difference)', () => {
+      const r = compareSigs('take 1 tab po bid tid', 'TAKE 1 TAB PO BID TID.');
+      expect(r.status).toBe('green');
+    });
+
+    it('regression: the pre-existing "iv"/roman-numeral-4 route collision still resolves correctly (route\'s own consumedIdx is unaffected by this change)', () => {
+      const p = parseSig('give iv daily');
+      expect(p.route).toBe('iv');
+      expect(p.doseCount).toBeNull();
+    });
+
+    it('regression: "take iv tablets daily" still resolves "iv" as the roman-numeral dose count, with no route', () => {
+      const p = parseSig('take iv tablets daily');
+      expect(p.doseCount).toBe(4);
+      expect(p.route).toBeNull();
+    });
+
+    it("regression: multiple time-of-day tokens are still both legitimately consumed, not flagged residual (extractTimeOfDay collects a set by design)", () => {
+      const p = parseSig('1 tab po qam and at lunch');
+      expect(p.timeOfDay).toEqual(['lunch', 'morning']);
+      expect(p.residualTokens).not.toContain('qam');
+      expect(p.residualTokens).not.toContain('lunch');
+    });
+  });
+
+  // Double-checked per the coordinator's explicit scope call: when BOTH
+  // sides state the identical internal contradiction (here, "bid ...
+  // tid" on both sides, just worded differently so the verbatim fast
+  // path doesn't intercept it), the residual guard only flags ASYMMETRIC
+  // leftovers by design — a SYMMETRIC one (same residual token on both
+  // sides) still reaches GREEN. Recognized as a real, narrower edge case
+  // than the mandatory one-sided fix above; deciding whether a
+  // same-both-sides internal contradiction should itself downgrade the
+  // verdict was judged likely to balloon scope (it needs a notion of
+  // "this residual token conflicts with an already-extracted value in
+  // its OWN side," not just "is it asymmetric between sides") and is
+  // deliberately left as documented, not-yet-handled behavior rather
+  // than a silent regression.
+  it('documented limitation (left as-is per explicit scope decision): the SAME internal contradiction worded identically on both sides ("bid...tid") still compares GREEN — the residual guard catches asymmetric leftovers only, not a same-side self-contradiction mirrored on both sides', () => {
+    const r = compareSigs('take 1 tab po bid tid', 'Take 1 Tablet By Mouth BID TID');
+    expect(r.status).toBe('green');
+  });
+});
