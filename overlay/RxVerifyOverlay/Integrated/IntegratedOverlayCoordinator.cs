@@ -75,6 +75,21 @@ public sealed class IntegratedOverlayCoordinator
     private bool _controlBoxShown;
     private bool _boxesShown;
 
+    /// <summary>
+    /// REVIEW FIX (invisible-app trap): true while the separate window has
+    /// been revealed as a FALLBACK because PioneerRx isn't attached at all
+    /// (closed/not running) — without this, Integrated mode with Pioneer
+    /// closed would hide BOTH integrated windows (nothing to draw over)
+    /// AND the separate window, leaving the whole app invisible with no
+    /// affordance to recover or quit. Tracked separately from
+    /// _boxesShown/_controlBoxShown so this only fires
+    /// ShowSeparateWindowRequested/HideSeparateWindowRequested on the
+    /// actual attach/detach EDGE, not every tick (a pharmacist who
+    /// manually re-hides this fallback window mid-detached-state isn't
+    /// fought by the next tick re-showing it).
+    /// </summary>
+    private bool _fallbackSeparateWindowShown;
+
     /// <summary>Raised when the pharmacist changes the Method toggle FROM THE CONTROL BOX — MainWindow.xaml.cs handles this the same way as its own Source radio buttons (persist + refresh), then calls SyncToggles() so both toggles stay in lockstep.</summary>
     public event EventHandler<VerificationMethod>? MethodToggleRequested;
 
@@ -116,18 +131,33 @@ public sealed class IntegratedOverlayCoordinator
     /// setting, both windows' toggle UI, and the classic window's
     /// visibility can never drift out of sync. Persists immediately (same
     /// pattern as MainWindow.OnMethodChanged for Method).
+    ///
+    /// REVIEW FIX: the body is wrapped so a settings-save I/O hiccup or a
+    /// downstream *Requested subscriber throwing can never propagate out
+    /// of a toggle click and crash the app — same catch-and-degrade
+    /// posture as Tick() below. Tick() itself is called outside the try
+    /// since it's already internally exception-safe.
     /// </summary>
     public void SetDisplayMode(DisplayMode mode)
     {
-        var changed = _settings.DisplayMode != mode;
-        _settings.DisplayMode = mode;
-        _settings.Save();
-        SyncToggles();
-
-        if (changed)
+        try
         {
-            if (mode == DisplayMode.Integrated) HideSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
-            else ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+            var changed = _settings.DisplayMode != mode;
+            _settings.DisplayMode = mode;
+            _settings.Save();
+            SyncToggles();
+
+            if (changed)
+            {
+                if (mode == DisplayMode.Integrated) HideSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+                else ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort only — the pharmacist can just try the toggle
+            // again; there's nothing more useful to do from here than
+            // let the next Tick() re-evaluate visibility from scratch.
         }
 
         Tick();
@@ -146,11 +176,41 @@ public sealed class IntegratedOverlayCoordinator
     /// the same cadence the rest of the app already uses for "is anything
     /// different" polling. A no-op (one enum comparison) whenever
     /// DisplayMode is Separate, so this costs nothing for the common case.
+    ///
+    /// REVIEW FIX: wraps TickCore in try/catch — PioneerRxWindow.TryAttach
+    /// is documented to RETHROW if the shared UIA automation session
+    /// itself goes bad (see its class doc "self-heal" catch block); every
+    /// PRE-EXISTING caller routes through MainWindow's SafeRefreshAsync/
+    /// SafeWatchAsync, which already catch this. This coordinator's own
+    /// TryAttach calls (in TickCore) had no equivalent guard, so a
+    /// transient accessibility hiccup would propagate out of an
+    /// async-void DispatcherTimer tick with no DispatcherUnhandledException
+    /// handler installed — i.e. crash the WHOLE process, Separate mode
+    /// included, since it shares this one process. Degrades to "hide
+    /// everything integrated" on any failure; the next tick tries again
+    /// from a clean slate (TryAttach's own shared-session self-heal
+    /// already handles recovering the underlying automation session).
+    /// MainWindow.xaml.cs additionally wraps every call site to this
+    /// method the same way (belt-and-suspenders), per the same review.
     /// </summary>
     public void Tick()
     {
+        try
+        {
+            TickCore();
+        }
+        catch (Exception)
+        {
+            HideControlBoxIfShown();
+            HideBoxesIfShown();
+        }
+    }
+
+    private void TickCore()
+    {
         if (_settings.DisplayMode != DisplayMode.Integrated)
         {
+            HideFallbackSeparateWindowIfShown();
             HideBoxesIfShown();
             HideControlBoxIfShown();
             return;
@@ -158,8 +218,27 @@ public sealed class IntegratedOverlayCoordinator
 
         using var window = PioneerRxWindow.TryAttach();
         var isAttached = window is not null;
-        var isForeground = isAttached && GetForegroundWindow() == window!.NativeWindowHandle;
-        var isMaximized = isAttached && IsZoomed(window!.NativeWindowHandle);
+
+        if (!isAttached)
+        {
+            // REVIEW FIX (invisible-app trap): PioneerRx isn't open/
+            // attached at all — both integrated windows are about to
+            // hide below, which would otherwise leave the WHOLE APP
+            // invisible with no affordance to recover (wait for Pioneer,
+            // or switch back to Separate) or quit. Reveal the separate
+            // window's own existing "Waiting for a PioneerRx..." state
+            // instead — no new UI needed, and its own View toggle/close
+            // button double as the recover/quit affordance.
+            ShowFallbackSeparateWindowIfNeeded();
+            HideControlBoxIfShown();
+            HideBoxesIfShown();
+            return;
+        }
+
+        HideFallbackSeparateWindowIfShown();
+
+        var isForeground = GetForegroundWindow() == window!.NativeWindowHandle;
+        var isMaximized = IsZoomed(window!.NativeWindowHandle);
         var hasVerifiableContent = !_viewModel.HasNonEscriptMessage && _viewModel.Categories.Any(c => c.HasData);
 
         var showControlBox = IntegratedVisibilityGate.ShouldShowControlBox(isAttached, isForeground);
@@ -182,6 +261,22 @@ public sealed class IntegratedOverlayCoordinator
         {
             HideBoxesIfShown();
         }
+    }
+
+    /// <summary>See _fallbackSeparateWindowShown doc — only raises ShowSeparateWindowRequested on the not-attached EDGE, not every tick.</summary>
+    private void ShowFallbackSeparateWindowIfNeeded()
+    {
+        if (_fallbackSeparateWindowShown) return;
+        _fallbackSeparateWindowShown = true;
+        ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>See _fallbackSeparateWindowShown doc — only raises HideSeparateWindowRequested if THIS coordinator was the one that showed it as a fallback (never hides a window the pharmacist opened themselves via "Open full view").</summary>
+    private void HideFallbackSeparateWindowIfShown()
+    {
+        if (!_fallbackSeparateWindowShown) return;
+        _fallbackSeparateWindowShown = false;
+        HideSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private ControlBoxWindow EnsureControlBox()

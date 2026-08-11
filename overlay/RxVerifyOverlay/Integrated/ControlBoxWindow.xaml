@@ -10,18 +10,28 @@
         Width="420" Height="92"
         Background="#FF1E1E1E"
         BorderBrush="#FF3A3A3A"
-        BorderThickness="1">
+        BorderThickness="1"
+        ShowActivated="False">
     <!--
         CONTROL BOX (item 2) — small interactive panel overlaid in
         PioneerRx's own top-right ribbon space (see
         IntegratedOverlayCoordinator's ControlBoxRightInsetDip/
         ControlBoxTopOffsetDip constants for exactly where). UNLIKE
         IntegratedBoxesWindow, this is a NORMAL (non-click-through)
-        window — it must receive clicks — so no AllowsTransparency/
-        extended-style dance here, just the app's existing dark palette
-        (matches MainWindow.xaml's colors) in a borderless, compact
-        window that moves with PioneerRx every refresh tick (see
-        RepositionPhysical in the code-behind).
+        window — it must receive clicks — so no WS_EX_TRANSPARENT/
+        WS_EX_LAYERED here, just the app's existing dark palette (matches
+        MainWindow.xaml's colors) in a borderless, compact window that
+        moves with PioneerRx every refresh tick (see RepositionPhysical
+        in the code-behind).
+
+        REVIEW FIX (focus-stealing): ShowActivated="False" plus
+        WS_EX_NOACTIVATE (applied in code-behind's OnSourceInitialized)
+        mean Show()/RepositionPhysical never steal keyboard focus/
+        activation from PioneerRx — without this, refreshing the control
+        box's position on every tick would yank focus away from whatever
+        field the pharmacist is mid-typing into the instant Pioneer
+        regains foreground. NOACTIVATE windows still receive mouse
+        clicks normally, so the toggles/buttons keep working.
     -->
     <Window.Resources>
         <Style TargetType="Button">

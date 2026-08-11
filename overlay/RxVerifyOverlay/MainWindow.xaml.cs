@@ -231,7 +231,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             // (tracks PioneerRx moving/maximizing/losing foreground
             // independently of whether a full verify actually re-ran this
             // tick). A cheap no-op whenever DisplayMode is Separate.
-            _integratedOverlay.Tick();
+            SafeTickIntegratedOverlay();
         };
 
         // W-T11 item 3: Auto-watch now starts CHECKED by default (see
@@ -274,7 +274,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         Loaded += async (_, _) =>
         {
             await SafeRefreshAsync();
-            _integratedOverlay.Tick();
+            SafeTickIntegratedOverlay();
         };
 
         // EngineClient now owns a PERSISTENT node.exe (latency fix — see
@@ -308,13 +308,37 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     public async Task StartupCompleted()
     {
         await SafeRefreshAsync();
-        _integratedOverlay.Tick();
+        SafeTickIntegratedOverlay();
     }
 
     private async void OnRefreshClick(object sender, RoutedEventArgs e)
     {
         await SafeRefreshAsync();
-        _integratedOverlay.Tick();
+        SafeTickIntegratedOverlay();
+    }
+
+    /// <summary>
+    /// REVIEW FIX: wraps _integratedOverlay.Tick() the same way
+    /// SafeRefreshAsync/SafeWatchAsync wrap their own OverlayViewModel
+    /// calls — belt-and-suspenders on top of Tick()'s own internal
+    /// catch-and-degrade (see IntegratedOverlayCoordinator.Tick's doc):
+    /// PioneerRxWindow.TryAttach can rethrow on a bad shared UIA session,
+    /// and this app has no DispatcherUnhandledException hook, so ANY
+    /// unguarded call site here would be a process-killing crash (taking
+    /// Separate mode down with it, since it's the same process) instead
+    /// of a recoverable hiccup.
+    /// </summary>
+    private void SafeTickIntegratedOverlay()
+    {
+        try
+        {
+            _integratedOverlay.Tick();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Unexpected error updating the integrated overlay: {ex.Message}", "Rx Verify",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private async Task SafeRefreshAsync()

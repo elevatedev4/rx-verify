@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -21,6 +22,23 @@ namespace RxVerifyOverlay.Integrated;
 /// </summary>
 public sealed partial class ControlBoxWindow : Window
 {
+    // REVIEW FIX (focus-stealing): same extended-style mechanism as
+    // IntegratedBoxesWindow's click-through styles, minus
+    // WS_EX_TRANSPARENT/WS_EX_LAYERED — this window DOES need to receive
+    // mouse clicks (unlike the boxes layer), it just must never take
+    // keyboard focus/activation away from PioneerRx. WS_EX_TOOLWINDOW
+    // also keeps it out of Alt-Tab (redundant with ShowInTaskbar="False"
+    // for the taskbar itself, but Alt-Tab is a separate list).
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll")]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
     // Suppresses the Checked handlers while SetToggleState is
     // programmatically syncing these radio buttons to the current
     // settings — mirrors MainWindow.xaml.cs's _suppressMethodChangeHandler
@@ -39,7 +57,15 @@ public sealed partial class ControlBoxWindow : Window
     public ControlBoxWindow()
     {
         InitializeComponent();
-        SourceInitialized += (_, _) => _hwnd = new WindowInteropHelper(this).Handle;
+        SourceInitialized += OnSourceInitialized;
+    }
+
+    /// <summary>See the WS_EX_NOACTIVATE/WS_EX_TOOLWINDOW field doc above and ShowActivated="False" in the XAML — together these mean Show()/RepositionPhysical never steal focus from PioneerRx.</summary>
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        _hwnd = new WindowInteropHelper(this).Handle;
+        var exStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
+        SetWindowLong(_hwnd, GWL_EXSTYLE, exStyle | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
     }
 
     /// <summary>See NativeWindowPositioning.Reposition — physical pixels, anchored relative to PioneerRx's window bounds (see IntegratedOverlayCoordinator's ControlBoxRightInsetDip/ControlBoxTopOffsetDip).</summary>
