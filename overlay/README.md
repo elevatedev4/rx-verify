@@ -189,6 +189,51 @@ UIA Tree..."** button:
   image (faxed/scanned script) and surfaces a manual-review message
   instead of ten spurious "not provided" yellows.
 
+## Integrated display mode (verdict boxes over PioneerRx)
+
+Optional alternative to the standalone window above — settings key
+`DisplayMode` (`Separate` | `Integrated`, default `Separate` so no
+existing installation changes behavior until a pharmacist opts in),
+switchable at runtime from either the separate window's own "View:"
+toggle or the in-Pioneer control box's identical toggle.
+
+- **Verdict boxes**: a borderless, transparent, **click-through** window
+  (`Integrated/IntegratedBoxesWindow.xaml`) is positioned exactly over
+  PioneerRx's own window and draws a rounded outline around each entered
+  field — green for a Green verdict, red for anything else (Yellow
+  collapses to red: the point is a fast "matches" vs. "check it" glance,
+  not a 3-way read — see `Integrated/BoxColorMapper.cs`). Click-through is
+  a Win32 extended window style (`WS_EX_TRANSPARENT | WS_EX_LAYERED |
+  WS_EX_NOACTIVATE`, applied directly since WPF has no first-class API
+  for it — see the window's `OnSourceInitialized`), so the pharmacist
+  keeps typing/clicking into PioneerRx normally.
+- **DPI correctness**: UIA's `BoundingRectangle` is always physical
+  pixels; WPF layout is always DIPs. `Integrated/DpiRectConverter.cs`
+  does that conversion using the DPI PioneerRx's own window is actually
+  running at (`GetDpiForWindow`) — correct at both 100% and 125%+
+  scaling, and on a secondary monitor with a different scale than the
+  primary one (the app also declares itself Per-Monitor-V2 DPI aware via
+  `app.manifest`, required for this to hold on a non-primary monitor).
+- **Control box** (`Integrated/ControlBoxWindow.xaml`): a small,
+  non-click-through panel positioned in PioneerRx's own top-right ribbon
+  space — status summary ("11✓ 2✗"), Method toggle, display-mode toggle,
+  Copy logs / Copy logs (no HIPAA), and an "Open full view" button back
+  to the separate window.
+- **Maximized-only**: integrated mode only draws boxes while PioneerRx is
+  maximized (`IsZoomed`) — when attached but not maximized, the control
+  box shows a "Maximize PioneerRx to use integrated view" note and greys
+  every toggle except the one that switches back to Separate. The whole
+  layer also hides whenever PioneerRx isn't the foreground window, isn't
+  attached, or the current screen isn't a parseable e-script.
+- **Copy-logs feedback**: every copy-logs button (both display modes)
+  flashes green with a checkmark for ~1.5s instead of a confirmation
+  popup — see `Integrated/ButtonFeedback.cs`.
+
+See `Integrated/IntegratedOverlayCoordinator.cs` for the orchestration
+(attach/foreground/maximized checks, window positioning, show/hide of the
+separate window as the mode switches) and `Integrated/
+IntegratedVisibilityGate.cs` for the pure show/hide decision logic.
+
 ## Local-only, by construction
 
 - The overlay reads the local screen via UIA (an in-process Windows
@@ -262,10 +307,19 @@ overlay/
     ├── Engine/
     │   └── EngineClient.cs             — subprocess call to `node dist/cli.js`
     ├── Uia/
-    │   ├── FieldMap.cs                 — ALL the UIA labels/selectors inferred from screenshots (start here to fix a misread field)
+    │   ├── FieldMap.cs                 — ALL the UIA labels/selectors inferred from screenshots (start here to fix a misread field); also EnteredAutomationIdByField for the Integrated mode boxes layer
     │   ├── PioneerRxWindow.cs          — window attach + panel-bounds geometry
     │   ├── UiaTreeWalker.cs            — full-tree walk, label→value pairing, debug tree dump
-    │   └── FieldReader.cs              — combines the above into PrescriptionRecord for both panels
+    │   └── FieldReader.cs              — combines the above into PrescriptionRecord for both panels; ReadEnteredFieldRects() for Integrated mode
+    ├── Integrated/                     — Integrated display mode (see section above)
+    │   ├── IntegratedOverlayCoordinator.cs — orchestrates both windows + show/hide of the separate window
+    │   ├── IntegratedBoxesWindow.xaml(.cs) — click-through verdict boxes drawn over PioneerRx
+    │   ├── ControlBoxWindow.xaml(.cs)      — small interactive panel in PioneerRx's ribbon
+    │   ├── IntegratedVisibilityGate.cs     — pure show/hide decision logic
+    │   ├── DpiRectConverter.cs             — pure physical-pixel ↔ DIP math
+    │   ├── BoxColorMapper.cs               — verdict → box color (binary green/red)
+    │   ├── ButtonFeedback.cs               — shared "flash green" copy-logs feedback
+    │   └── NativeWindowPositioning.cs      — shared SetWindowPos helpers
     └── ViewModels/
         └── OverlayViewModel.cs         — orchestrates read → verify → bind; owns the fixed-order verdict list
 ```
