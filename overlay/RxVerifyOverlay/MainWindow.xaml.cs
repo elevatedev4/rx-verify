@@ -3,10 +3,12 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using RxVerifyOverlay.Engine;
+using RxVerifyOverlay.Integrated;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.Uia;
@@ -66,6 +68,31 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // an actual user click. Starts true and is flipped to false at the
     // very end of the constructor, once real initialization is done.
     private bool _suppressMethodChangeHandler = true;
+
+    // Same defensive-suppression reasoning as _suppressMethodChangeHandler
+    // above, for the new Display-mode toggle (DisplaySeparateRadioButton's
+    // XAML-default IsChecked="True").
+    private bool _suppressDisplayModeChangeHandler = true;
+
+    // INTEGRATED DISPLAY MODE (Integrated/IntegratedOverlayCoordinator.cs)
+    // — owns/drives the boxes-over-Pioneer layer and the in-ribbon control
+    // box; this window only wires its *Requested events into the SAME
+    // settings-mutation/copy-logs logic the Separate window's own controls
+    // already use, and shows/hides itself in response to DisplayMode
+    // switching. Non-nullable: constructed unconditionally (cheap — it
+    // doesn't create either integrated window until DisplayMode actually
+    // becomes Integrated), same as _viewModel.
+    private readonly IntegratedOverlayCoordinator _integratedOverlay;
+
+    /// <summary>
+    /// INTEGRATED DISPLAY MODE: whether this window should start hidden.
+    /// Read by App.xaml.cs right after construction — a window that starts
+    /// in Integrated mode (persisted from a previous session) has no
+    /// business ever flashing visible before hiding itself, so App.xaml.cs
+    /// only calls Show() when this is Separate; see StartupCompleted() for
+    /// how the very first RefreshAsync still happens when it doesn't.
+    /// </summary>
+    public DisplayMode InitialDisplayMode => _settings.DisplayMode;
 
     public MainWindow()
     {
@@ -148,6 +175,33 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         UpdateMethodBadge();
         _suppressMethodChangeHandler = false;
 
+        // Display-mode toggle — reflect the saved/default setting
+        // (default Separate, see Models/OverlaySettings.cs DisplayMode)
+        // without treating this as a user-driven change (see
+        // _suppressDisplayModeChangeHandler doc).
+        if (_settings.DisplayMode == DisplayMode.Integrated)
+        {
+            DisplayIntegratedRadioButton.IsChecked = true;
+        }
+        else
+        {
+            DisplaySeparateRadioButton.IsChecked = true;
+        }
+        _suppressDisplayModeChangeHandler = false;
+
+        // INTEGRATED DISPLAY MODE (Integrated/IntegratedOverlayCoordinator.cs)
+        // — wires the control box's requested actions into the SAME
+        // settings-mutation/copy-logs logic this window's own controls
+        // already use, and shows/hides THIS window as DisplayMode
+        // switches (see OnDisplayModeChanged / SetDisplayMode below).
+        _integratedOverlay = new IntegratedOverlayCoordinator(_viewModel, _settings);
+        _integratedOverlay.MethodToggleRequested += async (_, method) => await ApplyMethodChangeAsync(method);
+        _integratedOverlay.ShowSeparateWindowRequested += (_, _) => { Show(); Activate(); };
+        _integratedOverlay.HideSeparateWindowRequested += (_, _) => Hide();
+        _integratedOverlay.CopyLogsRequested += async (_, button) => await CopyLogsToButtonAsync(button, redactPatient: false);
+        _integratedOverlay.CopyLogsNoHipaaRequested += async (_, button) => await CopyLogsToButtonAsync(button, redactPatient: true);
+        _integratedOverlay.ToggleStateChanged += (_, _) => SyncOwnToggles();
+
         // VerifyOCR capture-region override — see Models/OverlaySettings.cs
         // and MainWindow.xaml's "OCR capture region" section.
         UseExplicitCaptureRegionCheckBox.IsChecked = _settings.UseExplicitCaptureRegion;
@@ -168,7 +222,17 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // specifically because the common case (nothing changed) is
         // nearly free.
         _autoRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(AutoWatchIntervalMs) };
-        _autoRefreshTimer.Tick += async (_, _) => await SafeWatchAsync();
+        _autoRefreshTimer.Tick += async (_, _) =>
+        {
+            await SafeWatchAsync();
+
+            // INTEGRATED DISPLAY MODE: same cadence as the verify-content
+            // watch above — reposition/show/hide the boxes+control box
+            // (tracks PioneerRx moving/maximizing/losing foreground
+            // independently of whether a full verify actually re-ran this
+            // tick). A cheap no-op whenever DisplayMode is Separate.
+            _integratedOverlay.Tick();
+        };
 
         // W-T11 item 3: Auto-watch now starts CHECKED by default (see
         // AutoRefreshCheckBox IsChecked="True" in MainWindow.xaml), so
@@ -203,8 +267,15 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         SourceInitialized += OnSourceInitialized;
 
         // First read on launch so the panel isn't empty while the
-        // pharmacist decides whether to enable auto-watch.
-        Loaded += async (_, _) => await SafeRefreshAsync();
+        // pharmacist decides whether to enable auto-watch. Only fires if
+        // this window is actually shown — see StartupCompleted() for the
+        // Integrated-mode-at-startup case, where App.xaml.cs never calls
+        // Show() at all.
+        Loaded += async (_, _) =>
+        {
+            await SafeRefreshAsync();
+            _integratedOverlay.Tick();
+        };
 
         // EngineClient now owns a PERSISTENT node.exe (latency fix — see
         // Engine/EngineClient.cs) instead of spawning one per call, so it
@@ -216,10 +287,35 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         {
             _engineClient.Dispose();
             _titleChangeWatcher.Dispose();
+            _integratedOverlay.Shutdown();
+
+            // App.xaml sets ShutdownMode="OnExplicitShutdown" (needed
+            // because this window can now start never-shown in Integrated
+            // mode — see App.xaml's comment) — closing THIS window still
+            // means "exit the whole app", same as before that change, so
+            // it must now trigger shutdown explicitly.
+            Application.Current.Shutdown();
         };
     }
 
-    private async void OnRefreshClick(object sender, RoutedEventArgs e) => await SafeRefreshAsync();
+    /// <summary>
+    /// Called from App.xaml.cs when this window starts in Integrated mode
+    /// (so App.xaml.cs never calls Show(), and Loaded — which normally
+    /// kicks off the very first refresh — never fires). Runs the exact
+    /// same first-refresh-plus-integrated-tick sequence Loaded would have,
+    /// just triggered explicitly instead of by the window becoming visible.
+    /// </summary>
+    public async Task StartupCompleted()
+    {
+        await SafeRefreshAsync();
+        _integratedOverlay.Tick();
+    }
+
+    private async void OnRefreshClick(object sender, RoutedEventArgs e)
+    {
+        await SafeRefreshAsync();
+        _integratedOverlay.Tick();
+    }
 
     private async Task SafeRefreshAsync()
     {
@@ -286,21 +382,82 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         if (_suppressMethodChangeHandler) return;
 
         var newMethod = MethodUiaRadioButton.IsChecked == true ? VerificationMethod.Uia : VerificationMethod.Ocr;
-        if (_settings.Method == newMethod) return;
-
-        _settings.Method = newMethod;
-        _settings.Save();
-        UpdateMethodBadge();
-
-        await SafeRefreshAsync();
+        await ApplyMethodChangeAsync(newMethod);
     }
 
-    /// <summary>Reflects the active verification method in the window title and the small badge next to "Rx Verify" (MethodBadgeText) — called on startup and every OnMethodChanged.</summary>
+    /// <summary>
+    /// The actual Method-change logic (persist + badge + refresh),
+    /// extracted from OnMethodChanged so the control box's identical
+    /// toggle (Integrated/ControlBoxWindow.xaml — forwarded here via
+    /// _integratedOverlay.MethodToggleRequested) can apply exactly the
+    /// same change instead of duplicating it. Also re-syncs THIS window's
+    /// own radio buttons and the control box's toggle afterward, so
+    /// whichever toggle DIDN'T originate the change still reflects it.
+    /// </summary>
+    private async Task ApplyMethodChangeAsync(VerificationMethod newMethod)
+    {
+        if (_settings.Method != newMethod)
+        {
+            _settings.Method = newMethod;
+            _settings.Save();
+            UpdateMethodBadge();
+
+            await SafeRefreshAsync();
+        }
+
+        // Pushes the new Method into the control box's toggle AND raises
+        // ToggleStateChanged, which SyncOwnToggles (subscribed in the
+        // constructor) uses to reflect it on THIS window's own radio
+        // buttons too — covers both directions (this window's radio
+        // click, and the control box's identical toggle) through one path.
+        _integratedOverlay.SyncToggles();
+    }
+
+    /// <summary>
+    /// Reflects current settings (Method + DisplayMode) on THIS window's
+    /// own toggle radio buttons — subscribed to
+    /// _integratedOverlay.ToggleStateChanged so a change made from the
+    /// CONTROL BOX (which these radio buttons have no other way of
+    /// finding out about) never leaves them stale next time the
+    /// pharmacist reveals this window. Suppresses both toggles' Checked
+    /// handlers while doing so, same reasoning as the constructor's own
+    /// startup sync.
+    /// </summary>
+    private void SyncOwnToggles()
+    {
+        _suppressMethodChangeHandler = true;
+        MethodOcrRadioButton.IsChecked = _settings.Method == VerificationMethod.Ocr;
+        MethodUiaRadioButton.IsChecked = _settings.Method == VerificationMethod.Uia;
+        _suppressMethodChangeHandler = false;
+
+        _suppressDisplayModeChangeHandler = true;
+        DisplaySeparateRadioButton.IsChecked = _settings.DisplayMode == DisplayMode.Separate;
+        DisplayIntegratedRadioButton.IsChecked = _settings.DisplayMode == DisplayMode.Integrated;
+        _suppressDisplayModeChangeHandler = false;
+    }
+
+    /// <summary>Reflects the active verification method in the window title and the small badge next to "Rx Verify" (MethodBadgeText) — called on startup and every ApplyMethodChangeAsync.</summary>
     private void UpdateMethodBadge()
     {
         var label = _settings.Method == VerificationMethod.Uia ? "Escript tab" : "OCR";
         MethodBadgeText.Text = label;
         Title = $"Rx Verify — {label}";
+    }
+
+    /// <summary>
+    /// Display-mode toggle (Separate/Integrated — see Models/
+    /// OverlaySettings.cs DisplayMode). Routes through
+    /// IntegratedOverlayCoordinator.SetDisplayMode, the single source of
+    /// truth that also shows/hides THIS window (via
+    /// ShowSeparateWindowRequested/HideSeparateWindowRequested, wired in
+    /// the constructor) and syncs the control box's identical toggle.
+    /// </summary>
+    private void OnDisplayModeChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppressDisplayModeChangeHandler) return;
+
+        var newMode = DisplayIntegratedRadioButton.IsChecked == true ? DisplayMode.Integrated : DisplayMode.Separate;
+        _integratedOverlay.SetDisplayMode(newMode);
     }
 
     /// <summary>
@@ -313,30 +470,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// BuildCurrentLogBlob's "current Rx only" doc) rather than
     /// accumulating history.
     /// </summary>
-    private void OnCopyLogsClick(object sender, RoutedEventArgs e)
-    {
-        string blob;
-        try
-        {
-            blob = _viewModel.BuildCurrentLogBlob();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Couldn't build the log: {ex.Message}", "Rx Verify",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-
-        if (!TrySetClipboardText(blob))
-        {
-            MessageBox.Show(this,
-                "Couldn't copy to the clipboard (it may be locked by another app — try again in a moment).",
-                "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-
-        MessageBox.Show(this, "Log copied to clipboard.", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
+    private async void OnCopyLogsClick(object sender, RoutedEventArgs e) => await CopyLogsToButtonAsync((Button)sender, redactPatient: false);
 
     /// <summary>
     /// "Copy logs (no HIPAA)" — mirrors OnCopyLogsClick above, but builds
@@ -346,12 +480,25 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// paste logs from a REAL prescription without exposing PHI. See
     /// OverlayViewModel.BuildCurrentLogBlob / Diagnostics/RxLogFormatter.cs.
     /// </summary>
-    private void OnCopyLogsNoHipaaClick(object sender, RoutedEventArgs e)
+    private async void OnCopyLogsNoHipaaClick(object sender, RoutedEventArgs e) => await CopyLogsToButtonAsync((Button)sender, redactPatient: true);
+
+    /// <summary>
+    /// Shared "copy logs" implementation for BOTH of this window's own
+    /// buttons AND the control box's identical buttons (forwarded via
+    /// _integratedOverlay.CopyLogsRequested/CopyLogsNoHipaaRequested — see
+    /// the constructor). Item 5 (owner asked twice — must ship): on
+    /// success, the clicked button itself flashes green with a checkmark
+    /// for ~1.5s (ButtonFeedback.FlashSuccessAsync) instead of a
+    /// MessageBox confirmation popup; genuine failures (couldn't build
+    /// the log, clipboard locked) still show a MessageBox, since those
+    /// need the pharmacist's attention.
+    /// </summary>
+    private async Task CopyLogsToButtonAsync(Button button, bool redactPatient)
     {
         string blob;
         try
         {
-            blob = _viewModel.BuildCurrentLogBlob(redactPatient: true);
+            blob = _viewModel.BuildCurrentLogBlob(redactPatient);
         }
         catch (Exception ex)
         {
@@ -368,7 +515,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             return;
         }
 
-        MessageBox.Show(this, "Log copied to clipboard (patient info redacted).", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
+        await ButtonFeedback.FlashSuccessAsync(button);
     }
 
     /// <summary>
@@ -480,6 +627,12 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         DataContext = _viewModel;
         previousEngineClient.Dispose();
 
+        // See IntegratedOverlayCoordinator's _viewModel field doc — must
+        // be re-pointed at the freshly-rebuilt OverlayViewModel, or the
+        // integrated boxes/control-box status would keep reading from the
+        // now-orphaned old instance forever.
+        _integratedOverlay.UpdateViewModel(_viewModel);
+
         MessageBox.Show(this, "Settings saved.", "Rx Verify", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
@@ -536,6 +689,19 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     public bool IsExcludedFromCapture => _excludedFromCapture;
 
     /// <summary>
+    /// Whether HideForCaptureAsync's most recent call actually hid a
+    /// visible window — INTEGRATED DISPLAY MODE fix: this window can now
+    /// be intentionally hidden on purpose (DisplayMode.Integrated — see
+    /// HideSeparateWindowRequested in the constructor), not just visible-
+    /// and-dragged-somewhere-in-the-way like before this feature existed.
+    /// RestoreAfterCapture only re-shows the window if THIS flag says it
+    /// was the one that hid it — otherwise an OCR capture during
+    /// Integrated mode would incorrectly reveal the separate window
+    /// afterward.
+    /// </summary>
+    private bool _wasVisibleBeforeCapture;
+
+    /// <summary>
     /// Hides this window (Window.Hide() — Visibility=Hidden, same
     /// mechanism WPF already uses, so no new behavior to reason about)
     /// and then waits for the screen area it was covering to actually
@@ -550,21 +716,26 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     ///
     /// A no-op when _excludedFromCapture is true (see OnSourceInitialized)
     /// — Windows already omits this window from the capture, so there's
-    /// nothing to hide.
+    /// nothing to hide — OR when the window is already hidden for another
+    /// reason (see _wasVisibleBeforeCapture doc).
     /// </summary>
     public async Task HideForCaptureAsync()
     {
         if (_excludedFromCapture) return;
+
+        _wasVisibleBeforeCapture = IsVisible;
+        if (!_wasVisibleBeforeCapture) return; // already hidden (e.g. Integrated mode) — nothing to hide/restore
 
         Hide();
         await Dispatcher.Yield(DispatcherPriority.Render);
         await Task.Delay(30);
     }
 
-    /// <summary>Restores the overlay after a capture — called from OcrFieldReader's finally, so this always runs even if the capture itself threw. A no-op when _excludedFromCapture is true (HideForCaptureAsync never hid the window in the first place).</summary>
+    /// <summary>Restores the overlay after a capture — called from OcrFieldReader's finally, so this always runs even if the capture itself threw. A no-op when _excludedFromCapture is true (HideForCaptureAsync never hid the window in the first place) OR when this window was already hidden before that call (see _wasVisibleBeforeCapture doc).</summary>
     public void RestoreAfterCapture()
     {
         if (_excludedFromCapture) return;
+        if (!_wasVisibleBeforeCapture) return;
 
         Show();
     }

@@ -89,6 +89,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" /> <!-- Title -->
             <RowDefinition Height="Auto" /> <!-- Verification method toggle (OCR default / Escript tab direct read) -->
+            <RowDefinition Height="Auto" /> <!-- Display mode toggle (Separate window default / Integrated-over-Pioneer) -->
             <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
             <RowDefinition Height="Auto" /> <!-- W-T11 item 6: e-script notes, red text, only when present -->
             <RowDefinition Height="Auto" /> <!-- VerifyOCR: OCR status line + raw-text expander -->
@@ -135,7 +136,30 @@
         </StackPanel>
 
         <!--
-            Row 2: compact grouped table — 3 categories (Patient /
+            Row 2 (INTEGRATED DISPLAY MODE): Separate (this standalone
+            window, the original/default behavior) vs. Integrated (verdict
+            boxes drawn directly over PioneerRx + a small control panel in
+            its ribbon — see Integrated/IntegratedOverlayCoordinator.cs).
+            This toggle is the ONLY way to switch INTO Integrated mode —
+            once there, this window hides itself (see MainWindow.xaml.cs
+            HideSeparateWindowRequested) and the control box's OWN
+            identical toggle (Integrated/ControlBoxWindow.xaml) is what
+            lets the pharmacist switch back, plus an "Open full view"
+            button that reveals this window again without changing the
+            mode. Same Checked-on-both-RadioButtons/_suppress pattern as
+            the Source toggle above.
+        -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="View:" Foreground="#FF888888" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="DisplayMode" Content="Separate window (default)"
+                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Margin="0,0,10,0"
+                         IsChecked="True" Checked="OnDisplayModeChanged" />
+            <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="DisplayMode" Content="Integrated (over PioneerRx)"
+                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Checked="OnDisplayModeChanged" />
+        </StackPanel>
+
+        <!--
+            Row 3: compact grouped table — 3 categories (Patient /
             Prescriber / Rx, see Models/EngineModels.cs
             FieldCategories), each with a rolled-up status header
             (worst-status-wins: any Red field -> Red header, else any
@@ -158,7 +182,7 @@
             toolbar/status controls that used to live above it moved to
             the bottom bar below (W-T9 item 1).
         -->
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="3">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -375,7 +399,7 @@
             (the common case) shows nothing here at all — no empty red
             box.
         -->
-        <StackPanel Grid.Row="3">
+        <StackPanel Grid.Row="4">
             <Border Margin="0,4,0,0" Padding="0,0,0,4">
                 <Border.Style>
                     <Style TargetType="Border">
@@ -434,7 +458,7 @@
             every read, for a permanent record — this is the live/
             in-the-moment view of the same data.
         -->
-        <StackPanel Grid.Row="4" Margin="0,0,0,4">
+        <StackPanel Grid.Row="5" Margin="0,0,0,4">
             <!--
                 Task 2 (OCR reading indicator): small indeterminate
                 spinner next to the OCR status line, visible only while
@@ -480,7 +504,7 @@
             RefreshDrugFieldAsync) sits above the button row, both inside
             one bottom-anchored block.
         -->
-        <Border Grid.Row="5" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
+        <Border Grid.Row="6" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
             <StackPanel>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
                            TextWrapping="Wrap" Margin="0,0,0,4" />
@@ -528,7 +552,7 @@
         </Border>
 
         <!-- Row 5: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="6" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
+        <Expander Grid.Row="7" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">
