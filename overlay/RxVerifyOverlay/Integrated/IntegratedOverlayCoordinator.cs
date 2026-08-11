@@ -82,6 +82,20 @@ public sealed class IntegratedOverlayCoordinator
         public int Bottom;
     }
 
+    // ------------------------------------------------------------------
+    // ADDENDUM (round 5 — "the little overlay box is jumping around
+    // every time Pioneer opens a new little popup window"): see
+    // TryGetForegroundPioneerRxWindow and ForegroundAnchorRule's own doc.
+    // GA_ROOTOWNER walks up through BOTH parent AND owner relationships
+    // to the ultimate top-level owner in a single call — exactly what's
+    // needed to resolve a small PioneerRx-owned dialog/popup back to the
+    // main shell window it belongs to.
+    // ------------------------------------------------------------------
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    private const uint GaRootOwner = 3;
+
     // NOT readonly: MainWindow.xaml.cs's OnSaveSettingsClick rebuilds a
     // fresh OverlayViewModel whenever the engine paths change (a new
     // EngineClient needs a new OverlayViewModel around it — see that
@@ -436,13 +450,31 @@ public sealed class IntegratedOverlayCoordinator
     /// CURRENT FOREGROUND window purely by its owning PROCESS name
     /// (FieldMap.TargetProcessNames — declared but previously unused,
     /// anticipating exactly this need), regardless of which PioneerRx
-    /// screen it's showing. Returns the foreground window's raw physical
-    /// bounds (plain Win32 GetWindowRect — no UIA needed, since only
-    /// x/y/width/height are wanted here) for positioning the control box
-    /// when there's no Pre-Check/Edit/New-Rx window to anchor to instead.
-    /// Never throws: any failure (process exited between calls, access
-    /// denied, etc.) is treated as "not PioneerRx" — Tick()'s own
-    /// try/catch is a backstop, not the expected path here.
+    /// screen it's showing. Never throws: any failure (process exited
+    /// between calls, access denied, etc.) is treated as "not PioneerRx"
+    /// — Tick()'s own try/catch is a backstop, not the expected path
+    /// here.
+    ///
+    /// ADDENDUM (round 5 — "the little overlay box is jumping around
+    /// every time Pioneer opens a new little popup window"): the
+    /// FOREGROUND window matched above can be a small transient popup/
+    /// dialog PioneerRx merely OWNS (a save confirmation, a lookup
+    /// picker, etc.), not its main shell — anchoring directly to that
+    /// popup's tiny rect is what caused the jump. Once the process-name
+    /// match confirms this IS a PioneerRx window, GetAncestor(hwnd,
+    /// GA_ROOTOWNER) walks up through parent AND owner relationships to
+    /// the ultimate top-level owner in one call (returns IntPtr.Zero if
+    /// hwnd has no owner at all — i.e. it's already the top-level shell).
+    /// ForegroundAnchorRule.Choose (pure, tested) then decides: anchor to
+    /// that owner's rect if it exists and is sane, otherwise fall back to
+    /// the foreground window itself — identical to the pre-fix behavior.
+    /// Returns whichever HWND the chosen rect actually belongs to (not
+    /// always the original foreground hwnd) so IsZoomed/GetDpiForWindow
+    /// downstream (see TickCore/UpdateControlBox) read maximized-state
+    /// and DPI off the SAME window the rect came from, never a mismatched
+    /// pair. The boxes layer is unaffected — it anchors to
+    /// PioneerRxWindow.TryAttach's own narrow Rx-screen window, never to
+    /// this foreground-based path at all.
     /// </summary>
     private static bool TryGetForegroundPioneerRxWindow(out IntPtr hwnd, out Rectangle bounds)
     {
@@ -465,9 +497,19 @@ public sealed class IntegratedOverlayCoordinator
             return false;
         }
 
-        if (!GetWindowRect(hwnd, out var rect)) return false;
+        if (!GetWindowRect(hwnd, out var foregroundRect)) return false;
+        var foregroundBounds = Rectangle.FromLTRB(foregroundRect.Left, foregroundRect.Top, foregroundRect.Right, foregroundRect.Bottom);
 
-        bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+        var ownerHandle = GetAncestor(hwnd, GaRootOwner);
+        Rectangle? ownerBounds = null;
+        if (ownerHandle != IntPtr.Zero && GetWindowRect(ownerHandle, out var ownerRect))
+        {
+            ownerBounds = Rectangle.FromLTRB(ownerRect.Left, ownerRect.Top, ownerRect.Right, ownerRect.Bottom);
+        }
+
+        var anchor = ForegroundAnchorRule.Choose(hwnd, foregroundBounds, ownerHandle, ownerBounds);
+        hwnd = anchor.Handle;
+        bounds = anchor.Bounds;
         return true;
     }
 

@@ -191,3 +191,151 @@ public class BoxLayoutAdjusterFlushEdgeTests
         Assert.Equal(flush[1].Y, flush[0].Y + flush[0].Height, precision: 10);
     }
 }
+
+/// <summary>
+/// Unit tests for BoxLayoutAdjuster.AlignColumnLeftEdges — the owner's
+/// round-5 "make the left sides of the rectangles match up ... some of
+/// them will be off by themselves" feedback.
+/// </summary>
+public class BoxLayoutAdjusterLeftEdgeAlignmentTests
+{
+    [Fact]
+    public void ThreeStackedBoxesWithNearLeftsAllSnapToTheMinimum()
+    {
+        // Exactly the owner's own example: lefts 100/103/101, stacked
+        // (small vertical gaps) — all three are within the 8 DIP
+        // tolerance of each other, so they form one column and all move
+        // to the group's minimum (100).
+        var first = new DipRect(X: 100, Y: 0, Width: 200, Height: 20);
+        var second = new DipRect(X: 103, Y: 25, Width: 200, Height: 20);
+        var third = new DipRect(X: 101, Y: 50, Width: 200, Height: 20);
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { first, second, third });
+
+        Assert.Equal(100, aligned[0].X);
+        Assert.Equal(100, aligned[1].X);
+        Assert.Equal(100, aligned[2].X);
+    }
+
+    [Fact]
+    public void RightEdgesNeverMoveOnlyLeftEdgesShiftAndWidthAbsorbsTheDifference()
+    {
+        // Owner explicitly didn't ask for right edges to move — confirms
+        // X + Width (the right edge) is mathematically identical before
+        // and after for every box that gets shifted.
+        var first = new DipRect(X: 100, Y: 0, Width: 200, Height: 20);
+        var second = new DipRect(X: 103, Y: 25, Width: 197, Height: 20); // different width, same right edge target math
+
+        var originalRightEdges = new[] { first.X + first.Width, second.X + second.Width };
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { first, second });
+
+        Assert.Equal(originalRightEdges[0], aligned[0].X + aligned[0].Width, precision: 10);
+        Assert.Equal(originalRightEdges[1], aligned[1].X + aligned[1].Width, precision: 10);
+        // The box that WAS the minimum (first, X=100) is untouched entirely.
+        Assert.Equal(first, aligned[0]);
+    }
+
+    [Fact]
+    public void ALoneBoxFarRightIsUntouched()
+    {
+        var column = new[]
+        {
+            new DipRect(X: 100, Y: 0, Width: 200, Height: 20),
+            new DipRect(X: 101, Y: 25, Width: 200, Height: 20)
+        };
+        var farRight = new DipRect(X: 900, Y: 10, Width: 100, Height: 20); // no one else's left edge is anywhere near this
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { column[0], column[1], farRight });
+
+        Assert.Equal(farRight, aligned[2]);
+    }
+
+    [Fact]
+    public void NearLeftsButFarApartVerticallyAreTreatedAsDifferentColumnsAndStayUntouched()
+    {
+        // DECISION (explicitly left to our judgment): vertical proximity
+        // DOES gate the grouping. Two fields with coincidentally similar
+        // left edges but on opposite ends of the panel are NOT "the ones
+        // that should be lined up" — grouping them would create a visual
+        // relationship that doesn't reflect how the fields are actually
+        // laid out. Gap here (400 DIP) is far beyond
+        // ColumnVerticalGapToleranceDip (40).
+        var top = new DipRect(X: 100, Y: 0, Width: 200, Height: 20);
+        var farBelow = new DipRect(X: 102, Y: 400, Width: 200, Height: 20);
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { top, farBelow });
+
+        Assert.Equal(top, aligned[0]);
+        Assert.Equal(farBelow, aligned[1]);
+    }
+
+    [Fact]
+    public void NearLeftsWithAModerateGapUnderTheVerticalToleranceStillGroup()
+    {
+        // Confirms ColumnVerticalGapToleranceDip has real slack — a gap
+        // comfortably bridging a normal category-to-category transition
+        // (e.g. last Patient field to first Prescriber field) still
+        // counts as the same column, not just literally-touching pairs.
+        var top = new DipRect(X: 100, Y: 0, Width: 200, Height: 20);
+        var moderateGapBelow = new DipRect(X: 102, Y: 50, Width: 200, Height: 20); // 30px gap, under the 40 tolerance
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { top, moderateGapBelow });
+
+        Assert.Equal(100, aligned[0].X);
+        Assert.Equal(100, aligned[1].X);
+    }
+
+    [Fact]
+    public void TransitiveChainGroupsALongColumnEvenWhenTheEndsAreFarApart()
+    {
+        // First and last are ~90px apart vertically (over the 40
+        // tolerance if checked DIRECTLY), but each CONSECUTIVE pair is
+        // well within tolerance, so the whole chain still becomes one
+        // column via transitive membership.
+        var a = new DipRect(X: 100, Y: 0, Width: 200, Height: 20);
+        var b = new DipRect(X: 101, Y: 30, Width: 200, Height: 20);  // 10px gap from a
+        var c = new DipRect(X: 99, Y: 60, Width: 200, Height: 20);   // 10px gap from b
+        var d = new DipRect(X: 100, Y: 90, Width: 200, Height: 20);  // 10px gap from c
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { a, b, c, d });
+
+        Assert.All(aligned, rect => Assert.Equal(99, rect.X));
+    }
+
+    [Fact]
+    public void GroupsWithOnlyOneMemberAreReturnedExactlyUnchanged()
+    {
+        // Two independent singletons (both far from any left-edge
+        // neighbor) — neither should be touched.
+        var left = new DipRect(X: 0, Y: 0, Width: 50, Height: 20);
+        var right = new DipRect(X: 500, Y: 0, Width: 50, Height: 20);
+
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(new[] { left, right });
+
+        Assert.Equal(left, aligned[0]);
+        Assert.Equal(right, aligned[1]);
+    }
+
+    [Fact]
+    public void FullPipelinePadThenFlushThenAlignProducesOneCleanColumn()
+    {
+        // End-to-end, the exact order IntegratedBoxesWindow.SetBoxes runs:
+        // ApplyPadding -> SnapFlushAdjacentEdges -> AlignColumnLeftEdges.
+        var nameRow = new DipRect(X: 50, Y: 100, Width: 200, Height: 16);
+        var dobRow = new DipRect(X: 53, Y: 120, Width: 200, Height: 16);   // 4px raw gap, 3px left jitter
+        var addressRow = new DipRect(X: 51, Y: 140, Width: 200, Height: 16); // 4px raw gap, 1px left jitter
+
+        var padded = BoxLayoutAdjuster.ApplyPadding(new[] { nameRow, dobRow, addressRow });
+        var flush = BoxLayoutAdjuster.SnapFlushAdjacentEdges(padded);
+        var aligned = BoxLayoutAdjuster.AlignColumnLeftEdges(flush);
+
+        // All three left edges now coincide exactly.
+        Assert.Equal(aligned[0].X, aligned[1].X, precision: 10);
+        Assert.Equal(aligned[1].X, aligned[2].X, precision: 10);
+
+        // Vertical flushness from the earlier pass is preserved.
+        Assert.Equal(aligned[1].Y, aligned[0].Y + aligned[0].Height, precision: 10);
+        Assert.Equal(aligned[2].Y, aligned[1].Y + aligned[1].Height, precision: 10);
+    }
+}

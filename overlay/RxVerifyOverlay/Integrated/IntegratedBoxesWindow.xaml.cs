@@ -40,13 +40,24 @@ public sealed partial class IntegratedBoxesWindow : Window
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
     // Round 4 item 4 ("boxes are colored border + fully transparent
-    // middle"): thickness trimmed from 2.5 to a cleaner 2 ("readable but
-    // not chunky"); no fill brushes at all anymore (see GreenBrush/
-    // RedBrush below and Background below in SetBoxes) — the old ~9%
-    // opacity tint brushes are gone entirely, not just set to a lower
-    // opacity.
-    private const double BoxStrokeThickness = 2;
-    private const double BoxCornerRadius = 4;
+    // middle"): no fill brushes at all anymore (see GreenBrush/RedBrush
+    // below and Background below in SetBoxes) — the old ~9% opacity tint
+    // brushes are gone entirely, not just set to a lower opacity.
+    //
+    // ROUND 5 (owner: "the borders need to be thicker, and I'd prefer for
+    // them to be square rather than rounded"):
+    //   - BoxStrokeThickness: 2 -> 3. Padding (BoxLayoutAdjuster.PaddingDip)
+    //     is 2 DIP, so a 3px stroke's inner edge sits ~1px inside the raw
+    //     field rect's own edge rather than exactly on it — a small,
+    //     acceptable encroachment (still far tighter than round 2-3's 4px
+    //     padding/2.5px stroke), not disproportionate enough to warrant
+    //     going to 4. Revisit if it reads as too chunky live.
+    //   - Corner rounding removed entirely (no BoxCornerRadius constant at
+    //     all anymore, no CornerRadius set on the Border below — WPF's own
+    //     default is already square/0, so omitting it is both "square"
+    //     and self-documenting that this was a deliberate removal, not an
+    //     oversight).
+    private const double BoxStrokeThickness = 3;
 
     // Same green/red as MainWindow.xaml's GreenBrush/RedBrush — the boxes
     // layer deliberately never uses yellow (see BoxColorMapper: Yellow
@@ -95,10 +106,22 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// have their facing edges snapped flush
     /// (BoxLayoutAdjuster.SnapFlushAdjacentEdges) so stacked fields (e.g.
     /// Patient Name/DOB/Address) share one boundary line instead of a
-    /// sliver of background between them. Both are pure DIP-space
-    /// operations, applied in that order, AFTER DPI conversion so their
-    /// thresholds are in DIPs regardless of monitor scaling — see
-    /// BoxLayoutAdjuster's own tests for the geometry itself.
+    /// sliver of background between them.
+    ///
+    /// ROUND 5 (owner: "make the left sides of the rectangles match up so
+    /// they all line up when looking down ... some of them will be off by
+    /// themselves"): a THIRD pass, BoxLayoutAdjuster.AlignColumnLeftEdges,
+    /// runs AFTER the flush snap (see that method's own doc for why that
+    /// ordering — not before/interleaved — is what composes cleanly) and
+    /// snaps each detected visual column's left edges to the column's
+    /// minimum X, widening rightward-of-minimum boxes rather than
+    /// shrinking any of them (their right edges never move). Boxes with no
+    /// left-edge neighbor are left completely alone.
+    ///
+    /// All three passes are pure DIP-space operations, applied in that
+    /// order, AFTER DPI conversion so their thresholds are in DIPs
+    /// regardless of monitor scaling — see BoxLayoutAdjuster's own tests
+    /// for the geometry itself.
     /// </summary>
     public void SetBoxes(IReadOnlyList<(System.Drawing.Rectangle PhysicalRect, bool IsGreen)> boxes, System.Drawing.Point windowOriginPhysical, double dpiScaleX, double dpiScaleY)
     {
@@ -108,7 +131,8 @@ public sealed partial class IntegratedBoxesWindow : Window
             .Select(box => DpiRectConverter.ToDipRect(box.PhysicalRect, windowOriginPhysical, dpiScaleX, dpiScaleY))
             .ToList();
         var padded = BoxLayoutAdjuster.ApplyPadding(dipRects);
-        var adjusted = BoxLayoutAdjuster.SnapFlushAdjacentEdges(padded);
+        var flush = BoxLayoutAdjuster.SnapFlushAdjacentEdges(padded);
+        var adjusted = BoxLayoutAdjuster.AlignColumnLeftEdges(flush);
 
         for (var i = 0; i < boxes.Count; i++)
         {
@@ -119,7 +143,8 @@ public sealed partial class IntegratedBoxesWindow : Window
             {
                 BorderBrush = isGreen ? GreenBrush : RedBrush,
                 BorderThickness = new Thickness(BoxStrokeThickness),
-                CornerRadius = new CornerRadius(BoxCornerRadius),
+                // ROUND 5: no CornerRadius set at all — square corners,
+                // WPF's own default. See BoxStrokeThickness's doc above.
                 // Round 4 item 4: fully transparent middle, no fill at
                 // all — explicit Brushes.Transparent (not left null) so
                 // it's unambiguous this is intentional, not an oversight.

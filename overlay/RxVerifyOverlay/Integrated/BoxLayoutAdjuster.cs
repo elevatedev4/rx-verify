@@ -109,4 +109,134 @@ public static class BoxLayoutAdjuster
 
         return result;
     }
+
+    /// <summary>
+    /// How close two boxes' left (X) edges need to be to be considered
+    /// candidates for the same visual column — owner's own suggestion
+    /// ("~8 DIP"). Small enough that it only catches genuine near-misses
+    /// (a few px of UIA-rect jitter between fields PioneerRx actually laid
+    /// out in the same column), not different columns that happen to be
+    /// roughly similar widths apart.
+    /// </summary>
+    public const double LeftEdgeAlignmentToleranceDip = 8;
+
+    /// <summary>
+    /// How far apart (vertically — overlap counts as 0-or-negative, always
+    /// within tolerance) two near-left boxes can be and still count as
+    /// "stacked in the same column" rather than "two unrelated fields that
+    /// happen to share an X coordinate". OWNER'S OWN EXAMPLE ("some of
+    /// them will be off by themselves") implies vertical proximity DOES
+    /// matter — two fields on opposite ends of the panel with coincidentally
+    /// matching left edges are not "the ones that should be lined up".
+    /// This is deliberately more generous than FlushGapThresholdDip (7):
+    /// that threshold decides "close enough to make edges literally
+    /// touch"; this one decides "close enough to still read as the same
+    /// vertical column", which comfortably needs to bridge normal
+    /// category-to-category gaps (e.g. the last Patient field to the first
+    /// Prescriber field) without also bridging genuinely unrelated,
+    /// far-apart screen regions. An estimate, like every other geometry
+    /// constant in this class — retune against a live workstation.
+    /// </summary>
+    public const double ColumnVerticalGapToleranceDip = 40;
+
+    /// <summary>
+    /// OWNER FEEDBACK (round 5 — "make the left sides of the rectangles
+    /// match up so they all line up when looking down (for the ones that
+    /// should be lined up). Some of them will be off by themselves"):
+    /// groups boxes into visual columns — two boxes join the same column
+    /// when their left edges are within <paramref name="leftTolerance"/>
+    /// AND they're vertically compatible (overlapping, or a gap at or
+    /// below <paramref name="verticalGapTolerance"/>) — and snaps every
+    /// column's members to the column's MINIMUM left edge (never a
+    /// median/average: moving a box's left edge to something LARGER than
+    /// its own original X would shift the border rightward, clipping into
+    /// the field's own text; moving to the group minimum only ever
+    /// extends a box further left into blank space, which is purely
+    /// cosmetic and can never clip real content). Grouping is TRANSITIVE —
+    /// a box joins a column by being compatible with ANY box already in
+    /// it, not just the first one — so a long run of many stacked fields
+    /// still ends up as one column even though its first and last members
+    /// might individually be too far apart to pair up directly. Boxes
+    /// with no left-edge neighbor at all end up as a column of one and
+    /// are returned completely unchanged ("off by themselves").
+    ///
+    /// RIGHT EDGES NEVER MOVE (owner didn't ask for that, explicitly):
+    /// each aligned box's Width grows by exactly however far its left
+    /// edge moved, so <c>X + Width</c> (the right edge) is mathematically
+    /// identical to the box's value before this call — only the left
+    /// edge position (and, as a pure consequence of keeping the right
+    /// edge fixed, the width) changes.
+    ///
+    /// ORDERING (called AFTER SnapFlushAdjacentEdges, never before):
+    /// running this AFTER the flush snap means (a) the flush snap's own
+    /// horizontal-overlap test still runs against the padded-but-not-yet-
+    /// left-shifted rects, so this pass can't retroactively create a
+    /// false horizontal overlap that changes what the flush snap decided,
+    /// and (b) a column the flush snap already made vertically flush
+    /// (gap exactly 0) is trivially well within ANY vertical tolerance
+    /// here, making column detection MORE reliable for exactly the
+    /// tightly-stacked groups this feature targets. IntegratedBoxesWindow.
+    /// SetBoxes is the only production caller and applies the three
+    /// passes in this order: ApplyPadding -&gt; SnapFlushAdjacentEdges -&gt;
+    /// AlignColumnLeftEdges.
+    /// </summary>
+    public static IReadOnlyList<DipRect> AlignColumnLeftEdges(IReadOnlyList<DipRect> rects, double leftTolerance = LeftEdgeAlignmentToleranceDip, double verticalGapTolerance = ColumnVerticalGapToleranceDip)
+    {
+        var result = rects.ToArray();
+        var n = result.Length;
+        if (n < 2) return result;
+
+        var visited = new bool[n];
+
+        for (var start = 0; start < n; start++)
+        {
+            if (visited[start]) continue;
+
+            // Flood-fill: grow the column from `start` by repeatedly
+            // adding any not-yet-grouped box that's compatible with ANY
+            // box ALREADY in the column (transitive membership — see doc).
+            var column = new List<int> { start };
+            visited[start] = true;
+
+            var addedNew = true;
+            while (addedNew)
+            {
+                addedNew = false;
+                for (var candidate = 0; candidate < n; candidate++)
+                {
+                    if (visited[candidate]) continue;
+
+                    var joinsColumn = column.Any(member =>
+                        Math.Abs(rects[candidate].X - rects[member].X) <= leftTolerance &&
+                        VerticalGapBetween(rects[candidate], rects[member]) <= verticalGapTolerance);
+
+                    if (!joinsColumn) continue;
+
+                    column.Add(candidate);
+                    visited[candidate] = true;
+                    addedNew = true;
+                }
+            }
+
+            if (column.Count < 2) continue; // "off by itself" — no alignment partner, leave untouched
+
+            var minX = column.Min(idx => rects[idx].X);
+            foreach (var idx in column)
+            {
+                var rect = result[idx];
+                var deltaX = rect.X - minX; // >= 0: how far right of the column's minimum this box currently sits
+                result[idx] = rect with { X = minX, Width = rect.Width + deltaX }; // right edge (X + Width) unchanged — see doc
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Signed vertical gap between two rects — zero or negative means they vertically overlap (or touch), which is always "within tolerance" for any non-negative tolerance value.</summary>
+    private static double VerticalGapBetween(DipRect a, DipRect b)
+    {
+        return a.Y <= b.Y
+            ? b.Y - (a.Y + a.Height)
+            : a.Y - (b.Y + b.Height);
+    }
 }
