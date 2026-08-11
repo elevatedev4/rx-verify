@@ -461,11 +461,67 @@ function extractDoseCount(tokens: string[]): { count: number | null; consumedIdx
   return { count: null, consumedIdx: -1 };
 }
 
-function extractDoseUnit(tokens: string[]): string | null {
-  for (const tok of tokens) {
-    if (DOSE_UNIT_MAP[tok]) return DOSE_UNIT_MAP[tok] as string;
+/**
+ * Round 7, fix 3 (reviewer blocker — 8c36d6e review, "same failure class
+ * as Finding 1"): shared scan for dose unit / route / frequency / meal
+ * relation. All four are first-match-wins VALUE extractors over their
+ * own vocabulary map, and all four had the same hole: a second, later
+ * token from the SAME map was previously waved through as "known" by
+ * plain table membership, regardless of whether it was the token this
+ * extractor actually used — a real, one-sided second value ("...bid ...
+ * tid...", "...1 tab ... cap...", "...po ... sl...", "...ac ... pc...")
+ * was silently absorbed instead of surfacing as residual. Confirmed
+ * false GREEN (reviewer): compareSigs('take 1 tab po bid', 'take 1 tab
+ * po bid tid').
+ *
+ * The fix is NOT "only the very first matching index ever counts as
+ * known" — that over-corrects and breaks a real, already-verified-GREEN
+ * case: "1 capsule in the morning Orally Once a day" vs "...EVERY
+ * MORNING." legitimately contains BOTH "qam" and "daily" on the same
+ * side, restating the identical once-daily rate two ways; that is
+ * redundant, not a second fact, and must stay known/non-residual (same
+ * treatment as an already-consumed word being repeated, per this file's
+ * long-standing rule).
+ *
+ * So the rule is VALUE agreement, not just "first index": scan left to
+ * right, the FIRST match establishes the value everyone downstream must
+ * agree with (matching this file's existing "first match wins" semantics
+ * for what the extracted VALUE actually is — unchanged). Every
+ * SUBSEQUENT match that resolves to that SAME value is also consumed
+ * (it's a restatement, e.g. "qam" and "daily" both meaning rate 1, or
+ * "subq" and "subcutaneously" both meaning route 'sc'). A subsequent
+ * match that resolves to a DIFFERENT value is deliberately left
+ * unconsumed — that's the real, one-sided second fact the residual guard
+ * needs to see.
+ */
+function extractAgreeingTokens<V>(
+  tokens: string[],
+  lookup: (tok: string) => V | undefined,
+  excludeIdx: number = -1
+): { value: V | null; consumedIndices: number[] } {
+  let value: V | null = null;
+  const consumedIndices: number[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (i === excludeIdx) continue;
+    const tok = tokens[i] as string;
+    const v = lookup(tok);
+    if (v === undefined) continue;
+    if (value === null) {
+      value = v;
+      consumedIndices.push(i);
+    } else if (v === value) {
+      consumedIndices.push(i);
+    }
+    // else: a DIFFERENT value at this index — deliberately left
+    // unconsumed so it surfaces as residual (see doc above).
   }
-  return null;
+  return { value, consumedIndices };
+}
+
+/** See extractAgreeingTokens' doc. */
+function extractDoseUnit(tokens: string[]): { unit: string | null; consumedIndices: number[] } {
+  const { value, consumedIndices } = extractAgreeingTokens(tokens, (tok) => DOSE_UNIT_MAP[tok]);
+  return { unit: value, consumedIndices };
 }
 
 /**
@@ -476,112 +532,128 @@ function extractDoseUnit(tokens: string[]): string | null {
  * other caller of route extraction (there's only ever the one, from
  * parseSig) always passes doseCount's real consumedIdx, so this is not
  * an optional safety net — it's load-bearing for every sig, not just
- * ones containing "iv".
+ * ones containing "iv". See extractAgreeingTokens' doc for the rest.
  */
-function extractRoute(tokens: string[], excludeIdx: number = -1): string | null {
-  for (let i = 0; i < tokens.length; i++) {
-    if (i === excludeIdx) continue;
-    const tok = tokens[i] as string;
-    if (ROUTE_MAP[tok]) return ROUTE_MAP[tok] as string;
-  }
-  return null;
+function extractRoute(tokens: string[], excludeIdx: number = -1): { route: string | null; consumedIndices: number[] } {
+  const { value, consumedIndices } = extractAgreeingTokens(tokens, (tok) => ROUTE_MAP[tok], excludeIdx);
+  return { route: value, consumedIndices };
 }
 
-function extractFrequency(tokens: string[]): number | null {
-  for (const tok of tokens) {
-    if (FREQ_MAP[tok] !== undefined) return FREQ_MAP[tok] as number;
-  }
-  return null;
+/**
+ * See extractAgreeingTokens' doc. Unaffected: hasUnrecognizedFreqToken
+ * (parseSig) re-scans ALL tokens for the q-pattern independently of this
+ * function and already runs BEFORE compareSigs ever reaches the residual
+ * guard, so a genuinely unrecognized q-token was never at risk of this
+ * hole — only a SECOND, DIFFERENT *recognized* FREQ_MAP value was.
+ */
+function extractFrequency(tokens: string[]): { rate: number | null; consumedIndices: number[] } {
+  const { value, consumedIndices } = extractAgreeingTokens(tokens, (tok) => FREQ_MAP[tok]);
+  return { rate: value, consumedIndices };
 }
 
+/**
+ * PRN is a plain boolean flag, not a first-match-wins VALUE — unlike
+ * dose count/unit/route/frequency/meal relation, there is no discrete
+ * second value a repeat could silently hide ("prn" said twice, or a
+ * mix of "prn" and "as needed", both still just mean "yes, PRN"). No
+ * consumed-index tracking needed here; PRN_TOKENS stays a membership
+ * check in isKnownSigToken.
+ */
 function extractPrn(tokens: string[]): boolean {
   return tokens.some((t) => PRN_TOKENS.has(t));
 }
 
-/** Round 5, fix 4 (additive) — see MEAL_RELATION_MAP's doc. */
-function extractMealRelation(tokens: string[]): string | null {
-  for (const tok of tokens) {
-    if (MEAL_RELATION_MAP[tok]) return MEAL_RELATION_MAP[tok] as string;
-  }
-  return null;
+/** Round 5, fix 4 (additive) — see MEAL_RELATION_MAP's doc, and
+ * extractAgreeingTokens' doc for the consumed-indices behavior (e.g. a
+ * genuine one-sided "...ac ... pc..." self-contradiction now correctly
+ * leaves "pc" unconsumed/residual instead of being waved through). */
+function extractMealRelation(tokens: string[]): { relation: string | null; consumedIndices: number[] } {
+  const { value, consumedIndices } = extractAgreeingTokens(tokens, (tok) => MEAL_RELATION_MAP[tok]);
+  return { relation: value, consumedIndices };
 }
 
 /**
  * Round 7, fix 1 (additive) — see TIME_OF_DAY_MAP's doc. Unlike the other
  * extractors above, this collects a SET (a sig can name more than one
  * time-of-day, e.g. "at noon and at lunch"), returned sorted for stable
- * equality comparison in compareSigs.
+ * equality comparison in compareSigs. Round 7, fix 3 (reviewer blocker —
+ * 8c36d6e review): correspondingly, it ALSO returns the indices of every
+ * token that contributed to that set — plural and by design, unlike
+ * every single-value extractor above. Multiple time-of-day tokens are
+ * legitimately, simultaneously meaningful (a sig really can name more
+ * than one time), so ALL of them are "consumed" here, not just the
+ * first.
  */
-function extractTimeOfDay(tokens: string[]): string[] | null {
+function extractTimeOfDay(tokens: string[]): { ids: string[] | null; consumedIndices: number[] } {
   const found = new Set<string>();
-  for (const tok of tokens) {
+  const consumedIndices: number[] = [];
+  tokens.forEach((tok, idx) => {
     const entry = TIME_OF_DAY_MAP[tok];
-    if (entry) found.add(entry.id);
-  }
-  return found.size > 0 ? Array.from(found).sort() : null;
+    if (entry) {
+      found.add(entry.id);
+      consumedIndices.push(idx);
+    }
+  });
+  return { ids: found.size > 0 ? Array.from(found).sort() : null, consumedIndices };
 }
 
 /**
- * Round 7, fix 1 (additive), NARROWED in fix 2 (reviewer blocker — ed026b8
- * review): is this token accounted for by SOME known vocabulary (dose
- * unit, route, frequency, prn, meal relation, time-of-day), the
- * FILLER_WORDS stoplist, or — for a NUMBER-shaped token specifically —
- * is it the exact token index extractDoseCount actually consumed?
+ * Round 7, fix 1 (additive), REDESIGNED in fix 3 (reviewer blocker —
+ * 8c36d6e review, "same failure class as Finding 1"): is this token
+ * accounted for by the FILLER_WORDS stoplist, the PRN_TOKENS boolean
+ * flag (membership is safe for both — see their own docs for why), or
+ * the SPECIFIC set of token indices some extractor actually consumed?
  *
- * Every non-numeric category is still checked by plain vocabulary
- * MEMBERSHIP, not which specific extractor instance consumed it — a sig
- * that repeats a word already used elsewhere (e.g. "daily" appearing
- * after an earlier "qam" already set the frequency) is redundant, not
- * unrecognized, and must not be flagged as residual.
+ * Round 7 fix 2 checked vocabulary MEMBERSHIP for dose unit/route/
+ * frequency/meal relation/time-of-day — correct for repeats of an
+ * ALREADY-consumed value ("daily" restating an earlier "qam"), but wrong
+ * for a genuinely SECOND, DIFFERENT value in the same category:
+ * extractDoseUnit/extractRoute/extractFrequency/extractMealRelation are
+ * all first-match-wins, silently ignoring any later token in their own
+ * vocabulary — so "...1 tab ... cap...", "...po ... sl...", "...bid ...
+ * tid...", and "...ac ... pc..." were each waved through as "known"
+ * purely by being in the right table, regardless of whether THIS
+ * extractor instance actually used that specific token. That's the same
+ * failure class as Finding 1's dose-count bug, just recurring at every
+ * other first-match-wins extractor. Confirmed false GREEN (reviewer):
+ * compareSigs('take 1 tab po bid', 'take 1 tab po bid tid').
  *
- * A number-shaped token (bare digit, spelled-out number word, or roman
- * numeral) is different and needs the INDEX check: extractDoseCount only
- * ever consumes the FIRST number-shaped token it finds (see its doc) and
- * silently ignores any other — so a second one is a real, distinct piece
- * of content (a second dose count, "...bid 2", "...daily two", "take ii
- * tabs ... iii tabs") that membership-only checking would wave through
- * as "just more digit-shaped vocabulary" instead of catching. Confirmed
- * false GREEN (reviewer): compareSigs('take 1 tab po bid', 'take 1 tab
- * po bid 2') — and the same with 'two' and 'ii'. The other vocabulary
- * checks run FIRST and can still independently mark a number-shaped
- * token known (e.g. "iv" is simultaneously ROMAN_MAP's 4 and ROUTE_MAP's
- * intravenous — see extractRoute's doc for that collision) — the index
- * restriction only applies once nothing else claims the token.
+ * Fix: `consumedIndices` is built once in parseSig from every
+ * extractor's OWN reported index (or indices, for time-of-day) and
+ * passed in here — a vocabulary token only counts as "known" at the
+ * exact index some extractor actually consumed it at. A second,
+ * uncounted token in the same vocabulary (dose unit, route, frequency,
+ * or meal relation) now correctly surfaces as residual instead of being
+ * silently absorbed by table membership alone.
  *
  * See extractResidualTokens' doc for how this is used.
  */
-function isKnownSigToken(tok: string, idx: number, doseCountConsumedIdx: number): boolean {
+function isKnownSigToken(tok: string, idx: number, consumedIndices: ReadonlySet<number>): boolean {
   if (FILLER_WORDS.has(tok)) return true;
-  if (DOSE_UNIT_MAP[tok]) return true;
-  if (ROUTE_MAP[tok]) return true;
-  if (FREQ_MAP[tok] !== undefined) return true;
   if (PRN_TOKENS.has(tok)) return true;
-  if (MEAL_RELATION_MAP[tok]) return true;
-  if (TIME_OF_DAY_MAP[tok]) return true;
-  const isNumberShaped =
-    /^\d+(\.\d+)?$/.test(tok) || NUMBER_WORD_MAP[tok] !== undefined || ROMAN_MAP[tok] !== undefined;
-  if (isNumberShaped) return idx === doseCountConsumedIdx;
-  return false;
+  return consumedIndices.has(idx);
 }
 
 /**
- * Round 7, fix 1 (additive): the broader guard behind this branch's fix,
- * beyond the specific TIME_OF_DAY concept above. Any token that survives
- * tokenization without being claimed by a known extractor OR the filler
- * stoplist is "residual" — real text this engine could not classify.
- * compareSigs uses this as a final safety net: a GREEN verdict requires
- * both sides' residual sets to match (usually both empty), so leftover
- * content on only one side (a second dose count, unrecognized OCR glue,
- * an unparseable time phrase) can never be silently dropped on the way
- * to a false GREEN — see compareSigs' residual-guard comment.
+ * Round 7, fix 1 (additive), REDESIGNED in fix 3 (reviewer blocker —
+ * 8c36d6e review): the broader guard behind this branch's fix, beyond
+ * the specific TIME_OF_DAY concept above. Any token that survives
+ * tokenization without being claimed by a known extractor (at the exact
+ * index it actually consumed — see isKnownSigToken's doc), PRN_TOKENS,
+ * or the filler stoplist is "residual" — real text this engine could
+ * not classify. compareSigs uses this as a final safety net: a GREEN
+ * verdict requires both sides' residual sets to match (usually both
+ * empty), so leftover content on only one side (a second dose count, a
+ * second/conflicting route or frequency or dose unit or meal-timing
+ * word, unrecognized OCR glue, an unparseable time phrase) can never be
+ * silently dropped on the way to a false GREEN — see compareSigs'
+ * residual-guard comment.
  *
- * `doseCountConsumedIdx` is extractDoseCount's own consumedIdx (-1 when
- * no dose count was found at all) — threaded through so a second,
- * uncounted number-shaped token is never silently waved through; see
- * isKnownSigToken's doc.
+ * `consumedIndices` is built once in parseSig, unioning the consumed
+ * index (or indices, for time-of-day) reported by every extractor.
  */
-function extractResidualTokens(tokens: string[], doseCountConsumedIdx: number): string[] {
-  return tokens.filter((t, idx) => !isKnownSigToken(t, idx, doseCountConsumedIdx));
+function extractResidualTokens(tokens: string[], consumedIndices: ReadonlySet<number>): string[] {
+  return tokens.filter((t, idx) => !isKnownSigToken(t, idx, consumedIndices));
 }
 
 /**
@@ -601,17 +673,35 @@ export function parseSig(raw: string): ParsedSig {
     .filter(Boolean);
 
   const { count: doseCount, consumedIdx } = extractDoseCount(tokens);
-  const doseUnit = extractDoseUnit(tokens);
+  const { unit: doseUnit, consumedIndices: doseUnitIndices } = extractDoseUnit(tokens);
   // REVIEWER BLOCKER FIX (round 5, fix 4 hardening): pass doseCount's
   // consumed token index so the same token can never double as both a
   // roman-numeral dose count and a route — see extractRoute's doc.
-  const route = extractRoute(tokens, consumedIdx);
-  const timesPerDay = extractFrequency(tokens);
+  const { route, consumedIndices: routeIndices } = extractRoute(tokens, consumedIdx);
+  const { rate: timesPerDay, consumedIndices: freqIndices } = extractFrequency(tokens);
   const prn = extractPrn(tokens);
-  const mealRelation = extractMealRelation(tokens);
+  const { relation: mealRelation, consumedIndices: mealIndices } = extractMealRelation(tokens);
   // Round 7, fix 1 (additive) — see TIME_OF_DAY_MAP's doc.
-  const timeOfDay = extractTimeOfDay(tokens);
-  const residualTokens = extractResidualTokens(tokens, consumedIdx);
+  const { ids: timeOfDay, consumedIndices: todIndices } = extractTimeOfDay(tokens);
+
+  // Round 7, fix 3 (reviewer blocker — 8c36d6e review): the single set of
+  // "this index was actually used" that extractResidualTokens checks
+  // against, unioned from every extractor's own reported consumption —
+  // see isKnownSigToken's/extractAgreeingTokens' docs for why membership-
+  // in-a-table alone is not enough for dose unit/route/frequency/meal
+  // relation (each is first-match-wins and would otherwise silently wave
+  // through a second, DIFFERENT-valued token). doseCount contributes at
+  // most one index (its own stricter, unchanged rule — see Finding 1's
+  // fix); dose unit/route/frequency/meal relation and time-of-day can
+  // each legitimately contribute more than one (repeated/synonymous
+  // restatements of the SAME value, or — for time-of-day — genuinely
+  // multiple distinct times). -1 ("not found") is filtered out.
+  const consumedIndices = new Set(
+    [consumedIdx, ...doseUnitIndices, ...routeIndices, ...freqIndices, ...mealIndices, ...todIndices].filter(
+      (i) => i >= 0
+    )
+  );
+  const residualTokens = extractResidualTokens(tokens, consumedIndices);
 
   // Detect frequency-LOOKING tokens we don't recognize (e.g. "q5h",
   // a misspelled "qhd"). These make the frequency indeterminate.

@@ -651,3 +651,92 @@ describe('Round 7, fix 2: FILLER_WORDS widened to neutral connectors/verbs only 
     });
   });
 });
+
+// Round 7, fix 3 (blocker — 8c36d6e review, "same failure class as
+// Finding 1"): extractDoseUnit/extractRoute/extractFrequency/
+// extractMealRelation are all first-match-wins, same as extractDoseCount
+// was before fix 2. isKnownSigToken's fix-2 version checked plain
+// vocabulary MEMBERSHIP for these categories, so a genuine SECOND,
+// one-sided token in the same vocabulary ("...bid ... tid...", "...1
+// tab ... cap...", "...po ... sl...", "...ac ... pc...") was silently
+// waved through as "known" and produced the exact same class of false
+// GREEN the owner originally reported. Fixed by threading each
+// extractor's own consumed index (or indices, for time-of-day, which
+// legitimately allows more than one) into a single consumedIndices set
+// that isKnownSigToken checks instead of re-testing table membership.
+describe('Round 7, fix 3: a second, uncounted token in ANY first-match-wins category must not be silently ignored', () => {
+  describe('one-sided extras — must NOT be green', () => {
+    it('reviewer repro: one-sided extra frequency token ("...bid" vs "...bid tid") is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 1 tab po bid tid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('reviewer repro: one-sided extra dose-unit token ("...1 tab..." vs "...1 tab cap...") is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 1 tab cap po bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('reviewer repro: one-sided extra route token ("...po..." vs "...po sl...") is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid', 'take 1 tab po sl bid');
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+    });
+
+    it('bonus: one-sided extra meal-relation token ("...ac" vs "...ac pc", a genuine self-contradiction) is NOT green', () => {
+      const r = compareSigs('take 1 tab po bid ac', 'take 1 tab po bid ac pc');
+      expect(r.status).not.toBe('green');
+    });
+
+    it('each extra token surfaces in residualTokens rather than being silently absorbed by table membership', () => {
+      expect(parseSig('take 1 tab po bid tid').residualTokens).toContain('tid');
+      expect(parseSig('take 1 tab cap po bid').residualTokens).toContain('cap');
+      expect(parseSig('take 1 tab po sl bid').residualTokens).toContain('sl');
+    });
+  });
+
+  describe('sanity checks — must stay GREEN / correct', () => {
+    it('both-sides-same-extra sanity case stays GREEN (the "extra" is symmetric, not a one-sided difference)', () => {
+      const r = compareSigs('take 1 tab po bid tid', 'TAKE 1 TAB PO BID TID.');
+      expect(r.status).toBe('green');
+    });
+
+    it('regression: the pre-existing "iv"/roman-numeral-4 route collision still resolves correctly (route\'s own consumedIdx is unaffected by this change)', () => {
+      const p = parseSig('give iv daily');
+      expect(p.route).toBe('iv');
+      expect(p.doseCount).toBeNull();
+    });
+
+    it('regression: "take iv tablets daily" still resolves "iv" as the roman-numeral dose count, with no route', () => {
+      const p = parseSig('take iv tablets daily');
+      expect(p.doseCount).toBe(4);
+      expect(p.route).toBeNull();
+    });
+
+    it("regression: multiple time-of-day tokens are still both legitimately consumed, not flagged residual (extractTimeOfDay collects a set by design)", () => {
+      const p = parseSig('1 tab po qam and at lunch');
+      expect(p.timeOfDay).toEqual(['lunch', 'morning']);
+      expect(p.residualTokens).not.toContain('qam');
+      expect(p.residualTokens).not.toContain('lunch');
+    });
+  });
+
+  // Double-checked per the coordinator's explicit scope call: when BOTH
+  // sides state the identical internal contradiction (here, "bid ...
+  // tid" on both sides, just worded differently so the verbatim fast
+  // path doesn't intercept it), the residual guard only flags ASYMMETRIC
+  // leftovers by design — a SYMMETRIC one (same residual token on both
+  // sides) still reaches GREEN. Recognized as a real, narrower edge case
+  // than the mandatory one-sided fix above; deciding whether a
+  // same-both-sides internal contradiction should itself downgrade the
+  // verdict was judged likely to balloon scope (it needs a notion of
+  // "this residual token conflicts with an already-extracted value in
+  // its OWN side," not just "is it asymmetric between sides") and is
+  // deliberately left as documented, not-yet-handled behavior rather
+  // than a silent regression.
+  it('documented limitation (left as-is per explicit scope decision): the SAME internal contradiction worded identically on both sides ("bid...tid") still compares GREEN — the residual guard catches asymmetric leftovers only, not a same-side self-contradiction mirrored on both sides', () => {
+    const r = compareSigs('take 1 tab po bid tid', 'Take 1 Tablet By Mouth BID TID');
+    expect(r.status).toBe('green');
+  });
+});
