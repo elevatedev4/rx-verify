@@ -28,15 +28,27 @@ public static class IntegratedVisibilityGate
     }
 
     /// <summary>
-    /// The control box stays visible any time PioneerRx is attached and
-    /// foreground, REGARDLESS of maximized state — when not maximized it
-    /// switches to the "maximize to use integrated view" note with most
-    /// controls disabled (see ControlBoxWindow.SetMaximizedGuardState)
-    /// rather than disappearing entirely, since the pharmacist still
-    /// needs the display-mode toggle to switch back to Separate.
+    /// OWNER FEEDBACK (round 2, item 1 — "leave it anchored in that top
+    /// right corner space, even when it's not actively looking at a
+    /// prescription"): the control box stays visible any time PioneerRx
+    /// is the foreground application, REGARDLESS of maximized state (when
+    /// not maximized it switches to the "maximize to use integrated view"
+    /// note instead — see ControlBoxWindow.SetMaximizedGuardState) and
+    /// REGARDLESS of whether a specific Pre-Check/Edit/New-Rx screen is
+    /// open at all. Only the verdict BOXES layer (ShouldShowBoxes below)
+    /// stays gated to an actual attached Rx screen with verified content —
+    /// it needs real field rects to draw over, which only exist while a
+    /// specific Rx is open. <paramref name="isPioneerForegroundApp"/> is
+    /// the BROADER "is PioneerRx the app the pharmacist is currently
+    /// looking at" signal (matched by owning PROCESS, not window title —
+    /// see IntegratedOverlayCoordinator.TryGetForegroundPioneerRxWindow),
+    /// deliberately looser than the narrow per-screen "isAttached" used
+    /// for ShouldShowBoxes, so the control box stays anchored while the
+    /// pharmacist is on PioneerRx's queue/search/dashboard between
+    /// prescriptions, not just while actively editing one.
     /// </summary>
-    public static bool ShouldShowControlBox(bool isAttached, bool isForeground)
+    public static bool ShouldShowControlBox(bool isPioneerForegroundApp)
     {
-        return isAttached && isForeground;
+        return isPioneerForegroundApp;
     }
 }

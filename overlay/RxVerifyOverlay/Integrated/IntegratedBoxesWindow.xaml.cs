@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -85,21 +86,39 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// IntegratedOverlayCoordinator), so DpiRectConverter's math is
     /// always relative to whichever monitor PioneerRx (and this window)
     /// is actually on right now.
+    ///
+    /// READABILITY (owner feedback, round 2 item 2): after converting to
+    /// DIPs, every box is padded outward (BoxLayoutAdjuster.ApplyPadding)
+    /// so the border doesn't hug the text, then vertically-adjacent boxes
+    /// have their facing edges snapped flush
+    /// (BoxLayoutAdjuster.SnapFlushAdjacentEdges) so stacked fields (e.g.
+    /// Patient Name/DOB/Address) share one boundary line instead of a
+    /// sliver of background between them. Both are pure DIP-space
+    /// operations, applied in that order, AFTER DPI conversion so their
+    /// thresholds are in DIPs regardless of monitor scaling — see
+    /// BoxLayoutAdjuster's own tests for the geometry itself.
     /// </summary>
     public void SetBoxes(IReadOnlyList<(System.Drawing.Rectangle PhysicalRect, bool IsGreen)> boxes, System.Drawing.Point windowOriginPhysical, double dpiScaleX, double dpiScaleY)
     {
         BoxCanvas.Children.Clear();
 
-        foreach (var box in boxes)
+        var dipRects = boxes
+            .Select(box => DpiRectConverter.ToDipRect(box.PhysicalRect, windowOriginPhysical, dpiScaleX, dpiScaleY))
+            .ToList();
+        var padded = BoxLayoutAdjuster.ApplyPadding(dipRects);
+        var adjusted = BoxLayoutAdjuster.SnapFlushAdjacentEdges(padded);
+
+        for (var i = 0; i < boxes.Count; i++)
         {
-            var dip = DpiRectConverter.ToDipRect(box.PhysicalRect, windowOriginPhysical, dpiScaleX, dpiScaleY);
+            var dip = adjusted[i];
+            var isGreen = boxes[i].IsGreen;
 
             var border = new Border
             {
-                BorderBrush = box.IsGreen ? GreenBrush : RedBrush,
+                BorderBrush = isGreen ? GreenBrush : RedBrush,
                 BorderThickness = new Thickness(BoxStrokeThickness),
                 CornerRadius = new CornerRadius(BoxCornerRadius),
-                Background = box.IsGreen ? GreenFillBrush : RedFillBrush,
+                Background = isGreen ? GreenFillBrush : RedFillBrush,
                 Width = Math.Max(0, dip.Width),
                 Height = Math.Max(0, dip.Height),
                 IsHitTestVisible = false

@@ -55,20 +55,30 @@ public class IntegratedVisibilityGateTests
     }
 
     [Fact]
-    public void ControlBoxShowsWhenAttachedAndForegroundRegardlessOfMaximizedState()
+    public void ControlBoxShowsWhenPioneerIsTheForegroundApp()
     {
-        Assert.True(IntegratedVisibilityGate.ShouldShowControlBox(isAttached: true, isForeground: true));
+        Assert.True(IntegratedVisibilityGate.ShouldShowControlBox(isPioneerForegroundApp: true));
     }
 
     [Fact]
-    public void ControlBoxHidesWhenNotAttached()
+    public void ControlBoxHidesWhenPioneerIsNotTheForegroundApp()
     {
-        Assert.False(IntegratedVisibilityGate.ShouldShowControlBox(isAttached: false, isForeground: true));
+        Assert.False(IntegratedVisibilityGate.ShouldShowControlBox(isPioneerForegroundApp: false));
     }
 
     [Fact]
-    public void ControlBoxHidesWhenNotForeground()
+    public void ControlBoxVisibilityIsIndependentOfBoxesVisibility()
     {
-        Assert.False(IntegratedVisibilityGate.ShouldShowControlBox(isAttached: true, isForeground: false));
+        // OWNER FEEDBACK (round 2, item 1): the control box must stay
+        // anchored even when no specific Rx is attached/verifiable — only
+        // ShouldShowBoxes is gated by that. Confirms the two functions
+        // genuinely disagree in this scenario rather than one silently
+        // mirroring the other.
+        var controlBoxShown = IntegratedVisibilityGate.ShouldShowControlBox(isPioneerForegroundApp: true);
+        var boxesShown = IntegratedVisibilityGate.ShouldShowBoxes(
+            isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: false);
+
+        Assert.True(controlBoxShown);
+        Assert.False(boxesShown);
     }
 }
