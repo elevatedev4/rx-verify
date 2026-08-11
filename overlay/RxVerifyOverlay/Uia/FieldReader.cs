@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using FlaUI.Core.AutomationElements;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Parsing;
@@ -191,6 +192,45 @@ public sealed class FieldReader
             // UiaTreeWalker.ReadCheckBoxByAutomationId).
             Daw = ReadCheckBox(FieldMap.EnteredDawId)
         };
+    }
+
+    /// <summary>
+    /// INTEGRATED MODE (Integrated/IntegratedOverlayCoordinator.cs): each
+    /// FieldOrder field's on-screen physical-pixel BoundingRectangle,
+    /// keyed the same as VerdictRowViewModel.FieldKey, so the integrated
+    /// boxes layer can draw a verdict outline directly over the entered
+    /// control. Uses FieldMap.EnteredAutomationIdByField — the SAME
+    /// AutomationId ReadEntered() reads that field's value from — and
+    /// ResolveElement, so a call right after ReadEntered() in the same
+    /// refresh pass is effectively free (the elements are already cached;
+    /// see ElementCache above). A field is simply absent from the result
+    /// (never a default/zero rect) if its element can't be found or its
+    /// BoundingRectangle can't be read — callers must treat "no entry" as
+    /// "don't draw a box for this field", never as (0,0,0,0).
+    /// </summary>
+    public IReadOnlyDictionary<string, Rectangle> ReadEnteredFieldRects()
+    {
+        var rects = new Dictionary<string, Rectangle>();
+
+        foreach (var (field, automationId) in FieldMap.EnteredAutomationIdByField)
+        {
+            var element = ResolveElement(automationId);
+            if (element is null) continue;
+
+            try
+            {
+                var rect = element.BoundingRectangle;
+                if (!rect.IsEmpty) rects[field] = rect;
+            }
+            catch
+            {
+                // Stale/disconnected element mid-redraw — skip this field
+                // rather than crash the whole box-layer refresh, same
+                // "never throw" contract as every other read in this class.
+            }
+        }
+
+        return rects;
     }
 
     /// <summary>

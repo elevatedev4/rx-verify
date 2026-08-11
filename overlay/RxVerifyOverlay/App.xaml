@@ -1,6 +1,24 @@
 <Application x:Class="RxVerifyOverlay.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             ShutdownMode="OnExplicitShutdown">
+    <!--
+        StartupUri removed (INTEGRATED DISPLAY MODE): StartupUri
+        unconditionally constructs AND Shows MainWindow before any code
+        gets to run. A pharmacist who quit last session in Integrated
+        mode must start this session with MainWindow HIDDEN (the
+        boxes/control-box layer is the visible UI instead) — see
+        App.xaml.cs OnStartup, which constructs MainWindow explicitly and
+        only calls Show() when settings say Separate.
+
+        ShutdownMode="OnExplicitShutdown" (instead of the default
+        OnLastWindowClose): the default would tie app lifetime to WPF's
+        own "last shown window closed" bookkeeping, which is exactly the
+        thing made ambiguous by MainWindow now sometimes starting
+        never-shown. Explicit shutdown is called from MainWindow's own
+        Closed handler instead (see MainWindow.xaml.cs) — closing
+        MainWindow (Separate mode, or Integrated mode's "Open full view"
+        window) still exits the whole app, same as before this feature.
+    -->
     <Application.Resources />
 </Application>

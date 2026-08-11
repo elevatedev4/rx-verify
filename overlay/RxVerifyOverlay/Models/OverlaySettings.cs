@@ -19,6 +19,20 @@ public enum VerificationMethod
 }
 
 /// <summary>
+/// Which visual presentation the overlay uses — see OverlaySettings.DisplayMode.
+/// Separate is the original/default behavior: a standalone always-on-top
+/// window (MainWindow) with its own verdict table, completely independent
+/// of PioneerRx's own window. Integrated draws per-field verdict boxes
+/// directly over the live PioneerRx window plus a small control panel in
+/// its ribbon — see Integrated/IntegratedOverlayCoordinator.cs.
+/// </summary>
+public enum DisplayMode
+{
+    Separate,
+    Integrated
+}
+
+/// <summary>
 /// The two paths every workstation setup needs, persisted locally so
 /// Will doesn't have to re-enter them every launch. Stored as plain JSON
 /// in %AppData%\RxVerifyOverlay\settings.json — contains ZERO patient
@@ -36,6 +50,19 @@ public sealed class OverlaySettings
     /// </summary>
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public VerificationMethod Method { get; set; } = VerificationMethod.Ocr;
+
+    /// <summary>
+    /// Which presentation to show — see DisplayMode doc. Separate (the
+    /// original standalone-window behavior) is the default so nothing
+    /// changes for an existing installation until the pharmacist opts in;
+    /// serialized as a readable string for the same reason as Method
+    /// above. Switchable at runtime from either MainWindow's own toggle or
+    /// the in-Pioneer control box's toggle (Integrated/ControlBoxWindow.cs)
+    /// — both write through IntegratedOverlayCoordinator.SetDisplayMode so
+    /// there is exactly one place that persists this and updates both UIs.
+    /// </summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public DisplayMode DisplayMode { get; set; } = DisplayMode.Separate;
 
     /// <summary>
     /// Full path to rx-verify's compiled CLI entrypoint, e.g.
