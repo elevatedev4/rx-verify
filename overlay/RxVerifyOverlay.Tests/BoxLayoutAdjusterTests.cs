@@ -26,6 +26,24 @@ public class BoxLayoutAdjusterPaddingTests
     }
 
     [Fact]
+    public void DefaultPaddingIsTheThinRound4Outset()
+    {
+        // Locks in the round-4 shrink (4px "breathing room" -> 2px thin
+        // outset, so the colored stroke overlaps Pioneer's own native
+        // field border instead of sitting outside it) as the actual
+        // SHIPPED default, not just something the constant's doc claims.
+        var rect = new DipRect(X: 100, Y: 200, Width: 50, Height: 20);
+
+        var padded = BoxLayoutAdjuster.ApplyPadding(rect);
+
+        Assert.Equal(2, BoxLayoutAdjuster.PaddingDip);
+        Assert.Equal(98, padded.X);
+        Assert.Equal(198, padded.Y);
+        Assert.Equal(54, padded.Width);
+        Assert.Equal(24, padded.Height);
+    }
+
+    [Fact]
     public void PaddingListOverloadAppliesToEveryRectIndependently()
     {
         var rects = new[]
@@ -127,12 +145,34 @@ public class BoxLayoutAdjusterFlushEdgeTests
     public void GapAboveThresholdLeavesBothRectsUntouched()
     {
         var top = new DipRect(X: 0, Y: 0, Width: 100, Height: 20);
-        var bottom = new DipRect(X: 0, Y: 100, Width: 100, Height: 20); // 80px gap, well over the ~14px threshold
+        var bottom = new DipRect(X: 0, Y: 100, Width: 100, Height: 20); // 80px gap, well over the ~7px round-4 threshold
 
         var adjusted = BoxLayoutAdjuster.SnapFlushAdjacentEdges(new[] { top, bottom });
 
         Assert.Equal(top, adjusted[0]);
         Assert.Equal(bottom, adjusted[1]);
+    }
+
+    [Fact]
+    public void DefaultFlushGapThresholdIsHalvedToMatchTheThinnerRound4Padding()
+    {
+        // Round 4 halved PaddingDip (4 -> 2), so a given pair now closes
+        // roughly half as much of its raw gap via padding alone — this
+        // threshold shrank in step (14 -> 7) so pairs that used to land
+        // just inside the old threshold don't now land just outside it
+        // and silently stop snapping.
+        Assert.Equal(7, BoxLayoutAdjuster.FlushGapThresholdDip);
+
+        var top = new DipRect(X: 0, Y: 0, Width: 100, Height: 20);
+        var justInside = new DipRect(X: 0, Y: 27, Width: 100, Height: 20);  // 7px gap -> snaps
+        var justOutside = new DipRect(X: 0, Y: 27.1, Width: 100, Height: 20); // just over 7px -> untouched
+
+        var snapped = BoxLayoutAdjuster.SnapFlushAdjacentEdges(new[] { top, justInside });
+        Assert.Equal(snapped[1].Y, snapped[0].Y + snapped[0].Height, precision: 10);
+
+        var untouched = BoxLayoutAdjuster.SnapFlushAdjacentEdges(new[] { top, justOutside });
+        Assert.Equal(top, untouched[0]);
+        Assert.Equal(justOutside, untouched[1]);
     }
 
     [Fact]

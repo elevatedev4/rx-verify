@@ -39,19 +39,21 @@ public sealed partial class IntegratedBoxesWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
-    private const double BoxStrokeThickness = 2.5;
+    // Round 4 item 4 ("boxes are colored border + fully transparent
+    // middle"): thickness trimmed from 2.5 to a cleaner 2 ("readable but
+    // not chunky"); no fill brushes at all anymore (see GreenBrush/
+    // RedBrush below and Background below in SetBoxes) — the old ~9%
+    // opacity tint brushes are gone entirely, not just set to a lower
+    // opacity.
+    private const double BoxStrokeThickness = 2;
     private const double BoxCornerRadius = 4;
 
     // Same green/red as MainWindow.xaml's GreenBrush/RedBrush — the boxes
     // layer deliberately never uses yellow (see BoxColorMapper: Yellow
     // collapses to red/"check it" here, per the owner's binary-glance
-    // spec). Fill is a faint (~9% opacity) tint, not solid, so the field
-    // text underneath stays readable — see item 1's "no fill (or <=10%
-    // opacity fill)".
+    // spec).
     private static readonly SolidColorBrush GreenBrush = new(Color.FromRgb(0x2E, 0x7D, 0x32));
     private static readonly SolidColorBrush RedBrush = new(Color.FromRgb(0xC6, 0x28, 0x28));
-    private static readonly SolidColorBrush GreenFillBrush = new(Color.FromArgb(0x18, 0x2E, 0x7D, 0x32));
-    private static readonly SolidColorBrush RedFillBrush = new(Color.FromArgb(0x18, 0xC6, 0x28, 0x28));
 
     private IntPtr _hwnd = IntPtr.Zero;
 
@@ -118,7 +120,14 @@ public sealed partial class IntegratedBoxesWindow : Window
                 BorderBrush = isGreen ? GreenBrush : RedBrush,
                 BorderThickness = new Thickness(BoxStrokeThickness),
                 CornerRadius = new CornerRadius(BoxCornerRadius),
-                Background = isGreen ? GreenFillBrush : RedFillBrush,
+                // Round 4 item 4: fully transparent middle, no fill at
+                // all — explicit Brushes.Transparent (not left null) so
+                // it's unambiguous this is intentional, not an oversight.
+                // Doesn't affect click-through: IsHitTestVisible=false
+                // below is what actually matters at the WPF level, and
+                // the window itself is WS_EX_TRANSPARENT regardless (see
+                // OnSourceInitialized) — neither depends on Background.
+                Background = Brushes.Transparent,
                 Width = Math.Max(0, dip.Width),
                 Height = Math.Max(0, dip.Height),
                 IsHitTestVisible = false

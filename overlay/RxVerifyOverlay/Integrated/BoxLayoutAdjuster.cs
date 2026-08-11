@@ -4,23 +4,33 @@ using System.Linq;
 namespace RxVerifyOverlay.Integrated;
 
 /// <summary>
-/// Pure geometry for the integrated boxes layer's visual polish (owner
-/// feedback, round 2 item 2 — "a little too busy looking and hard to
-/// read"): expands each field's box outward from the raw UIA rect
-/// (padding, so the border doesn't hug the text) and, for boxes stacked
-/// directly on top of each other, snaps the facing edges together so
-/// there's one shared boundary line instead of a sliver of background
-/// between them. No WPF/UIA dependency — plain DipRect in, DipRect out —
-/// so this is covered by fast xUnit tests, same pattern as
-/// DpiRectConverter/IntegratedVisibilityGate. IntegratedBoxesWindow (the
-/// only production caller) applies both AFTER DpiRectConverter, so the
-/// thresholds below are in DIPs, matching what the owner actually sees
-/// regardless of monitor scaling.
+/// Pure geometry for the integrated boxes layer's visual polish. Round 2
+/// (owner feedback: "a little too busy looking and hard to read") added
+/// outward expansion from the raw UIA rect plus flush-snapping of
+/// vertically-stacked boxes. Round 4 (owner feedback: boxes must EXACTLY
+/// surround the input area so Pioneer's own gray field border is hidden
+/// underneath the colored one) shrank that expansion from "breathing
+/// room" (4px) down to a thin OUTSET (2px) — just enough for the colored
+/// stroke to sit on/over the native border, per UIA's BoundingRectangle
+/// already being the control's OUTER edge including that border. No
+/// WPF/UIA dependency — plain DipRect in, DipRect out — so this is
+/// covered by fast xUnit tests, same pattern as DpiRectConverter/
+/// IntegratedVisibilityGate. IntegratedBoxesWindow (the only production
+/// caller) applies both AFTER DpiRectConverter, so the thresholds below
+/// are in DIPs, matching what the owner actually sees regardless of
+/// monitor scaling.
 /// </summary>
 public static class BoxLayoutAdjuster
 {
-    /// <summary>How far each box's border expands outward from the raw field rect, on every side.</summary>
-    public const double PaddingDip = 4;
+    /// <summary>
+    /// How far each box's border expands outward from the raw field rect,
+    /// on every side — round 4: shrunk from 4 to 2 so the colored stroke
+    /// overlaps Pioneer's own native border rather than sitting outside
+    /// it with visible gray showing through. An estimate (like the
+    /// original 4px), not measured against a live workstation — retune
+    /// here if the overlap still isn't tight enough in practice.
+    /// </summary>
+    public const double PaddingDip = 2;
 
     /// <summary>
     /// Two boxes are considered "vertically adjacent" (and get their
@@ -28,9 +38,16 @@ public static class BoxLayoutAdjuster
     /// the gap between them, AFTER padding, is at or below this. Also
     /// catches boxes that overlap slightly (a negative "gap") once padded —
     /// snapping still resolves those to a single shared boundary rather
-    /// than leaving them overlapping.
+    /// than leaving them overlapping. Round 4: halved from 14 to 7 in step
+    /// with PaddingDip halving from 4 to 2 — each box now closes roughly
+    /// half as much of a given raw gap via padding alone (4px total vs.
+    /// 8px total per pair), so the threshold that decides "close enough to
+    /// snap" needs to shrink proportionally too, or pairs that used to
+    /// land just inside the old threshold would now land just outside it
+    /// and stop snapping. Still an estimate pending a live workstation
+    /// check, same as PaddingDip.
     /// </summary>
-    public const double FlushGapThresholdDip = 14;
+    public const double FlushGapThresholdDip = 7;
 
     /// <summary>Expands every rect outward by <paramref name="padding"/> DIPs on each side — order-independent, one rect at a time.</summary>
     public static IReadOnlyList<DipRect> ApplyPadding(IReadOnlyList<DipRect> rects, double padding = PaddingDip)

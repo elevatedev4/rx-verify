@@ -36,9 +36,9 @@ public sealed class IntegratedOverlayCoordinator
     // maximized window) sits empty. Kept as named DIP constants (not
     // inline numbers) specifically so they're easy to retune against a
     // real workstation without hunting through positioning math.
-    private const double ControlBoxRightInsetDip = 450; // box's LEFT edge sits this far in from the window's RIGHT edge
+    private const double ControlBoxRightInsetDip = 510; // box's LEFT edge sits this far in from the window's RIGHT edge — round 4: bumped from 450 (420 + ~30px margin) to 510 (480 + ~30px margin) to keep pace with ControlBoxWidthDip's widening below, so the box's right edge doesn't run off the window's right edge
     private const double ControlBoxTopOffsetDip = 60;   // box's TOP edge sits this far down from the window's TOP edge
-    private const double ControlBoxWidthDip = 420;      // must match ControlBoxWindow.xaml's Width
+    private const double ControlBoxWidthDip = 480;      // must match ControlBoxWindow.xaml's Width — widened from 420 in round 4 to fit the new Refresh button + "Hide overlay" checkbox without crowding
     private const double ControlBoxHeightDip = 92;      // must match ControlBoxWindow.xaml's Height
 
     [DllImport("user32.dll")]
@@ -113,8 +113,21 @@ public sealed class IntegratedOverlayCoordinator
     /// </summary>
     private bool _fallbackSeparateWindowShown;
 
+    /// <summary>
+    /// ITEM 2: true while the pharmacist has hidden the verdict BOXES
+    /// layer via the control box's checkbox or the global `\` hotkey (the
+    /// control box itself stays up either way). Deliberately session-only
+    /// — an in-memory field, never written to OverlaySettings/settings.json
+    /// — so a pharmacist can never inherit a hidden overlay left over from
+    /// a previous shift; it always starts false on every app launch.
+    /// </summary>
+    private bool _boxesHiddenByToggle;
+
     /// <summary>Raised when the pharmacist changes the Method toggle FROM THE CONTROL BOX — MainWindow.xaml.cs handles this the same way as its own Source radio buttons (persist + refresh), then calls SyncToggles() so both toggles stay in lockstep.</summary>
     public event EventHandler<VerificationMethod>? MethodToggleRequested;
+
+    /// <summary>Item 1: raised when the control box's Refresh button is clicked — MainWindow.xaml.cs handles this identically to its own Refresh button (SafeRefreshAsync + SafeTickIntegratedOverlay).</summary>
+    public event EventHandler? RefreshRequested;
 
     /// <summary>Raised when the classic separate window (MainWindow) should become visible — either DisplayMode switched to Separate, or the control box's "Open full view" button was clicked (which does NOT change DisplayMode — see SetDisplayMode).</summary>
     public event EventHandler? ShowSeparateWindowRequested;
@@ -325,15 +338,43 @@ public sealed class IntegratedOverlayCoordinator
 
         UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
 
-        // BOXES: unchanged — still requires the NARROW Rx-screen attach,
-        // that specific window being foreground, maximized, and verified
-        // content. A pharmacist parked on PioneerRx's queue/search screen
+        // BOXES: still requires the NARROW Rx-screen attach, that specific
+        // window being foreground, maximized, and verified content. A
+        // pharmacist parked on PioneerRx's queue/search screen
         // (isRxScreenAttached false) never draws boxes, since there's no
         // specific Rx's fields to draw them over.
         var isRxScreenForeground = isRxScreenAttached && GetForegroundWindow() == window!.NativeWindowHandle;
         var isRxScreenMaximized = isRxScreenAttached && IsZoomed(window!.NativeWindowHandle);
         var hasVerifiableContent = isRxScreenAttached && !_viewModel.HasNonEscriptMessage && _viewModel.Categories.Any(c => c.HasData);
-        var showBoxes = IntegratedVisibilityGate.ShouldShowBoxes(isRxScreenAttached, isRxScreenForeground, isRxScreenMaximized, hasVerifiableContent);
+
+        // ADDENDUM item 6 (tab gate): best-effort proxy for "PioneerRx is
+        // actually on the Common tab right now" — no confirmed UIA
+        // AutomationId exists for that outer tab strip (Common/Patient
+        // Education/Interactions/Fill History/... — a DIFFERENT, outer
+        // tab control than FieldMap.CenterTabControlAutomationId's
+        // Dispense/Image/Escript/DUR-More strip, which lives INSIDE
+        // Common) to check directly without guessing at a selector this
+        // codebase has never validated against a live dump. If NONE of
+        // the entered fields resolved to an on-screen rect this tick,
+        // that's a reasonable signal the Common tab (where RxDetailsPanel
+        // actually lives) isn't the active one — hide rather than risk
+        // floating boxes over Patient Education/Interactions/etc.
+        var hasResolvableFieldRects = _viewModel.Categories.SelectMany(c => c.Rows).Any(r => r.ScreenRect.HasValue);
+
+        // ADDENDUM item 7 (priority — stale-box false-assurance hazard):
+        // compare the Rx PioneerRx is showing RIGHT NOW against the Rx the
+        // currently-displayed verdicts were actually computed for — see
+        // RxIdentityGate's doc. This is the SAME check
+        // HideBoxesIfRxIdentityChanged runs synchronously on
+        // TitleChangeWatcher's near-instant event (see that method); this
+        // copy is the ~250ms poll's safety net for whatever that
+        // event-driven path might miss.
+        var currentRxIdentity = isRxScreenAttached ? window!.RxNumber : null;
+        var isRxIdentityStale = RxIdentityGate.IsStale(currentRxIdentity, _viewModel.CurrentVerdictsRxIdentity);
+
+        var showBoxes = IntegratedVisibilityGate.ShouldShowBoxes(
+            isRxScreenAttached, isRxScreenForeground, isRxScreenMaximized, hasVerifiableContent,
+            hasResolvableFieldRects, _boxesHiddenByToggle) && !isRxIdentityStale;
 
         if (showBoxes)
         {
@@ -342,6 +383,45 @@ public sealed class IntegratedOverlayCoordinator
         else
         {
             HideBoxesIfShown();
+        }
+    }
+
+    /// <summary>
+    /// ADDENDUM item 7 (priority): called SYNCHRONOUSLY from
+    /// MainWindow.xaml.cs's TitleChangeWatcher callback — near-instant
+    /// (~50ms debounce), BEFORE the resulting SafeWatchAsync/RefreshAsync
+    /// has even started, let alone completed. Closes the gap between
+    /// "PioneerRx's title changed" and "the next ~250ms poll tick would
+    /// have caught it anyway": without this, a previous Rx's stale
+    /// green/red boxes stay floating over the NEW prescription's
+    /// (different) field positions for however long the refresh takes
+    /// (UIA reads + an engine subprocess round-trip — easily 50-300ms+),
+    /// which is exactly the "looks like it's already been checked" false-
+    /// assurance hazard the owner flagged as this round's top priority.
+    /// Only ever HIDES — never shows; TickCore's own regular gates are
+    /// what bring the boxes back once the new Rx's verdicts arrive.
+    /// Wrapped in try/catch for the same reason as Tick() (PioneerRxWindow.
+    /// TryAttach can rethrow on a bad shared UIA session) — a failure here
+    /// just means this ONE early-hide attempt is skipped; TickCore's own
+    /// RxIdentityGate check on the very next poll tick is the safety net.
+    /// </summary>
+    public void HideBoxesIfRxIdentityChanged()
+    {
+        if (_settings.DisplayMode != DisplayMode.Integrated) return;
+
+        try
+        {
+            using var window = PioneerRxWindow.TryAttach();
+            var currentRxIdentity = window?.RxNumber;
+
+            if (RxIdentityGate.IsStale(currentRxIdentity, _viewModel.CurrentVerdictsRxIdentity))
+            {
+                HideBoxesIfShown();
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort only — see method doc.
         }
     }
 
@@ -453,6 +533,17 @@ public sealed class IntegratedOverlayCoordinator
         _controlBox.CopyLogsRequested += (_, button) => CopyLogsRequested?.Invoke(this, button);
         _controlBox.CopyLogsNoHipaaRequested += (_, button) => CopyLogsNoHipaaRequested?.Invoke(this, button);
         _controlBox.OpenSeparateWindowRequested += (_, _) => ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
+        _controlBox.RefreshRequested += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
+        _controlBox.HideOverlayToggleRequested += (_, hidden) =>
+        {
+            // ITEM 2: update the session-only flag and re-evaluate
+            // visibility IMMEDIATELY (don't wait for the next ~250ms
+            // tick) — matches the existing pattern for every other
+            // toggle in this app (Method/DisplayMode both trigger an
+            // instant refresh/Tick rather than waiting for the poll).
+            _boxesHiddenByToggle = hidden;
+            Tick();
+        };
         SyncToggles();
         return _controlBox;
     }
@@ -505,6 +596,10 @@ public sealed class IntegratedOverlayCoordinator
         var boxes = _viewModel.Categories
             .SelectMany(c => c.Rows)
             .Where(r => r.ScreenRect.HasValue)
+            // ITEM 5: DAW gets no box at all unless it's wrong or actually
+            // "in play" for this Rx — see DawBoxRule's doc. Every other
+            // field is unaffected.
+            .Where(r => r.FieldKey != "daw" || DawBoxRule.ShouldDrawBox(r.Status, r.EnteredValue, r.SourceValue))
             .Select(r => (r.ScreenRect!.Value, BoxColorMapper.IsGreenBox(r.Status)))
             .ToList();
 

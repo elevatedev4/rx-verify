@@ -373,6 +373,32 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     private string? _lastRxWindowTitle;
 
     /// <summary>
+    /// ADDENDUM item 7 (round 4 — stale-box false-assurance hazard): the
+    /// Rx identity (PioneerRxWindow.RxNumber — the parsed value, not the
+    /// full title, so it compares apples-to-apples with a fresh attach
+    /// elsewhere) captured at ATTACH time for whichever RefreshAsync call
+    /// is currently in flight — see _pendingRxIdentity below, which this
+    /// gets copied from once PopulateRows actually applies that refresh's
+    /// rows. Null before the first successful populate, or after
+    /// ClearCategories.
+    /// </summary>
+    public string? CurrentVerdictsRxIdentity { get; private set; }
+
+    /// <summary>
+    /// The Rx identity captured at the TOP of RefreshAsync (right after a
+    /// successful attach), copied into CurrentVerdictsRxIdentity by
+    /// PopulateRows — kept as a separate field (not written directly to
+    /// CurrentVerdictsRxIdentity at attach time) so
+    /// CurrentVerdictsRxIdentity only ever changes at the SAME moment the
+    /// displayed rows themselves change, never a moment earlier while the
+    /// OLD rows are still on screen (that earlier-update race is exactly
+    /// what let Integrated/RxIdentityGate see a false "already matches,
+    /// nothing stale" during the gap between attach and the new rows
+    /// actually rendering).
+    /// </summary>
+    private string? _pendingRxIdentity;
+
+    /// <summary>
     /// The structured OCR word+bounding-box list from the most recent OCR
     /// source read (see RefreshFromOcrAsync) — same data OcrLogger writes
     /// to the %TEMP% log file, kept here too so BuildCurrentLogBlob can
@@ -479,6 +505,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         timing.AttachCacheHit = window.WasAttachCacheHit;
 
         try { _lastRxWindowTitle = window.WindowElement.Name; } catch { _lastRxWindowTitle = null; }
+
+        // ADDENDUM item 7: captured here (attach time), applied to
+        // CurrentVerdictsRxIdentity only once PopulateRows actually
+        // renders this refresh's rows — see _pendingRxIdentity's doc for
+        // why those two moments are deliberately kept separate.
+        _pendingRxIdentity = window.RxNumber;
 
         FieldReader reader;
         PrescriptionRecord entered;
@@ -767,6 +799,20 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         var changed = previous is null || !previous.Value.Present || previous.Value.RxNumber != signature.RxNumber;
         if (!changed) return;
 
+        // ADDENDUM item 7 (round 4 — same staleness hazard the integrated
+        // boxes layer fixes via RxIdentityGate, applied here trivially:
+        // GetScreenSignature's own RxNumber comparison above already IS
+        // the identity check, no separate tracking needed): a different
+        // Rx just appeared. Clear the displayed rows IMMEDIATELY, before
+        // the (relatively slow) UIA+engine refresh below produces fresh
+        // ones, so the pharmacist is never shown the PREVIOUS Rx's green/
+        // red verdicts superimposed on a new prescription's screen, even
+        // briefly. Harmless when the previous branch already cleared
+        // (screen just appeared from nothing) — only meaningfully new
+        // behavior for the "still present, but a DIFFERENT Rx" case.
+        ClearCategories();
+        UpdateSummary(null);
+
         await RefreshAsync();
     }
 
@@ -780,6 +826,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private void PopulateRows(VerifyResult result)
     {
+        // ADDENDUM item 7: the displayed rows are about to change to
+        // whatever this refresh found — CurrentVerdictsRxIdentity moves to
+        // match at this EXACT moment, not any earlier (see
+        // _pendingRxIdentity's doc).
+        CurrentVerdictsRxIdentity = _pendingRxIdentity;
+
         foreach (var category in Categories) category.Rows.Clear();
 
         foreach (var field in FieldOrder.Fields)
@@ -968,6 +1020,16 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         LastOcrRawText = "";
         _lastTiming = null;
         NonEscriptMessage = ""; // NotAnEscript's own branch (RefreshFromOcrAsync) re-sets this AFTER calling ClearCategories — every other caller wants it cleared
+
+        // ADDENDUM item 7: no verdicts currently displayed for ANY Rx —
+        // see CurrentVerdictsRxIdentity's doc. _pendingRxIdentity too, so
+        // a stale attach-time value can't leak into some LATER refresh's
+        // PopulateRows if this ClearCategories call happens to run
+        // between that later refresh's attach and its own PopulateRows
+        // (shouldn't happen given the current call graph, but costs
+        // nothing to keep both in lockstep defensively).
+        CurrentVerdictsRxIdentity = null;
+        _pendingRxIdentity = null;
     }
 
     /// <summary>Replaces Notes' contents and recomputes HasNotes — shared by RefreshAsync's ReadSource call and every ClearCategories early-return.</summary>

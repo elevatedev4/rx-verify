@@ -18,14 +18,16 @@ public class IntegratedVisibilityGateTests
     public void BoxesShowOnlyWhenEveryConditionIsTrue()
     {
         Assert.True(IntegratedVisibilityGate.ShouldShowBoxes(
-            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true));
+            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false));
     }
 
     [Fact]
     public void BoxesHideWhenNotAttached()
     {
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
-            isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: true));
+            isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false));
     }
 
     [Fact]
@@ -34,7 +36,8 @@ public class IntegratedVisibilityGateTests
         // The pharmacist switched to a different app — boxes must not
         // float over whatever that app is.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
-            isAttached: true, isForeground: false, isMaximized: true, hasVerifiableContent: true));
+            isAttached: true, isForeground: false, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false));
     }
 
     [Fact]
@@ -42,7 +45,8 @@ public class IntegratedVisibilityGateTests
     {
         // MAXIMIZED-ONLY per the owner's spec.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
-            isAttached: true, isForeground: true, isMaximized: false, hasVerifiableContent: true));
+            isAttached: true, isForeground: true, isMaximized: false, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false));
     }
 
     [Fact]
@@ -51,7 +55,29 @@ public class IntegratedVisibilityGateTests
         // Mirrors the existing non-escript/no-data blank-state signal —
         // no data to draw boxes for.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
-            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: false));
+            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: false,
+            hasResolvableFieldRects: true, isHiddenByToggle: false));
+    }
+
+    [Fact]
+    public void BoxesHideWhenFieldRectsArentResolvable()
+    {
+        // Round 4 addendum item 6 — best-effort proxy for "not on the
+        // Common tab": the entered fields couldn't be resolved to
+        // on-screen rects this tick, even though everything else checks
+        // out.
+        Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
+            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: false, isHiddenByToggle: false));
+    }
+
+    [Fact]
+    public void BoxesHideWhenPharmacistHidThemViaToggle()
+    {
+        // Round 4 item 2 — the control box's "hide overlay" checkbox / `\` hotkey.
+        Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
+            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: true));
     }
 
     [Fact]
@@ -76,7 +102,8 @@ public class IntegratedVisibilityGateTests
         // mirroring the other.
         var controlBoxShown = IntegratedVisibilityGate.ShouldShowControlBox(isPioneerForegroundApp: true);
         var boxesShown = IntegratedVisibilityGate.ShouldShowBoxes(
-            isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: false);
+            isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: false,
+            hasResolvableFieldRects: true, isHiddenByToggle: false);
 
         Assert.True(controlBoxShown);
         Assert.False(boxesShown);
