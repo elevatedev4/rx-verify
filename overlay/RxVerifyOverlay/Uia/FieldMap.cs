@@ -29,7 +29,16 @@ public static class FieldMap
         "New Rx"
     };
 
-    public const string TargetProcessName = "PioneerRx";
+    /// <summary>
+    /// Executable process name(s) PioneerRx runs under — used by
+    /// IntegratedOverlayCoordinator's foreground/presence checks (not by
+    /// TryAttach, which matches by window title instead). Owner confirmed
+    /// via Task Manager on 2026-08-11 that the real executable is
+    /// PioneerPharmacy.exe, not PioneerRx.exe as originally assumed — kept
+    /// "PioneerRx" as a second entry in case a different install/version
+    /// runs under that name instead.
+    /// </summary>
+    public static readonly string[] TargetProcessNames = { "PioneerPharmacy", "PioneerRx" };
 
     // ------------------------------------------------------------------
     // ENTERED (LEFT RxDetailsPanel) — found by AutomationId ANYWHERE

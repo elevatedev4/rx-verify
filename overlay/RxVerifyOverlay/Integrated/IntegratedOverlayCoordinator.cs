@@ -351,7 +351,7 @@ public sealed class IntegratedOverlayCoordinator
     /// PioneerRxWindow.TryAttach (which only matches a Pre-Check/Edit/
     /// New-Rx TITLED window, needed for field-reading), this matches the
     /// CURRENT FOREGROUND window purely by its owning PROCESS name
-    /// (FieldMap.TargetProcessName — declared but previously unused,
+    /// (FieldMap.TargetProcessNames — declared but previously unused,
     /// anticipating exactly this need), regardless of which PioneerRx
     /// screen it's showing. Returns the foreground window's raw physical
     /// bounds (plain Win32 GetWindowRect — no UIA needed, since only
@@ -372,7 +372,7 @@ public sealed class IntegratedOverlayCoordinator
         {
             GetWindowThreadProcessId(hwnd, out var processId);
             using var process = Process.GetProcessById((int)processId);
-            if (!string.Equals(process.ProcessName, FieldMap.TargetProcessName, StringComparison.OrdinalIgnoreCase))
+            if (!FieldMap.TargetProcessNames.Any(name => string.Equals(process.ProcessName, name, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }
@@ -390,41 +390,49 @@ public sealed class IntegratedOverlayCoordinator
 
     /// <summary>
     /// ROUND 3 FIX: does a PioneerRx process exist ANYWHERE on the
-    /// system, foreground or not, minimized or not — a single process-
-    /// name lookup (no window enumeration at all), only ever called from
-    /// TickCore when both the narrow (isRxScreenAttached) and broad
-    /// (hasForegroundPioneerWindow) checks have already come back false,
-    /// so the common case (Pioneer already known to be around) never
-    /// pays for this. This is the signal PioneerPresence.Exists combines
-    /// with those other two to feed FallbackSeparateWindowRule — see that
-    /// class's doc for why the fallback needs THIS question, not "is
-    /// Pioneer in front right now". Every returned Process handle is
-    /// disposed; any failure (WMI hiccup, etc.) is treated as "doesn't
-    /// exist" rather than thrown.
+    /// system, foreground or not, minimized or not — a process-name
+    /// lookup per FieldMap.TargetProcessNames (no window enumeration at
+    /// all), only ever called from TickCore when both the narrow
+    /// (isRxScreenAttached) and broad (hasForegroundPioneerWindow) checks
+    /// have already come back false, so the common case (Pioneer already
+    /// known to be around) never pays for this. This is the signal
+    /// PioneerPresence.Exists combines with those other two to feed
+    /// FallbackSeparateWindowRule — see that class's doc for why the
+    /// fallback needs THIS question, not "is Pioneer in front right now".
+    /// Checks each candidate name in order and stops at the first hit;
+    /// every returned Process handle (for every name looked up, whether
+    /// it matched or not) is disposed; any failure for a given name (WMI
+    /// hiccup, etc.) is treated as "no match for that name" and moves on
+    /// to the next, rather than aborting the whole check.
     /// </summary>
     private static bool DoesPioneerRxProcessExist()
     {
-        Process[] processes;
-        try
+        foreach (var processName in FieldMap.TargetProcessNames)
         {
-            processes = Process.GetProcessesByName(FieldMap.TargetProcessName);
-        }
-        catch
-        {
-            return false;
-        }
-
-        try
-        {
-            return processes.Length > 0;
-        }
-        finally
-        {
-            foreach (var process in processes)
+            Process[] processes;
+            try
             {
-                process.Dispose();
+                processes = Process.GetProcessesByName(processName);
+            }
+            catch
+            {
+                continue;
+            }
+
+            try
+            {
+                if (processes.Length > 0) return true;
+            }
+            finally
+            {
+                foreach (var process in processes)
+                {
+                    process.Dispose();
+                }
             }
         }
+
+        return false;
     }
 
     /// <summary>Applies a FallbackSeparateWindowRule.Decide() result: updates the flag, then raises at most one of Show/HideSeparateWindowRequested per the decision.</summary>
