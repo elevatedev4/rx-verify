@@ -15,16 +15,22 @@ public static class IntegratedVisibilityGate
     /// currently attached, PioneerRx isn't the OS foreground window
     /// (otherwise boxes would float over whatever app the pharmacist
     /// switched to), PioneerRx isn't maximized (integrated mode is
-    /// MAXIMIZED-ONLY per the owner's spec), or there's nothing verified
-    /// yet to draw boxes for (no category has data yet, or the current
-    /// screen isn't a parseable escript — mirrors OverlayViewModel's
-    /// existing non-escript blank-state signal, see
-    /// IntegratedOverlayCoordinator for how hasVerifiableContent is
-    /// computed from OverlayViewModel.Categories/HasNonEscriptMessage).
+    /// MAXIMIZED-ONLY per the owner's spec), there's nothing verified yet
+    /// to draw boxes for (no category has data yet, or the current screen
+    /// isn't a parseable escript — mirrors OverlayViewModel's existing
+    /// non-escript blank-state signal, see IntegratedOverlayCoordinator
+    /// for how hasVerifiableContent is computed from OverlayViewModel.
+    /// Categories/HasNonEscriptMessage), the entered fields aren't
+    /// currently resolvable to on-screen rects (round 4 addendum item 6 —
+    /// best-effort proxy for "PioneerRx isn't on the Common tab right
+    /// now": no confirmed UIA AutomationId exists for that outer tab strip
+    /// to check directly, see IntegratedOverlayCoordinator's doc), or the
+    /// pharmacist has hidden the overlay themselves (round 4 item 2 — the
+    /// control box's checkbox / the global `\` hotkey).
     /// </summary>
-    public static bool ShouldShowBoxes(bool isAttached, bool isForeground, bool isMaximized, bool hasVerifiableContent)
+    public static bool ShouldShowBoxes(bool isAttached, bool isForeground, bool isMaximized, bool hasVerifiableContent, bool hasResolvableFieldRects, bool isHiddenByToggle)
     {
-        return isAttached && isForeground && isMaximized && hasVerifiableContent;
+        return isAttached && isForeground && isMaximized && hasVerifiableContent && hasResolvableFieldRects && !isHiddenByToggle;
     }
 
     /// <summary>

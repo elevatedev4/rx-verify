@@ -201,6 +201,22 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         _integratedOverlay.CopyLogsRequested += async (_, button) => await CopyLogsToButtonAsync(button, redactPatient: false);
         _integratedOverlay.CopyLogsNoHipaaRequested += async (_, button) => await CopyLogsToButtonAsync(button, redactPatient: true);
         _integratedOverlay.ToggleStateChanged += (_, _) => SyncOwnToggles();
+        // Item 1: control box's Refresh button — identical handling to
+        // this window's own OnRefreshClick.
+        _integratedOverlay.RefreshRequested += async (_, _) =>
+        {
+            await SafeRefreshAsync();
+            SafeTickIntegratedOverlay();
+        };
+        // Item 8: the control box's corner X button — routes through THIS
+        // window's own existing Close()/Closed cleanup path (engine/
+        // watcher dispose, _integratedOverlay.Shutdown(),
+        // Application.Current.Shutdown() — see the Closed handler below)
+        // rather than duplicating any of that here. Works the same way
+        // whether MainWindow is currently visible or hidden (Integrated
+        // mode) — Window.Close() doesn't require Show() to have been
+        // called first, and still raises Closed either way.
+        _integratedOverlay.CloseApplicationRequested += (_, _) => Close();
 
         // VerifyOCR capture-region override — see Models/OverlaySettings.cs
         // and MainWindow.xaml's "OCR capture region" section.
@@ -256,7 +272,18 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // already keeps the overlay fully correct — see
         // TitleChangeWatcher's class doc for why this can never be
         // treated as an error condition.
-        _titleChangeWatcher = new TitleChangeWatcher(() => _ = SafeWatchAsync());
+        // ADDENDUM item 7 (priority): HideBoxesIfRxIdentityChanged runs
+        // SYNCHRONOUSLY, on this same Dispatcher-thread callback, BEFORE
+        // the fire-and-forget SafeWatchAsync() call even starts running —
+        // see that method's doc for why closing this gap matters (a
+        // previous Rx's stale boxes must never linger over a NEW
+        // prescription's fields for however long the resulting refresh
+        // takes).
+        _titleChangeWatcher = new TitleChangeWatcher(() =>
+        {
+            _integratedOverlay.HideBoxesIfRxIdentityChanged();
+            _ = SafeWatchAsync();
+        });
         _titleChangeWatcher.TryStart();
 
         // CAPTURE-EXCLUSION (latency fix, branch brief item 4): applied
