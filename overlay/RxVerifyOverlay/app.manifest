@@ -11,9 +11,16 @@
   DPI aware, which is what lets VisualTreeHelper.GetDpi/DPI-changed
   handling and this app's own SetWindowPos-in-physical-pixels positioning
   (Integrated/NativeWindowPositioning.cs) behave correctly on every
-  monitor, not just the primary one. This is the standard manifest
-  snippet Microsoft documents for exactly this scenario; nothing here is
-  specific to this app beyond the assemblyIdentity name.
+  monitor, not just the primary one.
+
+  STRUCTURE WARNING: the SxS loader validates this file strictly at
+  process start — a wrong namespace or duplicated windowsSettings block
+  makes the exe fail to launch with "side-by-side configuration is
+  incorrect" (happened in prod 2026-08-11: dpiAwareness was declared in
+  the nonexistent SMI/2017 namespace). Keep this exactly in the form
+  Microsoft documents: ONE windowsSettings element, namespaces on the
+  child elements, dpiAware = SMI/2005, dpiAwareness = SMI/2016.
+  https://learn.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
   <assemblyIdentity version="1.0.0.0" name="RxVerifyOverlay.app" />
@@ -24,11 +31,9 @@
     </application>
   </compatibility>
   <asmv3:application>
-    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
-      <dpiAware>true/pm</dpiAware>
-    </asmv3:windowsSettings>
-    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2017/WindowsSettings">
-      <dpiAwareness>PerMonitorV2</dpiAwareness>
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
     </asmv3:windowsSettings>
   </asmv3:application>
 </assembly>
