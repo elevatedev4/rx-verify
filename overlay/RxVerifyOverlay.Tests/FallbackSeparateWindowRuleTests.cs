@@ -85,4 +85,61 @@ public class FallbackSeparateWindowRuleTests
         Assert.False(decision.RaiseHide);
         Assert.False(decision.RaiseShow);
     }
+
+    // ------------------------------------------------------------------
+    // ROUND 3 FIX: the Decide() function itself is UNCHANGED — round 2
+    // wired the WRONG signal into its isPioneerAttached parameter
+    // (hasForegroundPioneerWindow, "is Pioneer in front right now"
+    // instead of "does Pioneer exist at all" — see PioneerPresence's
+    // doc). These tests exercise the SAME pure function under its
+    // CORRECT semantics (isPioneerAttached now means "pioneerExists",
+    // fed by PioneerPresence.Exists in IntegratedOverlayCoordinator),
+    // covering the exact scenarios the owner's launch report and the
+    // round-3 diagnosis called out.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void LaunchWithPioneerRunningButNotForegroundDoesNotShowTheFallback()
+    {
+        // At launch, whatever process started the app (PowerShell, a
+        // shortcut, Explorer) is the OS foreground window, even though
+        // PioneerRx is already open in the background. pioneerExists must
+        // still be true here (PioneerPresence.Exists finds it via the
+        // process-name check even with hasForegroundPioneerWindow false),
+        // so this must NOT show the fallback separate window — that was
+        // exactly the "still the old regular window" bug.
+        var decision = FallbackSeparateWindowRule.Decide(
+            isIntegratedMode: true, isPioneerAttached: true /* pioneerExists */, wasFallbackShown: false);
+
+        Assert.False(decision.RaiseShow);
+        Assert.False(decision.NewFallbackShown);
+    }
+
+    [Fact]
+    public void AltTabAwayFromPioneerDoesNotShowTheFallback()
+    {
+        // Same pioneerExists=true input as the launch case above — an
+        // alt-tab away from Pioneer to check something else is
+        // indistinguishable from "not foreground yet at launch" as far as
+        // this rule is concerned, and must be equally quiet: no fallback
+        // pop just because Pioneer briefly isn't in front.
+        var decision = FallbackSeparateWindowRule.Decide(
+            isIntegratedMode: true, isPioneerAttached: true /* pioneerExists */, wasFallbackShown: false);
+
+        Assert.False(decision.RaiseShow);
+        Assert.False(decision.NewFallbackShown);
+    }
+
+    [Fact]
+    public void PioneerGenuinelyAbsentShowsTheFallback()
+    {
+        // PioneerRx isn't running anywhere on the system at all — the
+        // ORIGINAL round-1 escape hatch this rule exists for must still
+        // fire so the app is never left completely invisible.
+        var decision = FallbackSeparateWindowRule.Decide(
+            isIntegratedMode: true, isPioneerAttached: false /* pioneerExists */, wasFallbackShown: false);
+
+        Assert.True(decision.RaiseShow);
+        Assert.True(decision.NewFallbackShown);
+    }
 }
