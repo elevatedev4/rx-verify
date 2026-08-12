@@ -155,6 +155,51 @@ public static class FieldMap
     /// <summary>Prefix (not exact match — see CenterTabControlAutomationId doc) for the Escript TabItem's Name.</summary>
     public const string EscriptTabNamePrefix = "Escript";
 
+    // ------------------------------------------------------------------
+    // OUTER TAB STRIP (Common / Patient Education / Interactions / Fill
+    // History / ...) — a DIFFERENT, OUTER Tab control than
+    // CenterTabControlAutomationId's Dispense/Image/Escript/DUR-More
+    // strip (which lives INSIDE Common). No confirmed AutomationId exists
+    // for the outer Tab control itself, but two of its children ARE
+    // dump-confirmed (same nesting in both real dumps, under
+    // RxDetailsPanel's sibling cntCommonTab/uxRxCommonControl) — used by
+    // Uia/CommonTabGate.cs to detect whether Common is the active outer
+    // tab right now (owner report: verdict boxes must hide when the
+    // pharmacist switches off Common, reappear when they switch back).
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Prefix (not exact match — see EscriptTabNamePrefix's bracketed-
+    /// index caveat above) for the OUTER Common TabItem's Name.
+    /// PRIMARY signal in Uia/CommonTabGate.cs: found anywhere under the
+    /// window (no fixed ancestor path — the outer Tab control itself has
+    /// no confirmed AutomationId to search by), its SelectionItemPattern.
+    /// IsSelected says definitively whether Common is the active outer
+    /// tab. Read-only — CommonTabGate must never call Select() on this.
+    /// </summary>
+    public const string OuterCommonTabNamePrefix = "Common";
+
+    /// <summary>
+    /// The Common tab's own content pane. Confirmed in both real dumps
+    /// (same AutomationId, same nesting, under RxDetailsPanel's sibling
+    /// cntCommonTab/uxRxCommonControl). SECONDARY signal in
+    /// Uia/CommonTabGate.cs, used only when the outer Common TabItem
+    /// (OuterCommonTabNamePrefix) can't be located at all — search for it
+    /// anywhere under the window, do NOT hardcode the ancestor chain
+    /// (same guidance as EscriptTreeAutomationId above).
+    /// </summary>
+    public const string OuterCommonPaneAutomationId = "cntCommonTab";
+
+    /// <summary>
+    /// Sibling of OuterCommonPaneAutomationId, also confirmed in both
+    /// real dumps under the same nesting. Not currently searched for
+    /// directly by CommonTabGate (cntCommonTab alone is sufficient as the
+    /// pane-presence signal) — kept here as a documented, dump-confirmed
+    /// AutomationId in case a future gate needs a second corroborating
+    /// signal.
+    /// </summary>
+    public const string OuterCommonControlAutomationId = "uxRxCommonControl";
+
     public const string NodeBody = "Body";
     public const string NodeNewRx = "NewRx";
     public const string NodePatient = "Patient";

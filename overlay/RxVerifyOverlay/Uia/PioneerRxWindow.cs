@@ -261,11 +261,15 @@ public sealed class PioneerRxWindow : IDisposable
             // That would rely on undocumented COM disconnect-exception
             // behavior to ever self-heal rather than being invalidated
             // explicitly, so it's cleared alongside everything else.
+            // CommonTabGate's own per-attach-session cache (Uia/
+            // CommonTabGate.cs) holds the same kind of stale-session risk
+            // — cleared here for the identical reason.
             _sharedAutomation?.Dispose();
             _sharedAutomation = null;
             _cachedHandle = IntPtr.Zero;
             _cachedWindowElement = null;
             FieldReader.InvalidateElementCache();
+            CommonTabGate.InvalidateCache();
             throw;
         }
     }

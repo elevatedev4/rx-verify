@@ -1,12 +1,15 @@
+using RxVerifyOverlay.Uia;
+
 namespace RxVerifyOverlay.Integrated;
 
 /// <summary>
 /// Pure decision logic for whether the integrated boxes layer / control
 /// box should be visible right now. See IntegratedOverlayCoordinator,
 /// the only production caller — kept here as a standalone boolean-in/
-/// boolean-out class (no WPF/UIA dependency) so it's covered by fast
-/// xUnit tests, same pattern as Uia/AttachCacheDecision.cs and
-/// Ocr/OcrSourceUsability.cs.
+/// boolean-out class (no WPF/UIA dependency directly — CommonTabState is
+/// a plain tri-state enum with no FlaUI/UIA type behind it) so it's
+/// covered by fast xUnit tests, same pattern as Uia/AttachCacheDecision.cs
+/// and Ocr/OcrSourceUsability.cs.
 /// </summary>
 public static class IntegratedVisibilityGate
 {
@@ -20,16 +23,25 @@ public static class IntegratedVisibilityGate
     /// isn't a parseable escript — mirrors OverlayViewModel's existing
     /// non-escript blank-state signal, see IntegratedOverlayCoordinator
     /// for how hasVerifiableContent is computed from OverlayViewModel.
-    /// Categories/HasNonEscriptMessage), the entered fields aren't
-    /// currently resolvable to on-screen rects (round 4 addendum item 6 —
-    /// best-effort proxy for "PioneerRx isn't on the Common tab right
-    /// now": no confirmed UIA AutomationId exists for that outer tab strip
-    /// to check directly, see IntegratedOverlayCoordinator's doc), or the
-    /// pharmacist has hidden the overlay themselves (round 4 item 2 — the
-    /// control box's checkbox / the global `\` hotkey).
+    /// Categories/HasNonEscriptMessage), the outer Common tab is
+    /// confirmed OFF (<paramref name="commonTabState"/> —
+    /// CommonTabState.Off, see Uia/CommonTabGate.cs — this is the
+    /// STRONGEST signal and short-circuits every other input, since the
+    /// owner confirmed the older hasResolvableFieldRects proxy below does
+    /// NOT actually catch this case: RxDetailsPanel's fields keep
+    /// non-empty BoundingRectangles even on a different outer tab), the
+    /// entered fields aren't currently resolvable to on-screen rects
+    /// (round 4 addendum item 6 — the ORIGINAL best-effort proxy for
+    /// "PioneerRx isn't on the Common tab right now", still used as-is
+    /// whenever commonTabState is Unknown or On — see
+    /// IntegratedOverlayCoordinator's doc), or the pharmacist has hidden
+    /// the overlay themselves (round 4 item 2 — the control box's
+    /// checkbox / the global `\` hotkey).
     /// </summary>
-    public static bool ShouldShowBoxes(bool isAttached, bool isForeground, bool isMaximized, bool hasVerifiableContent, bool hasResolvableFieldRects, bool isHiddenByToggle)
+    public static bool ShouldShowBoxes(bool isAttached, bool isForeground, bool isMaximized, bool hasVerifiableContent, bool hasResolvableFieldRects, bool isHiddenByToggle, CommonTabState commonTabState)
     {
+        if (commonTabState == CommonTabState.Off) return false;
+
         return isAttached && isForeground && isMaximized && hasVerifiableContent && hasResolvableFieldRects && !isHiddenByToggle;
     }
 
