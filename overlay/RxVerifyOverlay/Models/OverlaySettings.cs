@@ -52,17 +52,22 @@ public sealed class OverlaySettings
     public VerificationMethod Method { get; set; } = VerificationMethod.Ocr;
 
     /// <summary>
-    /// Which presentation to show — see DisplayMode doc. Separate (the
-    /// original standalone-window behavior) is the default so nothing
-    /// changes for an existing installation until the pharmacist opts in;
-    /// serialized as a readable string for the same reason as Method
-    /// above. Switchable at runtime from either MainWindow's own toggle or
-    /// the in-Pioneer control box's toggle (Integrated/ControlBoxWindow.cs)
-    /// — both write through IntegratedOverlayCoordinator.SetDisplayMode so
-    /// there is exactly one place that persists this and updates both UIs.
+    /// Which presentation to show — see DisplayMode doc. Integrated (verdict
+    /// boxes drawn directly over PioneerRx) is the default — the owner uses
+    /// Integrated daily and asked for it to be what a fresh install/machine
+    /// starts in, rather than requiring an opt-in click every time. Separate
+    /// remains fully available and is what the toggle switches back to;
+    /// serialized as a readable string for the same reason as Method above.
+    /// Switchable at runtime from either MainWindow's own toggle or the
+    /// in-Pioneer control box's toggle (Integrated/ControlBoxWindow.cs) —
+    /// both write through IntegratedOverlayCoordinator.SetDisplayMode so
+    /// there is exactly one place that persists this and updates both UIs
+    /// (audited 2026-08-12: confirmed no other code path writes DisplayMode
+    /// — see FallbackSeparateWindowRule's doc, which never touches settings,
+    /// only Show/Hide window visibility).
     /// </summary>
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public DisplayMode DisplayMode { get; set; } = DisplayMode.Separate;
+    public DisplayMode DisplayMode { get; set; } = DisplayMode.Integrated;
 
     /// <summary>
     /// Full path to rx-verify's compiled CLI entrypoint, e.g.
