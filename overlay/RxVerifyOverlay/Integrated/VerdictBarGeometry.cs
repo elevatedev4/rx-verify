@@ -21,6 +21,18 @@ namespace RxVerifyOverlay.Integrated;
 /// X = rect.X, extending rightward by BarWidthDip, sits in exactly the
 /// same place the old encircling border's left edge did, just wider.
 ///
+/// GAP (owner report, round 8: the bars sat flush against the field box
+/// and were "creeping right up on the text"): each bar now sits OUTSIDE
+/// the field's left edge with BarGapDip DIP of breathing room, i.e. the
+/// bar's RIGHT edge lands at (rect.X - BarGapDip), not at rect.X itself —
+/// see DeriveBarRect. Every rect in a column shares the same original
+/// rect.X, so this shift is applied identically to every bar in that
+/// column; the (X, Width) merge key MergeVerticallyTouchingBars compares
+/// on is computed AFTER the shift, so column alignment and merging are
+/// both unaffected by it. Deliberately never clamped at the screen edge —
+/// PioneerRx's fields never sit at DIP x=0, so a bar's shifted X going
+/// slightly negative in screen-relative terms is expected, not a bug.
+///
 /// MERGING (the actual "no seam" guarantee, not just a math coincidence):
 /// BoxLayoutAdjuster.SnapFlushAdjacentEdges already makes stacked rects'
 /// touching Y-boundaries EXACTLY equal at the double level, so two bars
@@ -48,19 +60,33 @@ public static class VerdictBarGeometry
     /// </summary>
     public const double BarWidthDip = 5;
 
+    /// <summary>
+    /// How much breathing room sits between a bar's RIGHT edge and the
+    /// field rect's LEFT edge — owner report (round 8): the bars sat
+    /// flush against the field box and were "creeping right up on the
+    /// text". 3 DIP reads as a deliberate small gap without visually
+    /// detaching the bar from the field it's marking. See DeriveBarRect
+    /// and the class doc's GAP section.
+    /// </summary>
+    public const double BarGapDip = 3;
+
     /// <summary>Floating-point tolerance for "same column" (X/Width match) and "touching" (Y-ranges abut) comparisons — guards against harmless double-precision noise, never a real near-miss (genuinely different columns are already many DIPs apart, per BoxLayoutAdjuster.LeftEdgeAlignmentToleranceDip).</summary>
     private const double Epsilon = 0.01;
 
     /// <summary>
-    /// Derives one full-height left-edge bar from a single fully-adjusted
-    /// rect — Y and Height are copied through UNCHANGED (no arithmetic on
-    /// them at all) specifically so a run of already-flush-snapped rects
-    /// yields bars whose Y-ranges are STILL exactly flush, with zero
-    /// additional floating-point error introduced by this step.
+    /// Derives one full-height bar from a single fully-adjusted rect,
+    /// positioned just OUTSIDE the rect's left edge with
+    /// <paramref name="gap"/> DIP of breathing room — the bar's right
+    /// edge lands at (rect.X - gap), i.e. bar.X = rect.X - barWidth - gap.
+    /// Y and Height are copied through UNCHANGED (no arithmetic on them at
+    /// all) specifically so a run of already-flush-snapped rects yields
+    /// bars whose Y-ranges are STILL exactly flush, with zero additional
+    /// floating-point error introduced by this step. Never clamped at the
+    /// screen edge — see the class doc's GAP section for why that's safe.
     /// </summary>
-    public static DipRect DeriveBarRect(DipRect rect, double barWidth = BarWidthDip)
+    public static DipRect DeriveBarRect(DipRect rect, double barWidth = BarWidthDip, double gap = BarGapDip)
     {
-        return new DipRect(rect.X, rect.Y, barWidth, rect.Height);
+        return new DipRect(rect.X - barWidth - gap, rect.Y, barWidth, rect.Height);
     }
 
     /// <summary>
@@ -74,9 +100,9 @@ public static class VerdictBarGeometry
     /// (IntegratedBoxesWindow renders plain color bars with no per-field
     /// content) don't need one.
     /// </summary>
-    public static IReadOnlyList<DipRect> DeriveMergedBarRects(IReadOnlyList<DipRect> rects, double barWidth = BarWidthDip)
+    public static IReadOnlyList<DipRect> DeriveMergedBarRects(IReadOnlyList<DipRect> rects, double barWidth = BarWidthDip, double gap = BarGapDip)
     {
-        var bars = rects.Select(rect => DeriveBarRect(rect, barWidth)).ToList();
+        var bars = rects.Select(rect => DeriveBarRect(rect, barWidth, gap)).ToList();
         return MergeVerticallyTouchingBars(bars);
     }
 
