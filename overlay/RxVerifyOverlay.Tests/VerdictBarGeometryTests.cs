@@ -49,6 +49,36 @@ public class VerdictBarGeometryTests
     }
 
     [Fact]
+    public void BarNearWindowLeftEdgeClampsToZeroButKeepsFullWidth()
+    {
+        // BLOCKER 2 (review): these are WINDOW-relative DIPs (not screen-
+        // relative), and BoxLayoutAdjuster.ApplyPadding already reaches 2
+        // DIP further left before this class ever sees the rect — a field
+        // at rect.X=4 is well within the 10 DIP total reach
+        // (2 padding + 5 width + 3 gap), so the unclamped math would go
+        // negative (4 - 5 - 3 = -4) and WPF would silently clip it.
+        var rect = new DipRect(X: 4, Y: 50, Width: 40, Height: 10);
+
+        var bar = VerdictBarGeometry.DeriveBarRect(rect);
+
+        Assert.Equal(0, bar.X);
+        Assert.Equal(VerdictBarGeometry.BarWidthDip, bar.Width); // width never shrinks to compensate
+        Assert.Equal(50, bar.Y);
+        Assert.Equal(10, bar.Height);
+    }
+
+    [Fact]
+    public void BarFarFromWindowLeftEdgeIsNeverClamped()
+    {
+        var rect = new DipRect(X: 20, Y: 0, Width: 40, Height: 10);
+
+        var bar = VerdictBarGeometry.DeriveBarRect(rect);
+
+        Assert.Equal(12, bar.X); // 20 - 5 - 3 = 12, unclamped
+        Assert.Equal(VerdictBarGeometry.BarWidthDip, bar.Width);
+    }
+
+    [Fact]
     public void DefaultBarWidthIsFiveDip()
     {
         // Locks in the chosen bar width (owner asked for ~5 DIP, judgment

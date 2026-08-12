@@ -29,9 +29,21 @@ namespace RxVerifyOverlay.Integrated;
 /// rect.X, so this shift is applied identically to every bar in that
 /// column; the (X, Width) merge key MergeVerticallyTouchingBars compares
 /// on is computed AFTER the shift, so column alignment and merging are
-/// both unaffected by it. Deliberately never clamped at the screen edge —
-/// PioneerRx's fields never sit at DIP x=0, so a bar's shifted X going
-/// slightly negative in screen-relative terms is expected, not a bug.
+/// both unaffected by it.
+///
+/// CLAMPING (review fix — these are WINDOW-RELATIVE DIPs, NOT screen-
+/// relative: IntegratedBoxesWindow.SetBoxes runs DpiRectConverter.ToDipRect
+/// first, which subtracts PioneerRx's own window origin, then
+/// BoxLayoutAdjuster.ApplyPadding expands every rect a further 2 DIP
+/// outward before this class ever sees it — so a field within
+/// PaddingDip + BarWidthDip + BarGapDip (2 + 5 + 3 = 10) DIP of Pioneer's
+/// LEFT window edge genuinely can compute a negative X here, which WPF's
+/// Canvas silently clips (invisible bar, not a rendering curiosity). See
+/// DeriveBarRect: X is clamped to a minimum of 0, and the WIDTH is never
+/// shrunk to compensate — when clamped, only the effective gap shrinks
+/// (down to zero, and the bar can end up slightly overlapping the field
+/// itself in the most extreme case); the full BarWidthDip stays visible
+/// at worst flush against the window's own left edge.
 ///
 /// MERGING (the actual "no seam" guarantee, not just a math coincidence):
 /// BoxLayoutAdjuster.SnapFlushAdjacentEdges already makes stacked rects'
@@ -77,16 +89,24 @@ public static class VerdictBarGeometry
     /// Derives one full-height bar from a single fully-adjusted rect,
     /// positioned just OUTSIDE the rect's left edge with
     /// <paramref name="gap"/> DIP of breathing room — the bar's right
-    /// edge lands at (rect.X - gap), i.e. bar.X = rect.X - barWidth - gap.
-    /// Y and Height are copied through UNCHANGED (no arithmetic on them at
-    /// all) specifically so a run of already-flush-snapped rects yields
-    /// bars whose Y-ranges are STILL exactly flush, with zero additional
-    /// floating-point error introduced by this step. Never clamped at the
-    /// screen edge — see the class doc's GAP section for why that's safe.
+    /// edge lands at (rect.X - gap), i.e. bar.X = rect.X - barWidth - gap,
+    /// CLAMPED to a minimum of 0 (review fix — see the class doc's
+    /// CLAMPING section: these are window-relative DIPs, and a field near
+    /// Pioneer's own left window edge can genuinely compute negative
+    /// here, which WPF's Canvas silently clips). Clamping shrinks the
+    /// effective GAP first, never the WIDTH — <paramref name="barWidth"/>
+    /// is always the bar's Width, full stop, even when X lands at 0; at
+    /// worst (a field sitting inside the 10 DIP total reach of padding +
+    /// width + gap) the bar sits flush at the window's left edge, still
+    /// fully visible. Y and Height are copied through UNCHANGED (no
+    /// arithmetic on them at all) specifically so a run of already-flush-
+    /// snapped rects yields bars whose Y-ranges are STILL exactly flush,
+    /// with zero additional floating-point error introduced by this step.
     /// </summary>
     public static DipRect DeriveBarRect(DipRect rect, double barWidth = BarWidthDip, double gap = BarGapDip)
     {
-        return new DipRect(rect.X - barWidth - gap, rect.Y, barWidth, rect.Height);
+        var x = Math.Max(0, rect.X - barWidth - gap);
+        return new DipRect(x, rect.Y, barWidth, rect.Height);
     }
 
     /// <summary>

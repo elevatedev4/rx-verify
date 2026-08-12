@@ -228,11 +228,26 @@ public sealed class FieldReader
                 // itself honest matters for the CommonTabState.Unknown
                 // fallback case — see IntegratedVisibilityGate.
                 // ShouldShowBoxes). Mirrors Ocr/EscriptImageCapture.cs's
-                // IsGenuinelyOnscreen guard (element.Properties.IsOffscreen);
-                // a read failure is treated as "not offscreen" here, same
-                // as every other optional-property read in this class —
-                // missing data must never be treated as a mismatch/hide
-                // signal on its own.
+                // IsGenuinelyOnscreen guard (element.Properties.IsOffscreen).
+                //
+                // REVIEW NOTE (should-fix, verified): ReadIsOffscreen is
+                // tri-state (bool?) — `== true` only matches a DEFINITIVE
+                // true; both a read failure (stale/disconnected element,
+                // property unsupported) AND a definitive false compare
+                // false here, so `continue` (drop this field's rect) only
+                // fires on a confirmed "this element is offscreen"
+                // answer, never on "couldn't tell". Same "missing data is
+                // never a mismatch/hide signal on its own" posture as
+                // every other optional-property read in this class.
+                // WATCH-ITEM (not fixed here, flagged for the live-test
+                // pass): a field COULD in principle read a transient
+                // IsOffscreen=true for one tick during Pioneer's own
+                // repaint (e.g. mid-keystroke re-layout) even while still
+                // on Common, dropping just that field's box for a tick —
+                // the AGGREGATE hasResolvableFieldRects proxy is
+                // insulated (other fields still resolve), but a single
+                // field's box flicker isn't. No repro seen; needs a live
+                // workstation to confirm whether this is real.
                 if (UiaTreeWalker.ReadIsOffscreen(element) == true) continue;
 
                 var rect = element.BoundingRectangle;

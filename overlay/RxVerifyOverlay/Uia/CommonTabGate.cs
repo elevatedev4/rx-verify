@@ -25,17 +25,19 @@ public enum CommonTabState
     Off,
 
     /// <summary>
-    /// Neither confirmed signal below could be read this tick (and
-    /// neither has EVER been read successfully this attach-session) —
-    /// this Pioneer version's tree shape may differ from the two
-    /// confirmed dumps. Callers should fall back to whatever proxy they
-    /// used before this gate existed.
+    /// Neither confirmed signal below resolved a definitive answer THIS
+    /// tick — either this Pioneer version's tree shape differs from the
+    /// two confirmed dumps, or (just as routinely) a UIA read hit a
+    /// stale/disconnected element this one tick. Callers should fall back
+    /// to whatever proxy they used before this gate existed rather than
+    /// treat a momentary read failure as a confirmed answer either way —
+    /// see CommonTabGate&lt;TElement&gt;.DetermineState's REVIEW FIX note.
     /// </summary>
     Unknown
 }
 
 /// <summary>
-/// Layered, strongest-confirmed-signal-first detector behind
+/// Layered, strongest-confirmed-signal-first orchestration behind
 /// CommonTabState, matching FieldReader/EnteredFieldElementCache's own
 /// "cache the located element per attach-session, re-find only when it
 /// goes stale" latency discipline (see EnteredFieldElementCache.cs) —
@@ -43,44 +45,54 @@ public enum CommonTabState
 /// tick is not acceptable, only on a cache miss or a confirmed stale
 /// element (ComException/element gone).
 ///
-/// PRIMARY — FieldMap.OuterCommonTabNamePrefix: locate the outer "Common"
-/// TabItem anywhere under the window (no confirmed AutomationId exists
-/// for the outer Tab control itself to narrow the search by) and read its
-/// SelectionItemPattern.IsSelected directly. Per Pioneer's confirmed
+/// GENERIC OVER TElement (review fix — testability): mirrors
+/// EnteredFieldElementCache&lt;TElement&gt;, which this class's cache is
+/// built on directly. Every FlaUI-touching operation (find the outer
+/// TabItem, read its selection state, find the Common pane, read its
+/// onscreen state) is injected as a delegate rather than hardcoded to
+/// AutomationElement/FlaUI calls, so RxVerifyOverlay.Tests/
+/// CommonTabGateTests.cs can drive the ENTIRE state machine — caching,
+/// stale-element re-find-once, and the tri-state decision itself — with
+/// a plain dummy element type and fully-controlled fake reads, no FlaUI/
+/// UIA/Windows runtime involved at all. See the non-generic CommonTabGate
+/// facade below for the production entry point, which wires this up with
+/// real UiaTreeWalker/FieldMap calls.
+///
+/// PRIMARY — the outer "Common" TabItem: found by
+/// <c>findOuterCommonTabItem</c> (production: UiaTreeWalker.
+/// FindDescendantTabItemByNamePrefix(FieldMap.OuterCommonTabNamePrefix) —
+/// no confirmed AutomationId exists for the outer Tab control itself to
+/// narrow the search by), its selection state read by
+/// <c>readIsSelected</c> (production: UiaTreeWalker.ReadIsSelected, i.e.
+/// SelectionItemPattern.IsSelected). Per Pioneer's confirmed
 /// tab-rendering pattern (FieldMap.cs: a Tab control holds every TabItem
 /// but only the SELECTED pane), the TabItem itself stays present and
-/// readable regardless of which outer tab is active — only its
-/// IsSelected value changes — so this signal alone is normally
-/// sufficient and never needs the secondary fallback below.
+/// readable regardless of which outer tab is active — only its selection
+/// state changes — so this signal alone is normally sufficient and never
+/// needs the secondary fallback below.
 ///
-/// SECONDARY — FieldMap.OuterCommonPaneAutomationId (cntCommonTab): only
-/// consulted when the outer Common TabItem can't be located at all (e.g.
-/// SelectionItemPattern unsupported on this control). Existing +
-/// onscreen -&gt; Common is active; existing-but-offscreen or absent -&gt;
-/// Common is not active.
-///
-/// Neither signal resolving THIS tick falls back to CommonTabState.Unknown
-/// — UNLESS at least one of them has resolved successfully at some
-/// earlier tick this attach-session (tracked via the same cache's
-/// "ever seen" bookkeeping FieldReader's retry-on-suspicion logic already
-/// uses), in which case a momentary read failure is treated as a
-/// confirmed Off rather than reverting to the old proxy fallback (a
-/// worse regression than briefly under-trusting one tick).
+/// SECONDARY — the Common pane: found by <c>findCommonPane</c>
+/// (production: UiaTreeWalker.FindDescendantByAutomationId(FieldMap.
+/// OuterCommonPaneAutomationId), i.e. cntCommonTab), its onscreen state
+/// read by <c>readIsOnscreen</c> (production: the NEGATION of
+/// UiaTreeWalker.ReadIsOffscreen — see the facade's Negate helper). Only
+/// consulted when the outer Common TabItem can't be located/read at all.
 /// </summary>
-public static class CommonTabGate
+public sealed class CommonTabGate<TElement> where TElement : class
 {
     private const string TabItemCacheKey = "__outerCommonTabItem";
-    private const string PaneCacheKey = "__" + FieldMap.OuterCommonPaneAutomationId;
+    private const string PaneCacheKey = "__commonPane";
 
     /// <summary>
     /// Same per-window-handle cache class FieldReader.ElementCache uses
-    /// (see EnteredFieldElementCache.cs) — a separate static instance
-    /// (not FieldReader's own) so this gate's cache lifetime and the
-    /// entered-field cache's lifetime are independently reasoned about,
-    /// even though both key by the same PioneerRx window handle and both
-    /// auto-reset the moment that handle changes (EnsureWindow).
+    /// (see EnteredFieldElementCache.cs) — an instance field here (not a
+    /// static, unlike FieldReader's own — see the facade below for why
+    /// production wiring still gets ONE shared instance for the process)
+    /// so RxVerifyOverlay.Tests/CommonTabGateTests.cs can construct a
+    /// fresh, isolated CommonTabGate&lt;DummyElement&gt; per test with no
+    /// cross-test state bleed.
     /// </summary>
-    private static readonly EnteredFieldElementCache<AutomationElement> Cache = new();
+    private readonly EnteredFieldElementCache<TElement> _cache = new();
 
     /// <summary>
     /// Forces the next DetermineState call (for any window handle) to
@@ -91,19 +103,22 @@ public static class CommonTabGate
     /// hit alone would NOT catch a torn-down automation session
     /// underneath an otherwise-unchanged HWND.
     /// </summary>
-    public static void InvalidateCache() => Cache.Invalidate();
+    public void InvalidateCache() => _cache.Invalidate();
 
     /// <summary>
-    /// Computes the current CommonTabState for the given attached
-    /// PioneerRx window (<paramref name="walker"/> wraps its root
-    /// element — see UiaTreeWalker.FindDescendantTabItemByNamePrefix/
-    /// FindDescendantByAutomationId, which do the actual searches; this
-    /// class owns only the caching + layering decision on top). Never
-    /// throws — any UIA failure at any step is treated as "this signal
-    /// didn't resolve", falling through to the next layer or ultimately
-    /// Unknown.
+    /// Computes the current CommonTabState. Never throws — any read
+    /// failure at any step (the injected delegates are expected to catch
+    /// their own FlaUI/UIA exceptions and return null, same contract as
+    /// UiaTreeWalker.ReadIsSelected/ReadIsOffscreen) is treated as "this
+    /// signal didn't resolve", falling through to the next layer or
+    /// ultimately Unknown.
     /// </summary>
-    public static CommonTabState DetermineState(UiaTreeWalker walker, IntPtr windowHandle)
+    public CommonTabState DetermineState(
+        IntPtr windowHandle,
+        Func<TElement?> findOuterCommonTabItem,
+        Func<TElement, bool?> readIsSelected,
+        Func<TElement?> findCommonPane,
+        Func<TElement, bool?> readIsOnscreen)
     {
         if (windowHandle == IntPtr.Zero)
         {
@@ -111,115 +126,137 @@ public static class CommonTabGate
             // handle there's nothing safe to key a cache off (a
             // documented rare edge case — see PioneerRxWindow.
             // PickBestCandidate) — resolve fresh, uncached, every call.
-            return DetermineUncached(walker);
+            return DetermineUncached(findOuterCommonTabItem, readIsSelected, findCommonPane, readIsOnscreen);
         }
 
-        var fromTabItem = TryReadFromOuterTabItem(walker, windowHandle);
+        var fromTabItem = TryRead(windowHandle, TabItemCacheKey, findOuterCommonTabItem, readIsSelected);
         if (fromTabItem.HasValue) return fromTabItem.Value ? CommonTabState.On : CommonTabState.Off;
 
-        var fromPane = TryReadFromCommonPane(walker, windowHandle);
+        var fromPane = TryRead(windowHandle, PaneCacheKey, findCommonPane, readIsOnscreen);
         if (fromPane.HasValue) return fromPane.Value ? CommonTabState.On : CommonTabState.Off;
 
-        var everSeenEither = Cache.HasEverReadNonBlank(windowHandle, TabItemCacheKey)
-            || Cache.HasEverReadNonBlank(windowHandle, PaneCacheKey);
-
-        return everSeenEither ? CommonTabState.Off : CommonTabState.Unknown;
+        // REVIEW FIX (blocker — a tick where BOTH signals fail to resolve
+        // must NEVER be escalated to a confirmed Off just because EITHER
+        // one resolved successfully at some EARLIER tick this
+        // attach-session): a stale-element/COMException read failure is
+        // routine in this codebase (see FieldReader's own retry-on-
+        // suspicion patterns, which exist precisely because this happens
+        // regularly, not exceptionally) — treating a momentary double-
+        // failure as "confirmed Off" would hide the verdict boxes on a
+        // transient UIA hiccup even though the pharmacist never left
+        // Common. Always Unknown here, UNCONDITIONALLY, regardless of
+        // history: the caller's own forgiving hasResolvableFieldRects
+        // proxy (IntegratedVisibilityGate.ShouldShowBoxes) is the correct
+        // fallback for "couldn't tell this tick" — never a hide decision
+        // on its own.
+        return CommonTabState.Unknown;
     }
 
-    private static CommonTabState DetermineUncached(UiaTreeWalker walker)
+    private static CommonTabState DetermineUncached(
+        Func<TElement?> findOuterCommonTabItem,
+        Func<TElement, bool?> readIsSelected,
+        Func<TElement?> findCommonPane,
+        Func<TElement, bool?> readIsOnscreen)
     {
-        var tabItem = FindOuterCommonTabItem(walker);
+        var tabItem = findOuterCommonTabItem();
         if (tabItem is not null)
         {
-            var isSelected = UiaTreeWalker.ReadIsSelected(tabItem);
+            var isSelected = readIsSelected(tabItem);
             if (isSelected.HasValue) return isSelected.Value ? CommonTabState.On : CommonTabState.Off;
         }
 
-        var pane = FindCommonPane(walker);
+        var pane = findCommonPane();
         if (pane is not null)
         {
-            var isOffscreen = UiaTreeWalker.ReadIsOffscreen(pane);
-            if (isOffscreen.HasValue) return isOffscreen.Value ? CommonTabState.Off : CommonTabState.On;
+            var isOnscreen = readIsOnscreen(pane);
+            if (isOnscreen.HasValue) return isOnscreen.Value ? CommonTabState.On : CommonTabState.Off;
         }
 
         return CommonTabState.Unknown;
     }
 
     /// <summary>
-    /// PRIMARY signal. Resolves the outer Common TabItem (cached, or a
-    /// fresh single search on a cache miss), reads IsSelected, and — only
-    /// if that read fails on a CACHED element (stale/gone) — evicts it
-    /// and searches exactly once more before giving up on this signal for
-    /// this tick. Returns null if the TabItem can't be found/read at all.
+    /// Resolves the cached-or-freshly-found element for <paramref name="cacheKey"/>
+    /// and reads its value via <paramref name="read"/>. If that read
+    /// fails on a CACHED element (stale/gone — <paramref name="read"/>
+    /// returns null), the cache entry is evicted and <paramref name="find"/>
+    /// is called exactly once more before giving up on this signal for
+    /// this tick (per-tick cost discipline: never re-search proactively).
+    /// Returns null if the element can't be found/read at all.
     /// </summary>
-    private static bool? TryReadFromOuterTabItem(UiaTreeWalker walker, IntPtr windowHandle)
+    private bool? TryRead(IntPtr windowHandle, string cacheKey, Func<TElement?> find, Func<TElement, bool?> read)
     {
-        var element = ResolveCached(windowHandle, TabItemCacheKey, () => FindOuterCommonTabItem(walker));
+        var element = ResolveCached(windowHandle, cacheKey, find);
         if (element is null) return null;
 
-        var isSelected = UiaTreeWalker.ReadIsSelected(element);
-        if (isSelected.HasValue)
+        var value = read(element);
+        if (value.HasValue)
         {
-            Cache.MarkNonBlank(windowHandle, TabItemCacheKey);
-            return isSelected;
+            // NIT (review) — MarkNonBlank/HasEverReadNonBlank were named
+            // for FieldReader's original "has this text field ever had
+            // real typed content" use; reused here to mean something
+            // narrower: "has this signal ever produced a DEFINITIVE
+            // (non-null) read this attach-session". Kept as forward-
+            // looking instrumentation only — the DetermineState decision
+            // above deliberately does NOT branch on it (see that method's
+            // REVIEW FIX note), so today this is bookkeeping with no
+            // behavioral effect, not a load-bearing signal.
+            _cache.MarkNonBlank(windowHandle, cacheKey);
+            return value;
         }
 
-        // Cached element went stale — drop it and re-find exactly once
-        // (per-tick cost discipline: never re-search proactively).
-        Cache.InvalidateField(windowHandle, TabItemCacheKey);
-        var refound = FindOuterCommonTabItem(walker);
+        // Cached element went stale — drop it and re-find exactly once.
+        _cache.InvalidateField(windowHandle, cacheKey);
+        var refound = find();
         if (refound is null) return null;
 
-        Cache.SetElement(windowHandle, TabItemCacheKey, refound);
-        var reread = UiaTreeWalker.ReadIsSelected(refound);
-        if (reread.HasValue) Cache.MarkNonBlank(windowHandle, TabItemCacheKey);
+        _cache.SetElement(windowHandle, cacheKey, refound);
+        var reread = read(refound);
+        if (reread.HasValue) _cache.MarkNonBlank(windowHandle, cacheKey);
         return reread;
     }
 
-    /// <summary>SECONDARY signal — same cached/re-find-once-on-stale shape as TryReadFromOuterTabItem, over FieldMap.OuterCommonPaneAutomationId + IsOffscreen instead of the TabItem + SelectionItemPattern.</summary>
-    private static bool? TryReadFromCommonPane(UiaTreeWalker walker, IntPtr windowHandle)
+    private TElement? ResolveCached(IntPtr windowHandle, string cacheKey, Func<TElement?> find)
     {
-        var element = ResolveCached(windowHandle, PaneCacheKey, () => FindCommonPane(walker));
-        if (element is null) return null;
-
-        var isOffscreen = UiaTreeWalker.ReadIsOffscreen(element);
-        if (isOffscreen.HasValue)
-        {
-            Cache.MarkNonBlank(windowHandle, PaneCacheKey);
-            return !isOffscreen.Value;
-        }
-
-        Cache.InvalidateField(windowHandle, PaneCacheKey);
-        var refound = FindCommonPane(walker);
-        if (refound is null) return null;
-
-        Cache.SetElement(windowHandle, PaneCacheKey, refound);
-        var reread = UiaTreeWalker.ReadIsOffscreen(refound);
-        if (!reread.HasValue) return null;
-
-        Cache.MarkNonBlank(windowHandle, PaneCacheKey);
-        return !reread.Value;
-    }
-
-    private static AutomationElement? ResolveCached(IntPtr windowHandle, string cacheKey, Func<AutomationElement?> findFresh)
-    {
-        if (Cache.TryGetElement(windowHandle, cacheKey, out var cached) && cached is not null)
+        if (_cache.TryGetElement(windowHandle, cacheKey, out var cached) && cached is not null)
         {
             return cached;
         }
 
-        var found = findFresh();
+        var found = find();
         if (found is not null)
         {
-            Cache.SetElement(windowHandle, cacheKey, found);
+            _cache.SetElement(windowHandle, cacheKey, found);
         }
 
         return found;
     }
+}
 
-    private static AutomationElement? FindOuterCommonTabItem(UiaTreeWalker walker) =>
-        walker.FindDescendantTabItemByNamePrefix(FieldMap.OuterCommonTabNamePrefix);
+/// <summary>
+/// Production entry point — wires CommonTabGate&lt;AutomationElement&gt;
+/// up with real UiaTreeWalker/FieldMap calls. ONE shared instance for the
+/// process (static, mirrors FieldReader.ElementCache) since this overlay
+/// only ever tracks one attached PioneerRx window at a time.
+/// </summary>
+public static class CommonTabGate
+{
+    private static readonly CommonTabGate<AutomationElement> Instance = new();
 
-    private static AutomationElement? FindCommonPane(UiaTreeWalker walker) =>
-        walker.FindDescendantByAutomationId(FieldMap.OuterCommonPaneAutomationId);
+    /// <summary>See CommonTabGate&lt;TElement&gt;.InvalidateCache — called from PioneerRxWindow.TryAttach's self-heal catch block.</summary>
+    public static void InvalidateCache() => Instance.InvalidateCache();
+
+    /// <summary>See CommonTabGate&lt;TElement&gt;.DetermineState. <paramref name="walker"/> wraps the attached PioneerRx window's root element.</summary>
+    public static CommonTabState DetermineState(UiaTreeWalker walker, IntPtr windowHandle)
+    {
+        return Instance.DetermineState(
+            windowHandle,
+            findOuterCommonTabItem: () => walker.FindDescendantTabItemByNamePrefix(FieldMap.OuterCommonTabNamePrefix),
+            readIsSelected: UiaTreeWalker.ReadIsSelected,
+            findCommonPane: () => walker.FindDescendantByAutomationId(FieldMap.OuterCommonPaneAutomationId),
+            readIsOnscreen: element => Negate(UiaTreeWalker.ReadIsOffscreen(element)));
+    }
+
+    /// <summary>UiaTreeWalker.ReadIsOffscreen is naturally phrased as "is it offscreen"; the pane signal needs "is it onscreen" (see class doc SECONDARY) — a plain tri-state negation, never collapsing null to a definite value.</summary>
+    private static bool? Negate(bool? value) => value.HasValue ? !value.Value : null;
 }

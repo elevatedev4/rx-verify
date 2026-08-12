@@ -2,6 +2,7 @@ using System;
 using System.Text;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.Parsing;
 
 namespace RxVerifyOverlay.Uia;
@@ -145,21 +146,40 @@ public sealed class UiaTreeWalker
     /// null if no TabItem matches, or if the search itself throws (window
     /// mid-redraw, or this Pioneer version's tree shape differs) — never
     /// throws.
+    ///
+    /// SHOULD-FIX (review): more than one TabItem matching the same
+    /// prefix is unexpected — Pioneer's outer tab names are assumed
+    /// unique — so it's logged via OcrLogger.LogTiming (the existing
+    /// non-PHI diagnostic-log-line idiom; this message carries no
+    /// patient/prescriber/drug content, just a match count and prefix)
+    /// rather than silently resolved. Still deterministic either way:
+    /// FindAllDescendants' document order means the FIRST match is always
+    /// taken, logged or not.
     /// </summary>
     public AutomationElement? FindDescendantTabItemByNamePrefix(string namePrefix)
     {
         try
         {
             var tabItems = _root.FindAllDescendants(cf => cf.ByControlType(ControlType.TabItem));
+            AutomationElement? firstMatch = null;
+            var matchCount = 0;
+
             foreach (var item in tabItems)
             {
                 string? name;
                 try { name = item.Name; } catch { continue; }
-                if (name is not null && name.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    return item;
-                }
+                if (name is null || !name.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase)) continue;
+
+                matchCount++;
+                firstMatch ??= item;
             }
+
+            if (matchCount > 1)
+            {
+                OcrLogger.LogTiming($"UiaTreeWalker.FindDescendantTabItemByNamePrefix: {matchCount} TabItems matched prefix '{namePrefix}' — using the first one found (document order).");
+            }
+
+            return firstMatch;
         }
         catch
         {
