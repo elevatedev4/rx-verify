@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
@@ -65,7 +66,7 @@ public sealed class IntegratedOverlayCoordinator
     // OWNER FEEDBACK (round 2, item 1) — broader "is PioneerRx the
     // foreground app" detection, independent of PioneerRxWindow.TryAttach's
     // narrower title-prefix match (Pre-Check/Edit/New Rx specifically).
-    // See TryGetForegroundPioneerRxWindow below.
+    // See IsForegroundWindowOwnedByPioneerRx below.
     // ------------------------------------------------------------------
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -83,18 +84,26 @@ public sealed class IntegratedOverlayCoordinator
     }
 
     // ------------------------------------------------------------------
-    // ADDENDUM (round 5 — "the little overlay box is jumping around
-    // every time Pioneer opens a new little popup window"): see
-    // TryGetForegroundPioneerRxWindow and ForegroundAnchorRule's own doc.
-    // GA_ROOTOWNER walks up through BOTH parent AND owner relationships
-    // to the ultimate top-level owner in a single call — exactly what's
-    // needed to resolve a small PioneerRx-owned dialog/popup back to the
-    // main shell window it belongs to.
+    // ROUND 7 ("the integrated control box moves down/over to a small
+    // popup Pioneer opens above its main window ... it needs to stay put
+    // at the top-right of the MAIN window"): replaces round 5's
+    // GetAncestor(hwnd, GA_ROOTOWNER)-based owner walk (removed — see git
+    // history — it only resolved to the main window when the popup was
+    // OWNED, and PioneerRx opens some top-level windows that aren't) with
+    // a POSITIVE identification of PioneerRx's own main window via
+    // EnumWindows + MainWindowAnchorRule. See ResolveMainPioneerWindowAnchor
+    // and MainWindowAnchorRule's own doc for the full design.
     // ------------------------------------------------------------------
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
-    private const uint GaRootOwner = 3;
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 
     // NOT readonly: MainWindow.xaml.cs's OnSaveSettingsClick rebuilds a
     // fresh OverlayViewModel whenever the engine paths change (a new
@@ -136,6 +145,20 @@ public sealed class IntegratedOverlayCoordinator
     /// a previous shift; it always starts false on every app launch.
     /// </summary>
     private bool _boxesHiddenByToggle;
+
+    /// <summary>
+    /// ROUND 7: the hwnd MainWindowAnchorRule.Resolve chose LAST tick as
+    /// PioneerRx's main window, or IntPtr.Zero before anything's been
+    /// chosen yet (app just launched, or a previous tick found nothing
+    /// eligible). Fed back into Resolve every tick — see
+    /// ResolveMainPioneerWindowAnchor — so the control box keeps
+    /// anchoring to the SAME window even while a same-process popup or an
+    /// entirely different app is foreground. Deliberately never reset
+    /// except by Resolve itself finding the cached window no longer
+    /// eligible; a brief gap in Pioneer being foreground must NOT clear
+    /// this (that would defeat the whole point of stickiness).
+    /// </summary>
+    private IntPtr _cachedMainWindowHandle = IntPtr.Zero;
 
     /// <summary>Raised when the pharmacist changes the Method toggle FROM THE CONTROL BOX — MainWindow.xaml.cs handles this the same way as its own Source radio buttons (persist + refresh), then calls SyncToggles() so both toggles stay in lockstep.</summary>
     public event EventHandler<VerificationMethod>? MethodToggleRequested;
@@ -285,13 +308,19 @@ public sealed class IntegratedOverlayCoordinator
         // BROAD foreground check (round 2, item 1): is PioneerRx the app
         // the pharmacist is currently looking at, REGARDLESS of which
         // screen (queue, search, dashboard, or a specific Rx) — see
-        // TryGetForegroundPioneerRxWindow. This is what gates the CONTROL
-        // BOX. It must NOT also gate the fallback-to-separate-window
+        // IsForegroundWindowOwnedByPioneerRx. This is what gates the
+        // CONTROL BOX. It must NOT also gate the fallback-to-separate-window
         // decision below (round-3 fix — see PioneerPresence's doc for the
         // bug that caused: conflating "not in front right now" with
         // "doesn't exist" popped the fallback window at every launch and
         // on every alt-tab away from Pioneer).
-        var hasForegroundPioneerWindow = TryGetForegroundPioneerRxWindow(out var foregroundHandle, out var foregroundBounds);
+        //
+        // ROUND 7: this ONLY answers "is some PioneerRx window in front
+        // right now" — a deliberately separate question from "WHICH of
+        // PioneerRx's windows should the control box anchor to" (see
+        // ResolveMainPioneerWindowAnchor below). Conflating those two
+        // questions via GetAncestor/GA_ROOTOWNER was round 5's bug.
+        var hasForegroundPioneerWindow = IsForegroundWindowOwnedByPioneerRx();
 
         // ROUND 3 FIX: the fallback rule needs its OWN, broader signal —
         // "does PioneerRx exist anywhere on the system" — independent of
@@ -344,16 +373,31 @@ public sealed class IntegratedOverlayCoordinator
         // CONTROL BOX: reaching here already means
         // IntegratedVisibilityGate.ShouldShowControlBox(hasForegroundPioneerWindow)
         // is true (the !hasForegroundPioneerWindow branch above returned
-        // early) — anchors to the narrow Rx-screen window when one's open
-        // (same window either way, in practice — Pre-Check/Edit/New Rx
-        // are all the same PioneerRx shell window with a different
-        // title), otherwise to the foreground window's raw Win32 rect (no
-        // field data needed just to position a box in its ribbon corner).
-        var controlBoxHandle = isRxScreenAttached ? window!.NativeWindowHandle : foregroundHandle;
-        var controlBoxBounds = isRxScreenAttached ? window!.WindowBounds : foregroundBounds;
-        var isControlBoxMaximized = IsZoomed(controlBoxHandle);
+        // early).
+        //
+        // ROUND 7: anchors to PioneerRx's POSITIVELY-identified, STICKY
+        // main window (see ResolveMainPioneerWindowAnchor and
+        // MainWindowAnchorRule's own doc) rather than the narrow Rx-screen
+        // window or the raw foreground rect — a popup Pioneer opens above
+        // its main window (owned or not) never moves this anchor, since
+        // it's never even a candidate for "main window" unless it's
+        // itself maximized.
+        var mainWindowAnchor = ResolveMainPioneerWindowAnchor();
 
-        UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
+        if (mainWindowAnchor is null)
+        {
+            // No eligible PioneerRx top-level window at all right now
+            // (e.g. every one is momentarily minimized/invisible) —
+            // nothing sane to anchor the control box to.
+            HideControlBoxIfShown();
+        }
+        else
+        {
+            var (controlBoxHandle, controlBoxBounds) = mainWindowAnchor.Value;
+            var isControlBoxMaximized = IsZoomed(controlBoxHandle);
+
+            UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
+        }
 
         // BOXES: still requires the NARROW Rx-screen attach, that specific
         // window being foreground, maximized, and verified content. A
@@ -448,69 +492,89 @@ public sealed class IntegratedOverlayCoordinator
     /// PioneerRxWindow.TryAttach (which only matches a Pre-Check/Edit/
     /// New-Rx TITLED window, needed for field-reading), this matches the
     /// CURRENT FOREGROUND window purely by its owning PROCESS name
-    /// (FieldMap.TargetProcessNames — declared but previously unused,
-    /// anticipating exactly this need), regardless of which PioneerRx
+    /// (FieldMap.TargetProcessNames), regardless of which PioneerRx
     /// screen it's showing. Never throws: any failure (process exited
     /// between calls, access denied, etc.) is treated as "not PioneerRx"
     /// — Tick()'s own try/catch is a backstop, not the expected path
     /// here.
     ///
-    /// ADDENDUM (round 5 — "the little overlay box is jumping around
-    /// every time Pioneer opens a new little popup window"): the
-    /// FOREGROUND window matched above can be a small transient popup/
-    /// dialog PioneerRx merely OWNS (a save confirmation, a lookup
-    /// picker, etc.), not its main shell — anchoring directly to that
-    /// popup's tiny rect is what caused the jump. Once the process-name
-    /// match confirms this IS a PioneerRx window, GetAncestor(hwnd,
-    /// GA_ROOTOWNER) walks up through parent AND owner relationships to
-    /// the ultimate top-level owner in one call (returns IntPtr.Zero if
-    /// hwnd has no owner at all — i.e. it's already the top-level shell).
-    /// ForegroundAnchorRule.Choose (pure, tested) then decides: anchor to
-    /// that owner's rect if it exists and is sane, otherwise fall back to
-    /// the foreground window itself — identical to the pre-fix behavior.
-    /// Returns whichever HWND the chosen rect actually belongs to (not
-    /// always the original foreground hwnd) so IsZoomed/GetDpiForWindow
-    /// downstream (see TickCore/UpdateControlBox) read maximized-state
-    /// and DPI off the SAME window the rect came from, never a mismatched
-    /// pair. The boxes layer is unaffected — it anchors to
-    /// PioneerRxWindow.TryAttach's own narrow Rx-screen window, never to
-    /// this foreground-based path at all.
+    /// ROUND 7: this is now ONLY the show/hide gating signal — it says
+    /// nothing about WHERE to anchor. See ResolveMainPioneerWindowAnchor
+    /// for that (a deliberately separate question — see
+    /// MainWindowAnchorRule's doc for the round-5 bug that came from
+    /// conflating the two).
     /// </summary>
-    private static bool TryGetForegroundPioneerRxWindow(out IntPtr hwnd, out Rectangle bounds)
+    private static bool IsForegroundWindowOwnedByPioneerRx()
     {
-        hwnd = GetForegroundWindow();
-        bounds = Rectangle.Empty;
+        var hwnd = GetForegroundWindow();
+        return hwnd != IntPtr.Zero && IsOwnedByPioneerRx(hwnd);
+    }
 
-        if (hwnd == IntPtr.Zero) return false;
-
+    /// <summary>True when <paramref name="hwnd"/> belongs to a process named in FieldMap.TargetProcessNames — the single owning-process check shared by IsForegroundWindowOwnedByPioneerRx and EnumeratePioneerTopLevelWindows below.</summary>
+    private static bool IsOwnedByPioneerRx(IntPtr hwnd)
+    {
         try
         {
             GetWindowThreadProcessId(hwnd, out var processId);
             using var process = Process.GetProcessById((int)processId);
-            if (!FieldMap.TargetProcessNames.Any(name => string.Equals(process.ProcessName, name, StringComparison.OrdinalIgnoreCase)))
-            {
-                return false;
-            }
+            return FieldMap.TargetProcessNames.Any(name => string.Equals(process.ProcessName, name, StringComparison.OrdinalIgnoreCase));
         }
         catch
         {
             return false;
         }
+    }
 
-        if (!GetWindowRect(hwnd, out var foregroundRect)) return false;
-        var foregroundBounds = Rectangle.FromLTRB(foregroundRect.Left, foregroundRect.Top, foregroundRect.Right, foregroundRect.Bottom);
+    /// <summary>
+    /// ROUND 7: resolves PioneerRx's MAIN window (see MainWindowAnchorRule's
+    /// own doc for the full design) and returns its current hwnd/rect, or
+    /// null if none is eligible right now. Enumerates every CURRENT
+    /// top-level window owned by a PioneerRx process into plain Win32 data
+    /// (EnumeratePioneerTopLevelWindows) and hands it, together with
+    /// whichever hwnd was chosen LAST tick (_cachedMainWindowHandle), to
+    /// MainWindowAnchorRule.Resolve — that cached handle is what makes the
+    /// anchor STICKY across ticks. Updates _cachedMainWindowHandle to
+    /// whatever Resolve returns (IntPtr.Zero if nothing was eligible) so
+    /// the NEXT tick's Resolve call has the right memory.
+    /// </summary>
+    private (IntPtr Handle, Rectangle Bounds)? ResolveMainPioneerWindowAnchor()
+    {
+        var candidates = EnumeratePioneerTopLevelWindows();
+        var anchor = MainWindowAnchorRule.Resolve(_cachedMainWindowHandle, candidates);
+        _cachedMainWindowHandle = anchor?.Handle ?? IntPtr.Zero;
+        return anchor is { } a ? (a.Handle, a.Bounds) : null;
+    }
 
-        var ownerHandle = GetAncestor(hwnd, GaRootOwner);
-        Rectangle? ownerBounds = null;
-        if (ownerHandle != IntPtr.Zero && GetWindowRect(ownerHandle, out var ownerRect))
+    /// <summary>
+    /// EnumWindows over every top-level window on the system, keeping only
+    /// the ones owned by a PioneerRx process (IsOwnedByPioneerRx) and
+    /// reading the plain Win32 state MainWindowAnchorRule.Candidate needs
+    /// for each: visibility, minimized/maximized state, and its rect. A
+    /// window whose rect can't be read (GetWindowRect failure) is skipped
+    /// entirely rather than included with a degenerate rect — same
+    /// "never trust a failed read" posture as MainWindowAnchorRule.
+    /// IsSaneWindowRect's own degenerate-but-succeeded case.
+    /// </summary>
+    private static List<MainWindowAnchorRule.Candidate> EnumeratePioneerTopLevelWindows()
+    {
+        var candidates = new List<MainWindowAnchorRule.Candidate>();
+
+        EnumWindows((hWnd, _) =>
         {
-            ownerBounds = Rectangle.FromLTRB(ownerRect.Left, ownerRect.Top, ownerRect.Right, ownerRect.Bottom);
-        }
+            if (!IsOwnedByPioneerRx(hWnd)) return true; // keep enumerating
+            if (!GetWindowRect(hWnd, out var rect)) return true; // keep enumerating
 
-        var anchor = ForegroundAnchorRule.Choose(hwnd, foregroundBounds, ownerHandle, ownerBounds);
-        hwnd = anchor.Handle;
-        bounds = anchor.Bounds;
-        return true;
+            candidates.Add(new MainWindowAnchorRule.Candidate(
+                hWnd,
+                IsVisible: IsWindowVisible(hWnd),
+                IsMinimized: IsIconic(hWnd),
+                IsMaximized: IsZoomed(hWnd),
+                Bounds: Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom)));
+
+            return true; // keep enumerating — need every candidate, not just the first
+        }, IntPtr.Zero);
+
+        return candidates;
     }
 
     /// <summary>
