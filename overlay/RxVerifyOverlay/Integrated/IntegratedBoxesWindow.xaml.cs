@@ -44,20 +44,13 @@ public sealed partial class IntegratedBoxesWindow : Window
     // below and Background below in SetBoxes) — the old ~9% opacity tint
     // brushes are gone entirely, not just set to a lower opacity.
     //
-    // ROUND 5 (owner: "the borders need to be thicker, and I'd prefer for
-    // them to be square rather than rounded"):
-    //   - BoxStrokeThickness: 2 -> 3. Padding (BoxLayoutAdjuster.PaddingDip)
-    //     is 2 DIP, so a 3px stroke's inner edge sits ~1px inside the raw
-    //     field rect's own edge rather than exactly on it — a small,
-    //     acceptable encroachment (still far tighter than round 2-3's 4px
-    //     padding/2.5px stroke), not disproportionate enough to warrant
-    //     going to 4. Revisit if it reads as too chunky live.
-    //   - Corner rounding removed entirely (no BoxCornerRadius constant at
-    //     all anymore, no CornerRadius set on the Border below — WPF's own
-    //     default is already square/0, so omitting it is both "square"
-    //     and self-documenting that this was a deliberate removal, not an
-    //     oversight).
-    private const double BoxStrokeThickness = 3;
+    // ROUND 5 gave the (then still full-border) boxes a thicker, square
+    // stroke; ROUND 6 replaced GREEN's full border with a left-edge bar
+    // (see VerdictBarGeometry); ROUND 7 (owner, live pharmacy testing:
+    // red verdicts should render "exactly like green — solid left-edge
+    // bar") removed the full-border path entirely — every verdict is now
+    // a bar, so there's no stroke thickness/corner-radius constant left
+    // to keep around.
 
     // Same green/red as MainWindow.xaml's GreenBrush/RedBrush — the boxes
     // layer deliberately never uses yellow (see BoxColorMapper: Yellow
@@ -125,19 +118,24 @@ public sealed partial class IntegratedBoxesWindow : Window
     ///
     /// ROUND 6 (owner: "make the green boxes just be a thicker left side
     /// only bar ... too distracting to have everything encircled. Leave
-    /// red boxes the way they are"): the SAME adjusted geometry above is
-    /// computed for every field regardless of color — this round only
-    /// changes the RENDER branch. Green fields' adjusted rects are
-    /// collected and handed to GreenBarGeometry.DeriveMergedBarRects
-    /// (left-edge bar per rect, merging any that are already flush-
-    /// stacked into one continuous bar — see that class's doc for why
-    /// merging, not just deriving, is what actually guarantees no seam);
-    /// red fields render EXACTLY as round 5 shipped, unchanged. Every
-    /// upstream gate (DAW box rule, the hide-overlay toggle, click-
-    /// through, the tab/Rx-identity staleness gates) already ran before
-    /// this method was ever called — see IntegratedOverlayCoordinator.
-    /// UpdateBoxes — so they apply to bars exactly as they did to boxes
-    /// without this file needing to know anything about them.
+    /// red boxes the way they are") started this off GREEN-only; ROUND 7
+    /// (owner, live pharmacy testing: red verdicts should render "exactly
+    /// like green — solid left-edge bar, same 5 DIP width, same vertical
+    /// merging within a column") finishes the job — the SAME adjusted
+    /// geometry above is computed for every field regardless of color;
+    /// this round just drops the color-specific RENDER branch entirely.
+    /// Each color's adjusted rects are collected separately and handed to
+    /// VerdictBarGeometry.DeriveMergedBarRects independently (left-edge
+    /// bar per rect, merging any that are already flush-stacked WITHIN
+    /// THAT COLOR into one continuous bar — see that class's doc for why
+    /// merging, not just deriving, is what actually guarantees no seam; a
+    /// green and a red bar are never merged into each other even if they
+    /// happen to touch). Every upstream gate (DAW box rule, the
+    /// hide-overlay toggle, click-through, the tab/Rx-identity staleness
+    /// gates) already ran before this method was ever called — see
+    /// IntegratedOverlayCoordinator.UpdateBoxes — so they apply to bars
+    /// of either color exactly as they did to boxes, without this file
+    /// needing to know anything about them.
     /// </summary>
     public void SetBoxes(IReadOnlyList<(System.Drawing.Rectangle PhysicalRect, bool IsGreen)> boxes, System.Drawing.Point windowOriginPhysical, double dpiScaleX, double dpiScaleY)
     {
@@ -151,56 +149,29 @@ public sealed partial class IntegratedBoxesWindow : Window
         var adjusted = BoxLayoutAdjuster.AlignColumnLeftEdges(flush);
 
         var greenRects = new List<DipRect>();
+        var redRects = new List<DipRect>();
         for (var i = 0; i < boxes.Count; i++)
         {
-            if (boxes[i].IsGreen)
-            {
-                greenRects.Add(adjusted[i]);
-            }
-            else
-            {
-                AddRedBorder(adjusted[i]);
-            }
+            (boxes[i].IsGreen ? greenRects : redRects).Add(adjusted[i]);
         }
 
-        foreach (var bar in GreenBarGeometry.DeriveMergedBarRects(greenRects))
+        foreach (var bar in VerdictBarGeometry.DeriveMergedBarRects(greenRects))
         {
-            AddGreenBar(bar);
+            AddBar(bar, GreenBrush);
+        }
+
+        foreach (var bar in VerdictBarGeometry.DeriveMergedBarRects(redRects))
+        {
+            AddBar(bar, RedBrush);
         }
     }
 
-    /// <summary>RED fields: unchanged from round 5 — full encircling square border, no fill.</summary>
-    private void AddRedBorder(DipRect dip)
-    {
-        var border = new Border
-        {
-            BorderBrush = RedBrush,
-            BorderThickness = new Thickness(BoxStrokeThickness),
-            // No CornerRadius set at all — square corners, WPF's own
-            // default (round 5). Fully transparent middle, no fill at
-            // all — explicit Brushes.Transparent (not left null) so it's
-            // unambiguous this is intentional (round 4 item 4). Doesn't
-            // affect click-through: IsHitTestVisible=false below is what
-            // actually matters at the WPF level, and the window itself is
-            // WS_EX_TRANSPARENT regardless (see OnSourceInitialized) —
-            // neither depends on Background.
-            Background = Brushes.Transparent,
-            Width = Math.Max(0, dip.Width),
-            Height = Math.Max(0, dip.Height),
-            IsHitTestVisible = false
-        };
-
-        Canvas.SetLeft(border, dip.X);
-        Canvas.SetTop(border, dip.Y);
-        BoxCanvas.Children.Add(border);
-    }
-
-    /// <summary>GREEN fields (round 6): a solid left-edge bar, not an outline — this element IS the colored bar itself, so it's a solid Background fill (no BorderBrush/Thickness at all), sized/positioned exactly to <paramref name="dip"/> (already the merged bar geometry from GreenBarGeometry).</summary>
-    private void AddGreenBar(DipRect dip)
+    /// <summary>ROUND 7: a solid left-edge bar for EITHER color — this element IS the colored bar itself, so it's a solid Background fill (no BorderBrush/Thickness at all), sized/positioned exactly to <paramref name="dip"/> (already the merged bar geometry from VerdictBarGeometry).</summary>
+    private void AddBar(DipRect dip, SolidColorBrush brush)
     {
         var bar = new Border
         {
-            Background = GreenBrush,
+            Background = brush,
             Width = Math.Max(0, dip.Width),
             Height = Math.Max(0, dip.Height),
             IsHitTestVisible = false

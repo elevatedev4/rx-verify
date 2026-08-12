@@ -5,18 +5,21 @@ using System.Linq;
 namespace RxVerifyOverlay.Integrated;
 
 /// <summary>
-/// Pure geometry for the round-6 green-field rendering change (owner:
-/// "make the green boxes just be a thicker left side only bar on the
-/// side of each field that is good ... too distracting to have
-/// everything encircled. Leave red boxes the way they are"). Takes the
-/// SAME fully-adjusted rects IntegratedBoxesWindow already computes for
-/// every field (BoxLayoutAdjuster's pad -&gt; flush -&gt; left-align
-/// pipeline runs identically for green AND red; only the RENDER-time
-/// branch differs) and derives a thin vertical bar at each rect's LEFT
-/// edge. A WPF Border's own stroke band starts AT the element's outer
-/// edge and extends INWARD, never outward — so a bar at X = rect.X,
-/// extending rightward by BarWidthDip, sits in exactly the same place
-/// the old encircling border's left edge did, just wider.
+/// Pure geometry behind the left-edge-bar verdict rendering. Originated in
+/// round 6 as a GREEN-only change (owner: "make the green boxes just be a
+/// thicker left side only bar on the side of each field that is good ...
+/// too distracting to have everything encircled. Leave red boxes the way
+/// they are") and generalized in round 7 (owner: red verdicts should
+/// render the SAME way — see IntegratedBoxesWindow.SetBoxes, which now
+/// calls this once per color instead of routing red through a separate
+/// full-border path). Nothing here is green- or red-specific: it takes
+/// the SAME fully-adjusted rects IntegratedBoxesWindow already computes
+/// for every field regardless of color (BoxLayoutAdjuster's pad -&gt;
+/// flush -&gt; left-align pipeline runs identically for both) and derives
+/// a thin vertical bar at each rect's LEFT edge. A WPF Border's own
+/// Background fill starts AT the element's outer edge — so a bar at
+/// X = rect.X, extending rightward by BarWidthDip, sits in exactly the
+/// same place the old encircling border's left edge did, just wider.
 ///
 /// MERGING (the actual "no seam" guarantee, not just a math coincidence):
 /// BoxLayoutAdjuster.SnapFlushAdjacentEdges already makes stacked rects'
@@ -28,17 +31,20 @@ namespace RxVerifyOverlay.Integrated;
 /// DeriveMergedBarRects removes that risk at the root by combining any
 /// run of bars that share the same X/Width and whose Y-ranges are
 /// exactly (or effectively) touching into ONE taller bar — with only one
-/// element, there's no boundary left to mis-render.
+/// element, there's no boundary left to mis-render. Each color's rects are
+/// merged independently (a green bar and a red bar are never merged into
+/// each other even if they'd otherwise touch — see SetBoxes).
 /// </summary>
-public static class GreenBarGeometry
+public static class VerdictBarGeometry
 {
     /// <summary>
-    /// How wide the green bar is — the owner asked for "thicker" than the
+    /// How wide a verdict bar is — the owner asked for "thicker" than the
     /// old 3px encircling border; 5 DIP (within the suggested 4-6 range)
     /// reads as a deliberate accent stripe without being wide enough to
     /// start covering meaningful width of a narrow field. An estimate,
     /// like every other geometry constant in this class — retune against
-    /// a live workstation.
+    /// a live workstation. Shared by both green and red bars — round 7's
+    /// whole point is one render style for both.
     /// </summary>
     public const double BarWidthDip = 5;
 
