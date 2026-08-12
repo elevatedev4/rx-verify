@@ -63,6 +63,20 @@ public sealed class PrescriptionRecord
     public string? Quantity { get; set; }
     public string? QuantityUnit { get; set; }
     public string? Refills { get; set; }
+
+    /// <summary>
+    /// SOURCE-side only. Mirrors types.ts PrescriptionRecord.refillsFromTotalFills:
+    /// true when Refills above was read off a "Total fills: N" key (seen
+    /// on responded renewal/refill-request e-scripts) rather than an
+    /// ordinary "Refills (...)" key — see
+    /// Parsing/EscriptTreeParser.cs ParseRefills. "Total fills" counts
+    /// the initial fill PLUS refills, so the refill count that should be
+    /// compared against what the technician entered is N-1 — the engine
+    /// (rx-verify src/quantity/index.ts compareRefills), not this class,
+    /// is the single source of truth for that adjustment; this flag only
+    /// tells it to apply one. Never meaningfully set on the entered side.
+    /// </summary>
+    public bool? RefillsFromTotalFills { get; set; }
     // DaysSupply removed: per Will's live-test feedback, days supply is
     // no longer read, compared, or displayed anywhere — see FieldOrder
     // below and types.ts's matching removal.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using RxVerifyOverlay.Models;
@@ -23,19 +24,21 @@ public static class EscriptTreeParser
 {
     /// <param name="message">
     /// The top-level "Message" node (the Escript Tree's single top-level
-    /// TreeItem in the real dump). Passing anything else (e.g. a node
-    /// that isn't a NewRx message — a renewal response, cancel, etc.)
-    /// simply yields an empty PrescriptionRecord, since no "NewRx"
-    /// container will be found under Body.
+    /// TreeItem in the real dump). Passing a message with no NewRx
+    /// container AND no other child holding a MedicationPrescribed
+    /// subtree (see FindPrescriptionContainer) simply yields an empty
+    /// PrescriptionRecord.
     /// </param>
     public static PrescriptionRecord Parse(EscriptNode message)
     {
         var body = Child(message, FieldMap.NodeBody);
-        var newRx = body is null ? null : Child(body, FieldMap.NodeNewRx);
+        var newRx = body is null ? null : FindPrescriptionContainer(body);
         if (newRx is null)
         {
             return new PrescriptionRecord();
         }
+
+        var (refills, refillsFromTotalFills) = ParseRefills(newRx);
 
         return new PrescriptionRecord
         {
@@ -50,9 +53,65 @@ public static class EscriptTreeParser
             QuantityUnit = ParseQuantityUnit(newRx),
             // DaysSupply removed entirely per Will's live-test feedback —
             // no longer read, compared, or displayed.
-            Refills = ParseRefills(newRx),
+            Refills = refills,
+            RefillsFromTotalFills = refillsFromTotalFills ? true : (bool?)null,
             SubstitutionsNotAllowed = ParseSubstitutionsNotAllowed(newRx)
         };
+    }
+
+    /// <summary>
+    /// Locates the Body child that holds the prescription data. The
+    /// confirmed real-dump shape (see class doc) is a child literally
+    /// named "NewRx" — that exact-name match is tried FIRST and, when
+    /// found, wins outright regardless of what it contains, so every
+    /// existing NewRx tree (including ones missing MedicationPrescribed
+    /// entirely, e.g. a message with only Patient data) keeps parsing
+    /// byte-for-byte identically to before this method existed.
+    ///
+    /// A RESPONDED renewal/refill-request message uses some other NCPDP
+    /// SCRIPT container name entirely (the exact name is unconfirmed
+    /// against a real dump — RxRenewalResponse is a plausible guess, not
+    /// a verified one). Rather than hardcoding a guessed list of every
+    /// possible NCPDP message-type container name, fall back to
+    /// STRUCTURAL detection: any Body child that directly holds a
+    /// MedicationPrescribed child — the same anchor node every other
+    /// Rx-level parse (ParseDrug/ParseSig/ParseQuantityValue/
+    /// ParseQuantityUnit/ParseWrittenDate/ParseRefills) already requires
+    /// to read anything at all — is accepted as the prescription
+    /// container. Returns null (empty record) when neither check finds
+    /// anything.
+    ///
+    /// DETERMINISM (round 2 reviewer should-fix): a real NCPDP renewal
+    /// response can carry more than one Body child that itself holds a
+    /// MedicationPrescribed subtree (e.g. a MedicationPrescribed section
+    /// alongside a separate MedicationDispensed section) — FirstOrDefault
+    /// alone would pick whichever happens to come first from
+    /// body.Children with no visibility into that being an ambiguous
+    /// choice. The first match (in body.Children order) still wins here
+    /// — this parser needs to return exactly one container either way —
+    /// but a multi-match is flagged via Debug.WriteLine so a wrong pick
+    /// is diagnosable. There is no structured logging anywhere in this
+    /// codebase to route this through instead (grepped Uia/ViewModels/
+    /// Integrated/Parsing for ILogger/Trace/Debug — none found);
+    /// Debug.WriteLine is the smallest addition that surfaces this in a
+    /// debugger/Output window without introducing a new dependency for a
+    /// case that, per the NCPDP shapes actually confirmed against a real
+    /// dump so far (see FieldMap.cs header), has never been observed.
+    /// </summary>
+    private static EscriptNode? FindPrescriptionContainer(EscriptNode body)
+    {
+        var namedNewRx = Child(body, FieldMap.NodeNewRx);
+        if (namedNewRx is not null) return namedNewRx;
+
+        var candidates = body.Children.Where(c => Child(c, FieldMap.NodeMedicationPrescribed) is not null).ToList();
+        if (candidates.Count > 1)
+        {
+            Debug.WriteLine(
+                $"EscriptTreeParser.FindPrescriptionContainer: {candidates.Count} Body children each hold a " +
+                $"MedicationPrescribed subtree; using the first one found ('{candidates[0].Name}').");
+        }
+
+        return candidates.FirstOrDefault();
     }
 
     /// <summary>
@@ -72,6 +131,17 @@ public static class EscriptTreeParser
     /// since notes are a source-only, display-only concern, not part of
     /// the engine's field-by-field comparison contract — see
     /// Uia/FieldReader.cs SourceNotes.
+    ///
+    /// BLOCKER FIX (round 2 reviewer): this used to look up the
+    /// prescription container via a direct Child(body, "NewRx") call,
+    /// independent of Parse()'s own FindPrescriptionContainer fallback —
+    /// so once Parse() started structurally detecting non-NewRx-named
+    /// containers (a renewal response, say), this method still silently
+    /// found nothing and dropped every NewRx-level/MedicationPrescribed-
+    /// level note for exactly the messages that fallback exists for. Now
+    /// routed through the SAME FindPrescriptionContainer used by Parse(),
+    /// so the two can never disagree on which container is "the"
+    /// prescription data for a given message.
     /// </summary>
     public static IReadOnlyList<string> ParseNotes(EscriptNode message)
     {
@@ -81,7 +151,7 @@ public static class EscriptTreeParser
         CollectNotesFrom(message, notes);
 
         var body = Child(message, FieldMap.NodeBody);
-        var newRx = body is null ? null : Child(body, FieldMap.NodeNewRx);
+        var newRx = body is null ? null : FindPrescriptionContainer(body);
         if (newRx is null) return notes;
 
         // NewRx-level (medication-directed notes not nested under
@@ -312,32 +382,54 @@ public static class EscriptTreeParser
         return FormatIsoDateForDisplay(raw);
     }
 
-    private static string? ParseRefills(EscriptNode newRx)
+    /// <summary>
+    /// Returns the raw refill-count text plus whether it came from a
+    /// Total-fills-style key rather than an ordinary Refills key. Both
+    /// keys have the same "colon inside a parenthetical" hazard, e.g.
+    /// "Refills (NewRx: One dispense, plus (Quantity) refills): 1" — find
+    /// each directly (by prefix) rather than via Leaf()'s normal
+    /// exact-key lookup, since Leaf()/SplitKeyValue always does the
+    /// FIRST-": " split — that would land right after "NewRx" here and
+    /// misparse this one specifically. Split on the LAST ": " instead,
+    /// which lands right after the closing paren (or immediately, for a
+    /// plain "Total fills: 4" with no parenthetical) and before the
+    /// integer count.
+    ///
+    /// "Refills (" wins when BOTH keys are somehow present on the same
+    /// MedicationPrescribed node — mirrors the OCR path's documented
+    /// both-labels precedence (src/ocr/parseEscriptOcr.ts). The raw value
+    /// is returned UNTRANSFORMED either way — the engine
+    /// (rx-verify src/quantity/index.ts compareRefills) is the single
+    /// source of truth for subtracting 1 off a Total-fills count; this
+    /// parser never does that math itself.
+    /// </summary>
+    private static (string? Value, bool FromTotalFills) ParseRefills(EscriptNode newRx)
     {
         var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
-        if (med is null) return null;
+        if (med is null) return (null, false);
 
-        // The Refills leaf's raw Name is unlike every other leaf here —
-        // its key text itself contains a colon inside a parenthetical,
-        // e.g. "Refills (NewRx: One dispense, plus (Quantity) refills): 1".
-        // Find it directly (by prefix) rather than via Leaf()'s normal
-        // exact-key lookup, since Leaf()/SplitKeyValue always does the
-        // FIRST-": " split — that would land right after "NewRx" here
-        // and misparse this one specifically. Split on the LAST ": "
-        // instead, which lands right after the closing paren and before
-        // the integer refill count.
         var refillsLeaf = med.Children.FirstOrDefault(c => c.Name.StartsWith(FieldMap.RefillsKeyPrefix, StringComparison.Ordinal));
-        if (refillsLeaf is null) return null;
+        if (refillsLeaf is not null)
+        {
+            return (NullIfEmpty(SplitOnLastColonSpace(refillsLeaf.Name)), false);
+        }
 
-        var value = SplitOnLastColonSpace(refillsLeaf.Name);
-        return NullIfEmpty(value);
+        var totalFillsLeaf = med.Children.FirstOrDefault(c =>
+            FieldMap.TotalFillsKeyPrefixes.Any(prefix => c.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)));
+        if (totalFillsLeaf is not null)
+        {
+            return (NullIfEmpty(SplitOnLastColonSpace(totalFillsLeaf.Name)), true);
+        }
+
+        return (null, false);
     }
 
     /// <summary>
     /// Returns everything AFTER the LAST occurrence of ": " in the text.
-    /// Used only for the Refills leaf (see ParseRefills, and
-    /// FieldMap.RefillsKeyPrefix) — every other leaf in the tree uses the
-    /// general first-": "-split via SplitKeyValue/Leaf().
+    /// Used only for the Refills/Total-fills leaf (see ParseRefills, and
+    /// FieldMap.RefillsKeyPrefix/TotalFillsKeyPrefixes) — every other leaf
+    /// in the tree uses the general first-": "-split via
+    /// SplitKeyValue/Leaf().
     /// </summary>
     private static string SplitOnLastColonSpace(string text)
     {

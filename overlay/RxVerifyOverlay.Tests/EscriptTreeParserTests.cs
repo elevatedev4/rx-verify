@@ -314,6 +314,221 @@ public class EscriptTreeParserTests
     }
 
     [Fact]
+    public void Parse_FullTree_RefillsFromTotalFillsIsNullForOrdinaryNewRxRefillsKey()
+    {
+        // BuildFullSyntheticMessage uses the ordinary multi-colon
+        // "Refills (" key (not Total fills) — RefillsFromTotalFills must
+        // stay null (not false), matching TS's optional-boolean
+        // "only set when true" convention (see types.ts
+        // refillsFromTotalFills doc / src/ocr/parseEscriptOcr.ts).
+        var record = EscriptTreeParser.Parse(BuildFullSyntheticMessage());
+        Assert.Equal("2", record.Refills);
+        Assert.Null(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_RenewalShapedContainer_StructurallyDetectedByMedicationPrescribedSubtree()
+    {
+        // Synthetic renewal-response shape: the Body child is NOT named
+        // "NewRx" (a plausible fake name, RxRenewalResponse, is used
+        // here, but the parser must not be matching on this literal name
+        // — see FindPrescriptionContainer). It must still parse drug
+        // fields via structural detection (a MedicationPrescribed child),
+        // and read its "Total fills" key as a refill count with
+        // RefillsFromTotalFills=true, raw value passed through
+        // untransformed (the -1 adjustment is the TS engine's job, not
+        // this parser's — see rx-verify src/quantity/index.ts compareRefills).
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("Patient",
+                        EscriptNode.Container("Name",
+                            EscriptNode.Leaf("LastName", "Renewalperson"),
+                            EscriptNode.Leaf("FirstName", "Jordan"))),
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Fakamycin 1 % Lotion"),
+                        new EscriptNode("Total fills: 4")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("Renewalperson, Jordan", record.PatientName);
+        Assert.NotNull(record.Drug);
+        Assert.Equal("Fakamycin 1 % Lotion", record.Drug!.Name);
+        Assert.Equal("4", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_UnrecognizedContainerWithNoMedicationPrescribed_YieldsEmptyRecord()
+    {
+        // A message type that isn't NewRx and doesn't carry a
+        // MedicationPrescribed subtree anywhere (e.g. a cancel or status
+        // message) must still yield an empty record — structural
+        // detection must not accept just any non-NewRx container.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("CancelRxResponse",
+                    EscriptNode.Leaf("Status", "Approved"))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Null(record.PatientName);
+        Assert.Null(record.Drug);
+        Assert.Null(record.Refills);
+        Assert.Null(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_BothRefillsAndTotalFillsKeysPresent_RefillsKeyWins()
+    {
+        // Mirrors the OCR path's documented both-labels precedence
+        // (src/ocr/parseEscriptOcr.ts): when a node somehow carries both
+        // keys, the ordinary "Refills (" value is used and
+        // RefillsFromTotalFills stays null/false — the Total fills key
+        // is ignored entirely.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("NewRx",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Refills (NewRx: One dispense, plus (Quantity) refills): 3"),
+                        new EscriptNode("Total fills: 4")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("3", record.Refills);
+        Assert.Null(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsKeyIsCaseInsensitive()
+    {
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("TOTAL FILLS: 2")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("2", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsOfOne_RawValuePreservedUntransformed()
+    {
+        // "Total fills: 1" means one fill and ZERO refills once the
+        // engine applies its N-1 adjustment — but this parser must pass
+        // the raw "1" through untouched (never subtract here itself);
+        // see ParseRefills doc and rx-verify src/quantity/index.ts
+        // compareRefills (Math.max(0, n-1)), the single source of truth
+        // for that math.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Total fills: 1")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("1", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsParentheticalStyle_SplitsOnLastColonSpaceLikeRefillsDoes()
+    {
+        // Tolerates the same verbose multi-colon parenthetical style as
+        // RefillsKeyPrefix, per FieldMap.TotalFillsKeyPrefixes doc — the
+        // embedded "renewal: response" colon must not be mistaken for the
+        // key/value split point.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Total fills (renewal: total incl. initial fill): 4")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("4", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsLookalikeLabel_DoesNotOverMatch()
+    {
+        // Round 2 reviewer should-fix: TotalFillsKeyPrefixes requires the
+        // immediate ": " or " (" delimiter right after "Total fills" —
+        // an unrelated label that merely STARTS WITH those two words
+        // (no delimiter following) must not be mistaken for the
+        // Total-fills refill key.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Total fillsAuthorizedThisYear: 12")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Null(record.Refills);
+        Assert.Null(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_MultipleBodyChildrenHoldMedicationPrescribed_DeterministicallyPicksTheFirst()
+    {
+        // Round 2 reviewer should-fix: a real NCPDP renewal could carry
+        // more than one section holding a MedicationPrescribed subtree
+        // (e.g. alongside a separate MedicationDispensed-shaped section).
+        // FindPrescriptionContainer must still return exactly one
+        // container, deterministically (first match in body.Children
+        // order) — never throw, never pick unpredictably.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "First Candidate 10 MG Tablet"))),
+                EscriptNode.Container("SomeOtherSection",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Second Candidate 20 MG Tablet")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.NotNull(record.Drug);
+        Assert.Equal("First Candidate 10 MG Tablet", record.Drug!.Name);
+    }
+
+    [Fact]
+    public void ParseNotes_RenewalShapedContainer_MedicationLevelNoteIsCollected()
+    {
+        // Blocker fix (round 2 reviewer): ParseNotes used to look up the
+        // prescription container via a direct NewRx-name check,
+        // independent of Parse()'s structural-detection fallback — so a
+        // renewal-shaped container's NewRx-level/MedicationPrescribed-
+        // level notes were silently dropped even after Parse() itself
+        // could read the rest of the record. Must now go through the
+        // SAME FindPrescriptionContainer as Parse().
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    new EscriptNode("Note: Renewal approved with a note"),
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        EscriptNode.Container("Note",
+                            EscriptNode.Leaf("NoteText", "Counsel patient on renewal timing"))))));
+
+        var notes = EscriptTreeParser.ParseNotes(message);
+
+        Assert.Contains("Renewal approved with a note", notes);
+        Assert.Contains("Counsel patient on renewal timing", notes);
+    }
+
+    [Fact]
     public void Parse_PrescriberNpiNestedUnderIdentification_NotADirectLeaf()
     {
         var message = EscriptNode.Container("Message",
