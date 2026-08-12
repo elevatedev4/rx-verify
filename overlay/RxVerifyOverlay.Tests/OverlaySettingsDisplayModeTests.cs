@@ -14,10 +14,13 @@ namespace RxVerifyOverlay.Tests;
 public class OverlaySettingsDisplayModeTests
 {
     [Fact]
-    public void DefaultsToSeparate()
+    public void DefaultsToIntegrated()
     {
+        // Flipped 2026-08-12: the owner uses Integrated daily and asked
+        // for it to be what a fresh install/machine starts in (see
+        // Models/OverlaySettings.cs DisplayMode doc).
         var settings = new OverlaySettings();
-        Assert.Equal(DisplayMode.Separate, settings.DisplayMode);
+        Assert.Equal(DisplayMode.Integrated, settings.DisplayMode);
     }
 
     [Fact]
@@ -43,16 +46,37 @@ public class OverlaySettingsDisplayModeTests
     }
 
     [Fact]
-    public void OldSettingsJsonWithoutDisplayModeKeyDefaultsToSeparate()
+    public void ExplicitSeparateChoiceSurvivesTheDefaultBeingIntegrated()
+    {
+        // The default flipping to Integrated must never mean a pharmacist
+        // who deliberately chose Separate gets overridden back to
+        // Integrated on next load — an explicit "DisplayMode":"Separate"
+        // key in settings.json always wins over whatever the class-level
+        // default is.
+        const string json = "{\"DisplayMode\":\"Separate\",\"Method\":\"Ocr\"}";
+
+        var restored = JsonSerializer.Deserialize<OverlaySettings>(json);
+
+        Assert.NotNull(restored);
+        Assert.Equal(DisplayMode.Separate, restored!.DisplayMode);
+    }
+
+    [Fact]
+    public void OldSettingsJsonWithoutDisplayModeKeyDefaultsToIntegrated()
     {
         // Mirrors a real settings.json written before this field existed
-        // — an installation upgrading mid-shift must never silently land
-        // in Integrated mode it never opted into.
+        // — such a file predates ever having made a Separate/Integrated
+        // choice at all, so it now lands on today's default (Integrated,
+        // flipped 2026-08-12) the same as a brand-new settings.json would.
+        // A settings.json that DOES contain an explicit "DisplayMode" key
+        // (i.e. the pharmacist already made a choice, see
+        // RoundTripsThroughJson above) is unaffected either way — this
+        // test is only about the missing-key case.
         const string legacyJson = "{\"Method\":\"Ocr\",\"EngineCliPath\":\"C:\\\\dist\\\\cli.js\",\"NodeExecutable\":\"node\"}";
 
         var restored = JsonSerializer.Deserialize<OverlaySettings>(legacyJson);
 
         Assert.NotNull(restored);
-        Assert.Equal(DisplayMode.Separate, restored!.DisplayMode);
+        Assert.Equal(DisplayMode.Integrated, restored!.DisplayMode);
     }
 }

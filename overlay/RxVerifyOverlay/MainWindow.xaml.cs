@@ -70,8 +70,9 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     private bool _suppressMethodChangeHandler = true;
 
     // Same defensive-suppression reasoning as _suppressMethodChangeHandler
-    // above, for the new Display-mode toggle (DisplaySeparateRadioButton's
-    // XAML-default IsChecked="True").
+    // above, for the Display-mode toggle (DisplayIntegratedRadioButton's
+    // XAML-default IsChecked="True" — Integrated is the default, see
+    // Models/OverlaySettings.cs DisplayMode).
     private bool _suppressDisplayModeChangeHandler = true;
 
     // INTEGRATED DISPLAY MODE (Integrated/IntegratedOverlayCoordinator.cs)
@@ -176,7 +177,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         _suppressMethodChangeHandler = false;
 
         // Display-mode toggle — reflect the saved/default setting
-        // (default Separate, see Models/OverlaySettings.cs DisplayMode)
+        // (default Integrated, see Models/OverlaySettings.cs DisplayMode)
         // without treating this as a user-driven change (see
         // _suppressDisplayModeChangeHandler doc).
         if (_settings.DisplayMode == DisplayMode.Integrated)

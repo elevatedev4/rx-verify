@@ -24,10 +24,11 @@ namespace RxVerifyOverlay.Integrated;
 /// clipboard code — nothing here talks to the engine or writes
 /// settings.json except DisplayMode (see SetDisplayMode).
 ///
-/// Lazily constructs both windows on first need (the common case —
-/// Separate is the default — never even creates them), so a pharmacist
-/// who never touches Integrated mode pays zero cost for this feature
-/// beyond Tick()'s one cheap enum-comparison early-out.
+/// Lazily constructs both windows on first need — Integrated is now the
+/// default (see Models/OverlaySettings.cs DisplayMode), so the common
+/// case DOES create them, but a pharmacist who deliberately switches to
+/// and stays on Separate still pays zero cost for this feature beyond
+/// Tick()'s one cheap enum-comparison early-out.
 /// </summary>
 public sealed class IntegratedOverlayCoordinator
 {

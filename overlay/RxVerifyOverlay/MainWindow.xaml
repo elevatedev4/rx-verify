@@ -89,7 +89,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" /> <!-- Title -->
             <RowDefinition Height="Auto" /> <!-- Verification method toggle (OCR default / Escript tab direct read) -->
-            <RowDefinition Height="Auto" /> <!-- Display mode toggle (Separate window default / Integrated-over-Pioneer) -->
+            <RowDefinition Height="Auto" /> <!-- Display mode toggle (Integrated-over-Pioneer default / Separate window) -->
             <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
             <RowDefinition Height="Auto" /> <!-- W-T11 item 6: e-script notes, red text, only when present -->
             <RowDefinition Height="Auto" /> <!-- VerifyOCR: OCR status line + raw-text expander -->
@@ -136,10 +136,11 @@
         </StackPanel>
 
         <!--
-            Row 2 (INTEGRATED DISPLAY MODE): Separate (this standalone
-            window, the original/default behavior) vs. Integrated (verdict
-            boxes drawn directly over PioneerRx + a small control panel in
-            its ribbon — see Integrated/IntegratedOverlayCoordinator.cs).
+            Row 2 (INTEGRATED DISPLAY MODE): Integrated (verdict boxes
+            drawn directly over PioneerRx + a small control panel in its
+            ribbon — see Integrated/IntegratedOverlayCoordinator.cs, now
+            the default, see Models/OverlaySettings.cs DisplayMode) vs.
+            Separate (this standalone window, the original behavior).
             This toggle is the ONLY way to switch INTO Integrated mode —
             once there, this window hides itself (see MainWindow.xaml.cs
             HideSeparateWindowRequested) and the control box's OWN
@@ -151,10 +152,10 @@
         -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="View:" Foreground="#FF888888" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0" />
-            <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="DisplayMode" Content="Separate window (default)"
+            <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="DisplayMode" Content="Integrated (over PioneerRx, default)"
                          Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Margin="0,0,10,0"
                          IsChecked="True" Checked="OnDisplayModeChanged" />
-            <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="DisplayMode" Content="Integrated (over PioneerRx)"
+            <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="DisplayMode" Content="Separate window"
                          Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Checked="OnDisplayModeChanged" />
         </StackPanel>
 
