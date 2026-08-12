@@ -146,7 +146,28 @@ const NDC_TO_RXCUI: Record<string, string> = {
   '00093716301': 'FX0020' // gabapentin 300mg
 };
 
-/** Fixture-backed implementation of RxNormProvider for dev/tests. */
+/**
+ * Fixture-backed implementation of RxNormProvider for dev/tests ONLY --
+ * DO NOT wire this into any live/production code path. src/cli.ts wires
+ * up LocalNdcProvider (the real, openFDA-backed provider) for that; this
+ * class exists purely so tests don't need the ~130k-concept dataset.
+ *
+ * Reviewer round 1 (drug-name-fallback review), confirmed live risk: this
+ * class's NAME lookup (see getConcept below) is intentionally much
+ * cruder than LocalNdcProvider.resolveConceptByName -- it matches on a
+ * bare leading brand/ingredient word and IGNORES stated strength and
+ * salt entirely. That's fine for this file's own unit tests (which
+ * either pick names precisely to exploit or avoid that behavior) but
+ * would be actively unsafe wired up for real verification: e.g.
+ * "Metoprolol Tartrate 50 Mg Tablet" and "Metoprolol Succinate 50 Mg
+ * Tablet" both leading-word-match this fixture's single "metoprolol"
+ * concept and would false-GREEN via the concept_match path in
+ * compareDrugs below, silently blurring two clinically different,
+ * non-interchangeable products. LocalNdcProvider's resolveConceptByName
+ * does NOT have this gap (it narrows candidates by stated strength/
+ * release-qualifier before ever calling something unambiguous) -- see
+ * that function's own doc.
+ */
 export class FixtureProvider implements RxNormProvider {
   getConcept(ndcOrName: string): RxConcept | null {
     const normalizedNdc = parseNdc(ndcOrName);
@@ -946,6 +967,267 @@ function stripFormRouteQualifiers(normalizedName: string): string {
     .join(' ');
 }
 
+/**
+ * Component-wise name fallback (see compareNameComponents/
+ * decomposeDrugNameComponents below, and compareDrugs' unknown_drug
+ * branch): field report -- source e-script "TRAMADOL 50 MG ORAL TABLET"
+ * vs entered "Tramadol Hcl 50 Mg Tablet" went yellow unknown_drug because
+ * the synthetic 20-concept fixture (and, live, the local openFDA-derived
+ * dataset when it simply doesn't carry a drug) resolved NEITHER side to a
+ * concept, so no name-based comparison ever ran at all -- despite the two
+ * names describing the same drug (one states the salt, the other
+ * doesn't). RxNorm-grade resolution for every drug is separate, longer-
+ * term work (see this file's header); this is a conservative, purely
+ * name-based structural comparison that only ever runs as a LAST RESORT
+ * when concept resolution has already failed for at least one side.
+ *
+ * Curated salt/ester tokens this fallback recognizes. NOT exhaustive --
+ * covers the common salts/esters seen in this engine's field reports plus
+ * standard pharmacy nomenclature. A salt token NOT on this list is simply
+ * treated as an ordinary ingredient token instead, which can only make
+ * the ingredient-set comparison below MORE strict (never a false green)
+ * -- safe by this file's IRON RULE regardless of gaps in this list.
+ */
+export const SALT_TOKENS = new Set([
+  'hcl', 'hydrochloride', 'hbr', 'hydrobromide', 'sodium', 'potassium',
+  'calcium', 'magnesium', 'sulfate', 'tartrate', 'bitartrate', 'succinate',
+  'maleate', 'mesylate', 'besylate', 'tosylate', 'citrate', 'fumarate',
+  'pamoate', 'phosphate', 'acetate', 'valerate', 'propionate',
+  'dipropionate', 'monohydrate', 'dihydrate'
+]);
+
+/**
+ * Curated route-of-administration tokens for the component-wise
+ * name-fallback comparison only. Deliberately a SEPARATE, smaller list
+ * from FORM_ROUTE_QUALIFIERS above (that one feeds the pre-concept-
+ * resolution identity fast path and is independently scoped) -- this one
+ * additionally recognizes the common abbreviations "po"/"sl" that show up
+ * in free-text drug names.
+ *
+ * Reviewer round 1, should-fix 5: this list deliberately does NOT include
+ * FORM_ROUTE_QUALIFIERS' subcutaneous/intramuscular/intravenous/inhalation
+ * -- those are left to fall through to the ordinary ingredient-token
+ * bucket below (never recognized as a tolerated one-sided route by this
+ * fallback), so a name stating one of these higher-stakes parenteral/
+ * inhalation routes must match EXACTLY on both sides (or be absent from
+ * both) to ever reach a green here, the same conservative treatment
+ * "injectable"/"injection" get below -- never silently tolerated
+ * one-sided.
+ *
+ * Reviewer round 1, should-fix 4: "injection"/"injectable" are listed
+ * here AS ROUTES on purpose, even though "injection" is ALSO a canonical
+ * dosage-FORM word (DOSAGE_FORM_WORDS folds "inj" -> "injection", which
+ * feeds COMPONENT_FORM_TOKENS below). Route tokens are bucketed BEFORE
+ * form tokens in decomposeDrugNameComponents' loop, so a raw "injection"/
+ * "injectable" token is always consumed as a ROUTE, never as the FORM --
+ * meaning `form` can never be populated from an injectable name, and rule
+ * 3 below (form must be stated and agree on both sides) then ALWAYS
+ * blocks green for any injectable-route pair. This is intentional and
+ * fail-safe (injectable products stay conservatively excluded from this
+ * newer, less-reviewed fallback rather than risking a green on
+ * unreviewed dose-form reasoning), not an oversight -- see should-fix 4.
+ */
+const COMPONENT_ROUTE_TOKENS = new Set([
+  'oral', 'po', 'sublingual', 'sl', 'topical', 'ophthalmic', 'otic',
+  'nasal', 'rectal', 'vaginal', 'transdermal', 'injectable', 'injection'
+]);
+
+/**
+ * Canonical dosage-form tokens the component-wise name-fallback
+ * comparison recognizes. Reuses DOSAGE_FORM_WORDS' own canonical
+ * (folded-TO) values -- so any raw abbreviation normalizeDrugNameString
+ * already knows how to fold ("tab" -> "tablet", etc) is recognized here
+ * too, by the time this runs -- plus a handful of additional common forms
+ * that already appear spelled out and need no folding.
+ */
+const COMPONENT_FORM_TOKENS = new Set<string>([
+  ...Object.values(DOSAGE_FORM_WORDS),
+  'inhaler', 'lotion', 'gel', 'spray', 'patch', 'elixir', 'syrup', 'powder', 'lozenge', 'foam', 'shampoo'
+]);
+
+function tokenSetsEqual(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) {
+    if (!b.has(v)) return false;
+  }
+  return true;
+}
+
+interface DrugNameComponents {
+  ingredientTokens: Set<string>;
+  strength: string | null;
+  form: string | null;
+  salts: Set<string>;
+  routes: Set<string>;
+  release: string | null;
+  /**
+   * Ratio-shaped numeric tokens ("5/325", "5-325", decimals included) IN
+   * ENCOUNTER ORDER -- see decomposeDrugNameComponents' isRatioToken doc
+   * for why these get their own bucket instead of either being disposed
+   * of as strength "noise" or folded into the generic ingredient set.
+   */
+  ratios: string[];
+}
+
+/**
+ * Decompose a free-text drug name into structured components for
+ * compareNameComponents below. Reuses this file's existing normalization/
+ * extraction helpers -- normalizeDrugNameString (case/whitespace/
+ * punctuation, dosage-form folding, release-phrase folding already
+ * applied), extractStatedStrength/extractStatedConcentrationStrength, and
+ * extractReleaseQualifier -- and adds only the NEW salt/route vocabulary
+ * (SALT_TOKENS/COMPONENT_ROUTE_TOKENS) plus the bucketing logic that pulls
+ * them (and the form word, and release-qualifier tokens) out of the
+ * ingredient tokens. Whatever's left is the ingredient token set
+ * (order-insensitive).
+ */
+function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
+  const concStrength = extractStatedConcentrationStrength(rawName);
+  const strength = concStrength ?? extractStatedStrength(rawName);
+  const release = extractReleaseQualifier(rawName);
+
+  const normalized = normalizeDrugNameString(rawName);
+  const tokens = normalized.split(' ').filter(Boolean);
+
+  const isNumeric = (tok: string): boolean => /^\d+(\.\d+)?%?$/.test(tok);
+  const isUnitWord = (tok: string): boolean => /^(mcg|mg|ml|g|units?|unit)$/.test(tok);
+  // Reviewer round 1, BLOCKER 1 fix (a): a token is only a disposable
+  // "unit-glued-across-a-slash" remnant (e.g. "mg/0.5", produced by this
+  // file's own digit+unit spacing step acting on "12.5 mg/0.5 mL" --
+  // see extractStatedConcentrationStrength's doc) when AT LEAST ONE half
+  // is a literal unit WORD. A token whose halves are BOTH pure numbers
+  // ("5/325") is a combo-product dose RATIO, not unit noise, and must
+  // never be silently dropped here -- see isRatioToken below, which is
+  // exactly the case this used to wrongly swallow (a confirmed live
+  // false GREEN: "Hydrocodone/Acetaminophen 5/325" vs ".../10/325").
+  const isSlashUnit = (tok: string): boolean =>
+    tok.includes('/') &&
+    tok.split('/').every((p) => isNumeric(p) || isUnitWord(p)) &&
+    tok.split('/').some((p) => isUnitWord(p));
+  // Reviewer round 1, BLOCKER 1 fix (b): a token that is PURELY a numeric
+  // ratio -- "5/325" or "5-325", decimals allowed on either side -- is
+  // dose-identity-bearing (e.g. hydrocodone/acetaminophen's two combo
+  // strengths) and must never be treated as disposable strength noise
+  // OR folded anonymously into the generic ingredient-token set (a
+  // hyphen-ratio happens to survive there today only as an accident of
+  // tokenization, not by design). Captured into its own `ratios` list,
+  // IN ORDER, and compared for exact equality by compareNameComponents
+  // below -- any mismatch (including a length mismatch) blocks green.
+  const isRatioToken = (tok: string): boolean => /^\d+(?:\.\d+)?[/-]\d+(?:\.\d+)?$/.test(tok);
+
+  const salts = new Set<string>();
+  const routes = new Set<string>();
+  let form: string | null = null;
+  const ingredientTokens = new Set<string>();
+  const ratios: string[] = [];
+
+  for (const tok of tokens) {
+    if (RELEASE_QUALIFIER_TOKENS.has(tok)) continue;
+    if (isNumeric(tok) || isUnitWord(tok) || isSlashUnit(tok)) continue;
+    if (isRatioToken(tok)) {
+      ratios.push(tok);
+      continue;
+    }
+    if (SALT_TOKENS.has(tok)) {
+      salts.add(tok);
+      continue;
+    }
+    if (COMPONENT_ROUTE_TOKENS.has(tok)) {
+      routes.add(tok);
+      continue;
+    }
+    if (COMPONENT_FORM_TOKENS.has(tok)) {
+      if (form === null) form = tok;
+      continue;
+    }
+    ingredientTokens.add(tok);
+  }
+
+  return { ingredientTokens, strength, form, salts, routes, release, ratios };
+}
+
+/**
+ * Conservative, order-sensitive structured comparison of two raw drug
+ * names -- see this section's header comment for why this exists and
+ * compareDrugs' unknown_drug branch for the (single) call site. Returns a
+ * match, or a non-match with an optional human-readable `note` (populated
+ * for a genuine salt/route conflict, so the resulting yellow explanation
+ * can name the two differing values -- e.g. "metoprolol tartrate" vs
+ * "metoprolol succinate" must never be blurred into the same verdict).
+ *
+ * IRON RULE: this can only ever confirm a GREEN or fall through to the
+ * existing unknown_drug YELLOW -- name-derived evidence alone must never
+ * produce a RED (see this file's header). Order matters, most specific
+ * disqualifier first:
+ *  0. (reviewer round 1, should-fix 3) defense-in-depth: an EMPTY
+ *     ingredient-token set on either side is never a match, even against
+ *     another empty set -- without this, a name consisting entirely of
+ *     salt/route/form/strength words (no leftover ingredient token at
+ *     all) could otherwise vacuously satisfy rule 1's set-equality check
+ *     via two empty sets. Guards against future vocabulary growth
+ *     (SALT_TOKENS/COMPONENT_ROUTE_TOKENS/COMPONENT_FORM_TOKENS all
+ *     absorbing more words over time) quietly reopening this;
+ *  1. ingredient token sets must be equal (order-insensitive);
+ *  1b. (reviewer round 1, BLOCKER 1 fix) ratio-shaped numeric tokens
+ *      ("5/325", "5-325") must be equal IN ORDER -- a combo product's
+ *      dose ratio is identity-bearing, never disposable strength noise;
+ *  2. both sides must state a strength, and it must agree;
+ *  3. dosage form must be stated and agree on both sides;
+ *  4. salt: one side stating a salt the other is silent on is tolerated;
+ *     BOTH stating a salt that DIFFERS is a genuine, clinically real
+ *     distinction and is never a match;
+ *  5. route: same asymmetric rule as salt;
+ *  6. release qualifier: any difference (asymmetric or a genuine
+ *     conflict) defers to the existing behavior -- never greened here.
+ */
+function compareNameComponents(
+  srcName: string,
+  entName: string
+): { match: true } | { match: false; note: string | null } {
+  const src = decomposeDrugNameComponents(srcName);
+  const ent = decomposeDrugNameComponents(entName);
+
+  if (src.ingredientTokens.size === 0 || ent.ingredientTokens.size === 0) {
+    return { match: false, note: null };
+  }
+
+  if (!tokenSetsEqual(src.ingredientTokens, ent.ingredientTokens)) {
+    return { match: false, note: null };
+  }
+
+  if (src.ratios.length !== ent.ratios.length || src.ratios.some((r, i) => r !== ent.ratios[i])) {
+    return { match: false, note: null };
+  }
+
+  if (!src.strength || !ent.strength || src.strength !== ent.strength) {
+    return { match: false, note: null };
+  }
+
+  if (!src.form || !ent.form || src.form !== ent.form) {
+    return { match: false, note: null };
+  }
+
+  if (src.salts.size > 0 && ent.salts.size > 0 && !tokenSetsEqual(src.salts, ent.salts)) {
+    return {
+      match: false,
+      note: `stated salt differs (${[...src.salts].sort().join('/')} vs ${[...ent.salts].sort().join('/')})`
+    };
+  }
+
+  if (src.routes.size > 0 && ent.routes.size > 0 && !tokenSetsEqual(src.routes, ent.routes)) {
+    return {
+      match: false,
+      note: `stated route differs (${[...src.routes].sort().join('/')} vs ${[...ent.routes].sort().join('/')})`
+    };
+  }
+
+  if (src.release !== ent.release) {
+    return { match: false, note: null };
+  }
+
+  return { match: true };
+}
+
 export function compareDrugs(
   sourceRaw: { name?: string; ndc?: string } | null | undefined,
   enteredRaw: { name?: string; ndc?: string } | null | undefined,
@@ -1110,6 +1392,31 @@ export function compareDrugs(
   const entConcept = entConceptViaNdc ?? (ent.name ? provider.getConcept(ent.name) : null);
 
   if (!srcConcept || !entConcept) {
+    // Component-wise name fallback (see compareNameComponents' doc above):
+    // concept resolution failed for at least one side -- before giving up,
+    // try a STRUCTURED comparison of the two raw names themselves. Guarded
+    // by !durationConflict for the same reason the name-identity and
+    // route-fold fast paths above are: a genuine stated-duration
+    // contradiction (12 hour vs 24 hour) must never be resolved to green
+    // by any name-based path, no matter how the rest of the name
+    // normalizes.
+    if (!durationConflict && src.name && ent.name) {
+      const componentResult = compareNameComponents(src.name, ent.name);
+      if (componentResult.match) {
+        return {
+          status: 'green',
+          reasonCode: 'name_component_match',
+          explanation: `Names match after component normalization (salt/route wording differs but is compatible); not resolved against a drug database ("${src.name}" / "${ent.name}").`
+        };
+      }
+      if (componentResult.note) {
+        return {
+          status: 'yellow',
+          reasonCode: 'unknown_drug',
+          explanation: `Could not resolve one or both drugs to a known concept; needs human review (${componentResult.note}).`
+        };
+      }
+    }
     return {
       status: 'yellow',
       reasonCode: 'unknown_drug',

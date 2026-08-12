@@ -5,10 +5,25 @@ import {
   normalizeDrugNameString,
   extractStatedDurationHours,
   extractStatedConcentrationStrength,
-  FixtureProvider
+  FixtureProvider,
+  type RxNormProvider
 } from '../src/drug/index.js';
 
 const provider = new FixtureProvider();
+
+// Used only by the "component-wise name fallback" suite below: the
+// 20-concept FixtureProvider's name lookup matches on a bare leading
+// ingredient word (see FixtureProvider.getConcept's "leadMatch" step),
+// ignoring stated strength entirely -- so e.g. both "Metoprolol Tartrate
+// 50 Mg Tablet" and "Metoprolol Succinate 50 Mg Tablet" would resolve to
+// the SAME fixture concept (FX0014, "Metoprolol 25mg tablet") and never
+// reach the unknown_drug branch this feature targets. That's a known
+// simplification of the small test fixture, not of the real
+// LocalNdcProvider (whose resolveConceptByName narrows by stated strength
+// -- see that function's doc in src/drug/index.ts). This stub always
+// fails resolution, mirroring the actual field report: the synthetic/
+// local dataset doesn't carry the drug at all.
+const unresolvedProvider: RxNormProvider = { getConcept: () => null };
 
 describe('parseNdc', () => {
   it('parses an 11-digit NDC', () => {
@@ -526,6 +541,198 @@ describe('Round 6 fixes', () => {
 
     it('"dextroamphetam" expands to "dextroamphetamine"', () => {
       expect(normalizeDrugNameString('dextroamphetam 5 mg tablet')).toBe('dextroamphetamine 5 mg tablet');
+    });
+  });
+});
+
+// Owner-reported live false negative: source "TRAMADOL 50 MG ORAL TABLET"
+// vs entered "Tramadol Hcl 50 Mg Tablet" went yellow unknown_drug because
+// the synthetic fixture concept DB doesn't carry tramadol at all -- both
+// sides failed concept resolution and no name-based comparison ever ran,
+// even though these are the same drug (one side just states the salt).
+describe('component-wise name fallback (unknown_drug branch, concept resolution failed on both sides)', () => {
+  it('is GREEN name_component_match for the exact live-report pair: "TRAMADOL 50 MG ORAL TABLET" vs "Tramadol Hcl 50 Mg Tablet"', () => {
+    const r = compareDrugs(
+      { name: 'TRAMADOL 50 MG ORAL TABLET' },
+      { name: 'Tramadol Hcl 50 Mg Tablet' },
+      unresolvedProvider
+    );
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('name_component_match');
+  });
+
+  it('is NOT green when both sides state a DIFFERING salt: "Metoprolol Tartrate 50 Mg Tablet" vs "Metoprolol Succinate 50 Mg Tablet" (clinically different, non-interchangeable products)', () => {
+    const r = compareDrugs(
+      { name: 'Metoprolol Tartrate 50 Mg Tablet' },
+      { name: 'Metoprolol Succinate 50 Mg Tablet' },
+      unresolvedProvider
+    );
+    expect(r.status).not.toBe('green');
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('unknown_drug');
+    expect(r.explanation).toContain('tartrate');
+    expect(r.explanation).toContain('succinate');
+  });
+
+  it('is NOT green when both salt AND form differ: "Hydroxyzine Hcl 25 Mg Tablet" vs "Hydroxyzine Pamoate 25 Mg Capsule"', () => {
+    const r = compareDrugs(
+      { name: 'Hydroxyzine Hcl 25 Mg Tablet' },
+      { name: 'Hydroxyzine Pamoate 25 Mg Capsule' },
+      unresolvedProvider
+    );
+    expect(r.status).not.toBe('green');
+  });
+
+  it('is GREEN for a one-sided route word: "Amoxicillin 500 Mg Oral Capsule" vs "Amoxicillin 500 Mg Capsule"', () => {
+    const r = compareDrugs(
+      { name: 'Amoxicillin 500 Mg Oral Capsule' },
+      { name: 'Amoxicillin 500 Mg Capsule' },
+      unresolvedProvider
+    );
+    expect(r.status).toBe('green');
+  });
+
+  it('is YELLOW (never green) when strength is missing on one side: "Tramadol Oral Tablet" vs "Tramadol Hcl 50 Mg Tablet"', () => {
+    const r = compareDrugs(
+      { name: 'Tramadol Oral Tablet' },
+      { name: 'Tramadol Hcl 50 Mg Tablet' },
+      unresolvedProvider
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.status).not.toBe('green');
+  });
+
+  it('is YELLOW unknown_drug (never red) when the ingredient genuinely differs: "Tramadol 50 Mg Tablet" vs "Trazodone 50 Mg Tablet"', () => {
+    const r = compareDrugs(
+      { name: 'Tramadol 50 Mg Tablet' },
+      { name: 'Trazodone 50 Mg Tablet' },
+      unresolvedProvider
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('unknown_drug');
+    expect(r.status).not.toBe('red');
+  });
+
+  it('is NOT green when the dosage form differs: "Tramadol 50 Mg Tablet" vs "Tramadol 50 Mg Capsule"', () => {
+    const r = compareDrugs(
+      { name: 'Tramadol 50 Mg Tablet' },
+      { name: 'Tramadol 50 Mg Capsule' },
+      unresolvedProvider
+    );
+    expect(r.status).not.toBe('green');
+  });
+
+  it('regression: a genuine stated-duration contradiction (12 hour vs 24 hour) must still never resolve to a false green via this new fallback', () => {
+    // Same pair the amphetamine-family duration-conflict test above uses,
+    // but with an unresolved-concept provider so this fallback (rather
+    // than the name-identity fast path) is what's actually exercised.
+    const r = compareDrugs(
+      { name: 'Dextroamp-Amphet Er 30 Mg Cap 24 Hour' },
+      { name: 'AMPHETAMINE-DEXTROAMPHET ER 30 MG CAPSULE EXTENDED RELEASE 12 HOUR' },
+      unresolvedProvider
+    );
+    expect(r.status).not.toBe('green');
+  });
+
+  it('never preempts an existing concept-based path: a pair that DOES resolve (via the fixture provider) to the SAME concept is unaffected by this fallback', () => {
+    // Both sides leading-word-match the fixture's single "metoprolol"
+    // concept (FX0014) despite the extra filler token, so concept
+    // resolution SUCCEEDS on both sides here -- this must go through the
+    // existing same-rxcui concept_match branch, never this new fallback.
+    const r = compareDrugs({ name: 'Metoprolol Foo 25 Mg Tablet' }, { name: 'Metoprolol Bar 25 Mg Tablet' }, provider);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('concept_match');
+  });
+});
+
+// Reviewer round 1 on commit 1743449 -- REQUEST_CHANGES. BLOCKER 1
+// (reviewer-reproduced live): isSlashUnit treated ANY '/'-split token
+// whose halves were both numeric as disposable "unit-glued" noise, so a
+// pure combo-product dose ratio like "5/325" was silently dropped from
+// BOTH ingredient identity and strength -- "Hydrocodone/Acetaminophen
+// 5/325 Mg Tablet" vs ".../10/325 Mg Tablet" (a genuinely different,
+// clinically significant dose) resolved GREEN name_component_match. Fixed
+// by (a) requiring at least one slash-half be a literal unit WORD before
+// treating it as disposable, and (b) capturing pure numeric ratios
+// (slash OR hyphen, decimals included) into a dedicated `ratios`
+// component compared for exact, order-preserved equality.
+describe('component-wise name fallback: reviewer round 1 fixes', () => {
+  describe('BLOCKER 1: combo-product dose ratio ("5/325") must be identity-bearing, not disposable', () => {
+    it('is NOT green: "Hydrocodone/Acetaminophen 5/325 Mg Tablet" vs ".../10/325 Mg Tablet" (slash ratio differs)', () => {
+      const r = compareDrugs(
+        { name: 'Hydrocodone/Acetaminophen 5/325 Mg Tablet' },
+        { name: 'Hydrocodone/Acetaminophen 10/325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+    });
+
+    it('is NOT green for the same pair written with a hyphenated ratio: "5-325" vs "10-325"', () => {
+      const r = compareDrugs(
+        { name: 'Hydrocodone/Acetaminophen 5-325 Mg Tablet' },
+        { name: 'Hydrocodone/Acetaminophen 10-325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+
+    it('is NOT green for Oxycodone/APAP with a differing slash ratio', () => {
+      const r = compareDrugs(
+        { name: 'Oxycodone/Acetaminophen 5/325 Mg Tablet' },
+        { name: 'Oxycodone/Acetaminophen 7.5/325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+
+    it('a genuinely IDENTICAL ratio on both sides can still reach GREEN (via this fallback) when every other rule also passes', () => {
+      // A one-sided salt word ("Bitartrate") keeps this pair off the
+      // pre-concept-resolution identity/route-fold fast paths (so this
+      // actually exercises compareNameComponents' ratio-equality check,
+      // not just the exact-string identity match) while the stated
+      // 5/325 ratio itself is identical on both sides.
+      const r = compareDrugs(
+        { name: 'Hydrocodone/Acetaminophen Bitartrate 5/325 Mg Tablet' },
+        { name: 'Hydrocodone/Acetaminophen 5/325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    it('pins concentration-strength handling: "Amoxicillin 250 Mg/5 Ml Suspension" vs "Amoxicillin 250 Mg Tablet" is NOT green (form differs)', () => {
+      // Also confirms the isSlashUnit fix didn't regress the legitimate
+      // concentration case: "mg/5" (unit half present) must stay disposed
+      // of as strength noise, not get mistaken for an identity-bearing
+      // ratio token.
+      const r = compareDrugs(
+        { name: 'Amoxicillin 250 Mg/5 Ml Suspension' },
+        { name: 'Amoxicillin 250 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+  });
+
+  describe('should-fix 3: empty ingredient-token set (both sides) is never a match, even against another empty set', () => {
+    it('is NOT green when neither side has any token left over after stripping salt/route/form/strength', () => {
+      const r = compareDrugs({ name: '50 Mg Hcl Tablet' }, { name: '50 Mg Tablet' }, unresolvedProvider);
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+    });
+  });
+
+  describe('should-fix 4: injectable route/form ambiguity is deliberate and fail-safe', () => {
+    it('a stated "injection" route never reaches GREEN via this fallback, because it is consumed as a route and can never also confirm the form', () => {
+      const r = compareDrugs(
+        { name: 'Hydromorphone Hcl 2 Mg Injection' },
+        { name: 'Hydromorphone 2 Mg Injection' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
     });
   });
 });
