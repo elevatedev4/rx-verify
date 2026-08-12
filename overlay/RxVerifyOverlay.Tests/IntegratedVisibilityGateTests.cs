@@ -1,4 +1,5 @@
 using RxVerifyOverlay.Integrated;
+using RxVerifyOverlay.Uia;
 using Xunit;
 
 namespace RxVerifyOverlay.Tests;
@@ -11,6 +12,13 @@ namespace RxVerifyOverlay.Tests;
 /// + something verified to show; the control box only requires attached +
 /// foreground (it stays up, in its "maximize to use integrated view"
 /// state, even when not maximized).
+///
+/// TAB GATE (CommonTabState): every ShouldShowBoxes case below defaults
+/// to CommonTabState.Unknown unless a test name says otherwise — Unknown
+/// is defined to behave IDENTICALLY to how this gate behaved before
+/// CommonTabState existed (see IntegratedVisibilityGate's own doc), so
+/// every pre-existing scenario in this file is unchanged. The Off/On
+/// cases are new, dedicated tests below.
 /// </summary>
 public class IntegratedVisibilityGateTests
 {
@@ -19,7 +27,7 @@ public class IntegratedVisibilityGateTests
     {
         Assert.True(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
-            hasResolvableFieldRects: true, isHiddenByToggle: false));
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown));
     }
 
     [Fact]
@@ -27,7 +35,7 @@ public class IntegratedVisibilityGateTests
     {
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: true,
-            hasResolvableFieldRects: true, isHiddenByToggle: false));
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown));
     }
 
     [Fact]
@@ -37,7 +45,7 @@ public class IntegratedVisibilityGateTests
         // float over whatever that app is.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: true, isForeground: false, isMaximized: true, hasVerifiableContent: true,
-            hasResolvableFieldRects: true, isHiddenByToggle: false));
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown));
     }
 
     [Fact]
@@ -46,7 +54,7 @@ public class IntegratedVisibilityGateTests
         // MAXIMIZED-ONLY per the owner's spec.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: true, isForeground: true, isMaximized: false, hasVerifiableContent: true,
-            hasResolvableFieldRects: true, isHiddenByToggle: false));
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown));
     }
 
     [Fact]
@@ -56,7 +64,7 @@ public class IntegratedVisibilityGateTests
         // no data to draw boxes for.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: false,
-            hasResolvableFieldRects: true, isHiddenByToggle: false));
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown));
     }
 
     [Fact]
@@ -65,10 +73,10 @@ public class IntegratedVisibilityGateTests
         // Round 4 addendum item 6 — best-effort proxy for "not on the
         // Common tab": the entered fields couldn't be resolved to
         // on-screen rects this tick, even though everything else checks
-        // out.
+        // out. Still the deciding factor when CommonTabState is Unknown.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
-            hasResolvableFieldRects: false, isHiddenByToggle: false));
+            hasResolvableFieldRects: false, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown));
     }
 
     [Fact]
@@ -77,7 +85,38 @@ public class IntegratedVisibilityGateTests
         // Round 4 item 2 — the control box's "hide overlay" checkbox / `\` hotkey.
         Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
-            hasResolvableFieldRects: true, isHiddenByToggle: true));
+            hasResolvableFieldRects: true, isHiddenByToggle: true, commonTabState: CommonTabState.Unknown));
+    }
+
+    [Fact]
+    public void BoxesHideWhenCommonTabStateIsOffEvenIfEveryOtherConditionIsTrue()
+    {
+        // THE OWNER'S BUG FIX: hasResolvableFieldRects is deliberately
+        // TRUE here — this is exactly the scenario the old proxy alone
+        // got wrong (RxDetailsPanel's fields keep non-empty
+        // BoundingRectangles even on a different outer tab). A confirmed
+        // CommonTabState.Off must override it and force a hide.
+        Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
+            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Off));
+    }
+
+    [Fact]
+    public void BoxesShowWhenCommonTabStateIsOnAndEveryOtherConditionIsTrue()
+    {
+        Assert.True(IntegratedVisibilityGate.ShouldShowBoxes(
+            isAttached: true, isForeground: true, isMaximized: true, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.On));
+    }
+
+    [Fact]
+    public void BoxesHideWhenCommonTabStateIsOnButAnotherConditionFails()
+    {
+        // On doesn't bypass the other gates — it's an additional
+        // confirmed signal, not a master override in the show direction.
+        Assert.False(IntegratedVisibilityGate.ShouldShowBoxes(
+            isAttached: true, isForeground: true, isMaximized: false, hasVerifiableContent: true,
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.On));
     }
 
     [Fact]
@@ -103,7 +142,7 @@ public class IntegratedVisibilityGateTests
         var controlBoxShown = IntegratedVisibilityGate.ShouldShowControlBox(isPioneerForegroundApp: true);
         var boxesShown = IntegratedVisibilityGate.ShouldShowBoxes(
             isAttached: false, isForeground: true, isMaximized: true, hasVerifiableContent: false,
-            hasResolvableFieldRects: true, isHiddenByToggle: false);
+            hasResolvableFieldRects: true, isHiddenByToggle: false, commonTabState: CommonTabState.Unknown);
 
         Assert.True(controlBoxShown);
         Assert.False(boxesShown);

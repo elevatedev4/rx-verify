@@ -135,6 +135,92 @@ public sealed class UiaTreeWalker
     }
 
     /// <summary>
+    /// Finds the first descendant (anywhere under the window, no fixed
+    /// ancestor path) of ControlType.TabItem whose Name starts with
+    /// <paramref name="namePrefix"/> — used by Uia/CommonTabGate.cs to
+    /// locate the OUTER Common TabItem (FieldMap.OuterCommonTabNamePrefix),
+    /// which has no confirmed containing Tab control AutomationId to
+    /// narrow the search by first (unlike SelectCenterTabByPrefix above,
+    /// which already knows FieldMap.CenterTabControlAutomationId). Returns
+    /// null if no TabItem matches, or if the search itself throws (window
+    /// mid-redraw, or this Pioneer version's tree shape differs) — never
+    /// throws.
+    /// </summary>
+    public AutomationElement? FindDescendantTabItemByNamePrefix(string namePrefix)
+    {
+        try
+        {
+            var tabItems = _root.FindAllDescendants(cf => cf.ByControlType(ControlType.TabItem));
+            foreach (var item in tabItems)
+            {
+                string? name;
+                try { name = item.Name; } catch { continue; }
+                if (name is not null && name.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return item;
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort only — see method doc.
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Reads a TabItem's SelectionItemPattern.IsSelected — used by
+    /// Uia/CommonTabGate.cs's PRIMARY outer-tab signal. Read-only: never
+    /// calls Select(). Returns null (not false) if the pattern isn't
+    /// supported or the read throws (stale/disconnected element), so the
+    /// caller can tell "definitively not selected" apart from "couldn't
+    /// tell" and fall through to the SECONDARY pane-presence signal
+    /// instead of trusting a false negative. Extracted as a static
+    /// element-in/value-out method for the same reason as ReadTextValue/
+    /// ReadCheckBoxValue above — lets a CACHED element (CommonTabGate's
+    /// own per-attach-session cache) be re-read directly without a fresh
+    /// find each tick.
+    /// </summary>
+    public static bool? ReadIsSelected(AutomationElement element)
+    {
+        try
+        {
+            if (!element.Patterns.SelectionItem.IsSupported) return null;
+            return element.Patterns.SelectionItem.Pattern.IsSelected.ValueOrDefault;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads an element's IsOffscreen automation property. Used by
+    /// Uia/CommonTabGate.cs's SECONDARY pane-presence signal (an outer
+    /// tab's content pane that exists in the tree but reads IsOffscreen
+    /// true belongs to a tab that isn't actually the one showing) and by
+    /// FieldReader.ReadEnteredFieldRects' hardened resolvable-rect proxy
+    /// (Ocr/EscriptImageCapture.cs's IsGenuinelyOnscreen guard follows the
+    /// same element.Properties.IsOffscreen idiom, non-tri-state). Returns
+    /// null (not false) if the property can't be read at all — "unknown"
+    /// must never be silently treated as "onscreen", same reasoning as
+    /// ReadIsSelected above: the caller needs to tell that apart from a
+    /// confirmed answer.
+    /// </summary>
+    public static bool? ReadIsOffscreen(AutomationElement element)
+    {
+        try
+        {
+            return element.Properties.IsOffscreen.ValueOrDefault;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Reads a plausible current value out of an Edit/ComboBox element:
     ///   1. ValuePattern.Value, if the pattern is supported and non-blank
     ///      — this is the correct source of truth for a real typed/

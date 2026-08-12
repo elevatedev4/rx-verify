@@ -219,6 +219,22 @@ public sealed class FieldReader
 
             try
             {
+                // TAB-GATE HARDENING: an element whose IsOffscreen
+                // automation property reads true belongs to a tab/pane
+                // that isn't the one actually showing right now — never
+                // trust its BoundingRectangle as "resolvable" (this is
+                // exactly the proxy Uia/CommonTabGate.cs's confirmed
+                // signal now takes priority over, but keeping this proxy
+                // itself honest matters for the CommonTabState.Unknown
+                // fallback case — see IntegratedVisibilityGate.
+                // ShouldShowBoxes). Mirrors Ocr/EscriptImageCapture.cs's
+                // IsGenuinelyOnscreen guard (element.Properties.IsOffscreen);
+                // a read failure is treated as "not offscreen" here, same
+                // as every other optional-property read in this class —
+                // missing data must never be treated as a mismatch/hide
+                // signal on its own.
+                if (UiaTreeWalker.ReadIsOffscreen(element) == true) continue;
+
                 var rect = element.BoundingRectangle;
                 if (!rect.IsEmpty) rects[field] = rect;
             }

@@ -427,18 +427,39 @@ public sealed class IntegratedOverlayCoordinator
         var isRxScreenMaximized = isRxScreenAttached && IsZoomed(window!.NativeWindowHandle);
         var hasVerifiableContent = isRxScreenAttached && !_viewModel.HasNonEscriptMessage && _viewModel.Categories.Any(c => c.HasData);
 
-        // ADDENDUM item 6 (tab gate): best-effort proxy for "PioneerRx is
-        // actually on the Common tab right now" — no confirmed UIA
-        // AutomationId exists for that outer tab strip (Common/Patient
-        // Education/Interactions/Fill History/... — a DIFFERENT, outer
-        // tab control than FieldMap.CenterTabControlAutomationId's
-        // Dispense/Image/Escript/DUR-More strip, which lives INSIDE
-        // Common) to check directly without guessing at a selector this
-        // codebase has never validated against a live dump. If NONE of
-        // the entered fields resolved to an on-screen rect this tick,
-        // that's a reasonable signal the Common tab (where RxDetailsPanel
-        // actually lives) isn't the active one — hide rather than risk
-        // floating boxes over Patient Education/Interactions/etc.
+        // TAB GATE (owner report — the round 4 addendum item 6 proxy
+        // below did NOT actually hide boxes when the pharmacist switched
+        // off the outer Common tab: RxDetailsPanel's field elements
+        // evidently keep non-empty BoundingRectangles even while a
+        // different outer tab, e.g. Patient Education/Interactions/Fill
+        // History, is showing). Uia/CommonTabGate.cs now reads a
+        // confirmed signal instead — the outer Common TabItem's
+        // SelectionItemPattern.IsSelected (PRIMARY), falling back to the
+        // cntCommonTab pane's presence/IsOffscreen (SECONDARY, see
+        // FieldMap.OuterCommonPaneAutomationId) — computed once per tick
+        // here and passed into IntegratedVisibilityGate.ShouldShowBoxes,
+        // which short-circuits to hidden on CommonTabState.Off regardless
+        // of every other input. Only meaningful while a specific Rx
+        // screen is attached (there's nothing to walk otherwise).
+        var commonTabState = isRxScreenAttached
+            ? CommonTabGate.DetermineState(new UiaTreeWalker(window!.WindowElement), window!.NativeWindowHandle)
+            : CommonTabState.Unknown;
+
+        // ADDENDUM item 6 (tab gate) — ORIGINAL best-effort proxy for
+        // "PioneerRx is actually on the Common tab right now", kept as
+        // the FALLBACK layer for whenever commonTabState above comes back
+        // Unknown (this Pioneer version's tree shape differs from the two
+        // confirmed dumps) — see IntegratedVisibilityGate.ShouldShowBoxes.
+        // No confirmed UIA AutomationId existed for the outer tab strip
+        // itself when this proxy was written (Common/Patient Education/
+        // Interactions/Fill History/... — a DIFFERENT, outer tab control
+        // than FieldMap.CenterTabControlAutomationId's Dispense/Image/
+        // Escript/DUR-More strip, which lives INSIDE Common); two of its
+        // children are confirmed now (see FieldMap.OuterCommonTabNamePrefix/
+        // OuterCommonPaneAutomationId), which is what CommonTabGate uses.
+        // If NONE of the entered fields resolved to an on-screen rect
+        // this tick, that's still a reasonable secondary signal the
+        // Common tab isn't the active one.
         var hasResolvableFieldRects = _viewModel.Categories.SelectMany(c => c.Rows).Any(r => r.ScreenRect.HasValue);
 
         // ADDENDUM item 7 (priority — stale-box false-assurance hazard):
@@ -454,7 +475,7 @@ public sealed class IntegratedOverlayCoordinator
 
         var showBoxes = IntegratedVisibilityGate.ShouldShowBoxes(
             isRxScreenAttached, isRxScreenForeground, isRxScreenMaximized, hasVerifiableContent,
-            hasResolvableFieldRects, _boxesHiddenByToggle) && !isRxIdentityStale;
+            hasResolvableFieldRects, _boxesHiddenByToggle, commonTabState) && !isRxIdentityStale;
 
         if (showBoxes)
         {
