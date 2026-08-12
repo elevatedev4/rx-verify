@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using RxVerifyOverlay.Models;
@@ -79,13 +80,38 @@ public static class EscriptTreeParser
     /// to read anything at all — is accepted as the prescription
     /// container. Returns null (empty record) when neither check finds
     /// anything.
+    ///
+    /// DETERMINISM (round 2 reviewer should-fix): a real NCPDP renewal
+    /// response can carry more than one Body child that itself holds a
+    /// MedicationPrescribed subtree (e.g. a MedicationPrescribed section
+    /// alongside a separate MedicationDispensed section) — FirstOrDefault
+    /// alone would pick whichever happens to come first from
+    /// body.Children with no visibility into that being an ambiguous
+    /// choice. The first match (in body.Children order) still wins here
+    /// — this parser needs to return exactly one container either way —
+    /// but a multi-match is flagged via Debug.WriteLine so a wrong pick
+    /// is diagnosable. There is no structured logging anywhere in this
+    /// codebase to route this through instead (grepped Uia/ViewModels/
+    /// Integrated/Parsing for ILogger/Trace/Debug — none found);
+    /// Debug.WriteLine is the smallest addition that surfaces this in a
+    /// debugger/Output window without introducing a new dependency for a
+    /// case that, per the NCPDP shapes actually confirmed against a real
+    /// dump so far (see FieldMap.cs header), has never been observed.
     /// </summary>
     private static EscriptNode? FindPrescriptionContainer(EscriptNode body)
     {
         var namedNewRx = Child(body, FieldMap.NodeNewRx);
         if (namedNewRx is not null) return namedNewRx;
 
-        return body.Children.FirstOrDefault(c => Child(c, FieldMap.NodeMedicationPrescribed) is not null);
+        var candidates = body.Children.Where(c => Child(c, FieldMap.NodeMedicationPrescribed) is not null).ToList();
+        if (candidates.Count > 1)
+        {
+            Debug.WriteLine(
+                $"EscriptTreeParser.FindPrescriptionContainer: {candidates.Count} Body children each hold a " +
+                $"MedicationPrescribed subtree; using the first one found ('{candidates[0].Name}').");
+        }
+
+        return candidates.FirstOrDefault();
     }
 
     /// <summary>
@@ -105,6 +131,17 @@ public static class EscriptTreeParser
     /// since notes are a source-only, display-only concern, not part of
     /// the engine's field-by-field comparison contract — see
     /// Uia/FieldReader.cs SourceNotes.
+    ///
+    /// BLOCKER FIX (round 2 reviewer): this used to look up the
+    /// prescription container via a direct Child(body, "NewRx") call,
+    /// independent of Parse()'s own FindPrescriptionContainer fallback —
+    /// so once Parse() started structurally detecting non-NewRx-named
+    /// containers (a renewal response, say), this method still silently
+    /// found nothing and dropped every NewRx-level/MedicationPrescribed-
+    /// level note for exactly the messages that fallback exists for. Now
+    /// routed through the SAME FindPrescriptionContainer used by Parse(),
+    /// so the two can never disagree on which container is "the"
+    /// prescription data for a given message.
     /// </summary>
     public static IReadOnlyList<string> ParseNotes(EscriptNode message)
     {
@@ -114,7 +151,7 @@ public static class EscriptTreeParser
         CollectNotesFrom(message, notes);
 
         var body = Child(message, FieldMap.NodeBody);
-        var newRx = body is null ? null : Child(body, FieldMap.NodeNewRx);
+        var newRx = body is null ? null : FindPrescriptionContainer(body);
         if (newRx is null) return notes;
 
         // NewRx-level (medication-directed notes not nested under
@@ -377,7 +414,8 @@ public static class EscriptTreeParser
             return (NullIfEmpty(SplitOnLastColonSpace(refillsLeaf.Name)), false);
         }
 
-        var totalFillsLeaf = med.Children.FirstOrDefault(c => c.Name.StartsWith(FieldMap.TotalFillsKeyPrefix, StringComparison.OrdinalIgnoreCase));
+        var totalFillsLeaf = med.Children.FirstOrDefault(c =>
+            FieldMap.TotalFillsKeyPrefixes.Any(prefix => c.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)));
         if (totalFillsLeaf is not null)
         {
             return (NullIfEmpty(SplitOnLastColonSpace(totalFillsLeaf.Name)), true);
@@ -389,7 +427,7 @@ public static class EscriptTreeParser
     /// <summary>
     /// Returns everything AFTER the LAST occurrence of ": " in the text.
     /// Used only for the Refills/Total-fills leaf (see ParseRefills, and
-    /// FieldMap.RefillsKeyPrefix/TotalFillsKeyPrefix) — every other leaf
+    /// FieldMap.RefillsKeyPrefix/TotalFillsKeyPrefixes) — every other leaf
     /// in the tree uses the general first-": "-split via
     /// SplitKeyValue/Leaf().
     /// </summary>

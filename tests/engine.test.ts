@@ -115,6 +115,28 @@ describe('verify engine', () => {
       expect(refillsVerdict.status).toBe('red');
       expect(refillsVerdict.reasonCode).toBe('refills_mismatch');
     });
+
+    // Reviewer-requested pin (round 2): EngineModels.cs's JsonSerializerOptions
+    // has no DefaultIgnoreCondition set, so the C# overlay literally sends
+    // "refillsFromTotalFills":null (not the field omitted) for every
+    // ordinary NewRx e-script — RefillsFromTotalFills is only ever set to
+    // `true`, never `false` (see EscriptTreeParser.Parse). JS default
+    // parameters only kick in for `undefined`, not `null`, so this pins
+    // that an explicit JSON `null` still behaves as falsy through the
+    // actual JSON.parse -> verify() path, same as omitting the field
+    // entirely, rather than relying on that being "obviously fine".
+    it('an explicit JSON "refillsFromTotalFills":null (the literal wire shape the C# overlay sends for every non-renewal) behaves as falsy, same as omitting the field', () => {
+      const source = JSON.parse('{"refills":"3","refillsFromTotalFills":null}');
+      const result = verify(source, { refills: '3' }, provider);
+      const refillsVerdict = result.verdicts.find((v) => v.field === 'refills')!;
+      expect(refillsVerdict.status).toBe('green');
+      expect(refillsVerdict.reasonCode).toBe('exact_match');
+      // Pins the exact explanation text, which branches on sourceIsTotalFills
+      // (see src/quantity/index.ts compareRefills) — the plain, non-total-fills
+      // wording proves null took the falsy branch, not just that both sides
+      // happened to compare equal.
+      expect(refillsVerdict.explanation).toBe('Refill count matches exactly.');
+    });
   });
 
   it('every verdict includes a reason code and explanation', () => {

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Text;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
@@ -409,16 +410,20 @@ public sealed class UiaTreeWalker
     };
 
     /// <summary>
-    /// Builds the Message -&gt; Body -&gt; NewRx spine by exact child name
-    /// (not a full recursive walk — each of these levels only has 1-2
-    /// real children in practice), then fully recurses ONLY NewRx's
+    /// Builds the Message -&gt; Body -&gt; (NewRx-or-equivalent) spine by
+    /// exact/structural child lookup (not a full recursive walk — each of
+    /// these levels only has 1-2 real children in practice), then fully
+    /// recurses ONLY the prescription container's
     /// Patient/Prescriber/MedicationPrescribed children via the unchanged
     /// full-recursion BuildEscriptNode. Degrades gracefully (never
     /// throws) at every step exactly like the old full-recursion did for
-    /// a missing/differently-shaped message — a message that isn't a
-    /// NewRx at all (e.g. a renewal response) still yields a Message node
-    /// whose Body/NewRx simply weren't found, which EscriptTreeParser.Parse
-    /// already treats as an empty PrescriptionRecord.
+    /// a missing/differently-shaped message — a message with no Body, or
+    /// with a Body that holds neither a "NewRx"-named child nor any child
+    /// with a MedicationPrescribed subtree (see
+    /// FindPrescriptionContainerElement), still yields a Message node
+    /// whose Body/prescription-container simply weren't found, which
+    /// EscriptTreeParser.Parse already treats as an empty
+    /// PrescriptionRecord.
     /// </summary>
     private static EscriptNode BuildPrunedMessageNode(AutomationElement messageElement)
     {
@@ -436,7 +441,7 @@ public sealed class UiaTreeWalker
         var bodyNode = new EscriptNode(SafeName(bodyElement));
         messageNode.Children.Add(bodyNode);
 
-        var newRxElement = FindNamedTreeItemChild(bodyElement, FieldMap.NodeNewRx);
+        var newRxElement = FindPrescriptionContainerElement(bodyElement);
         if (newRxElement is null) return messageNode;
 
         var newRxNode = new EscriptNode(SafeName(newRxElement));
@@ -456,6 +461,93 @@ public sealed class UiaTreeWalker
         }
 
         return messageNode;
+    }
+
+    /// <summary>
+    /// Locates the Body child that holds the prescription data — the
+    /// live-UIA counterpart of EscriptTreeParser.FindPrescriptionContainer,
+    /// which applies the IDENTICAL decision rule to the already-built
+    /// EscriptNode graph. Kept as an independent implementation (this one
+    /// walks live FlaUI AutomationElements; that one walks the UIA-free
+    /// EscriptNode this method itself produces) rather than a shared
+    /// helper, since the two operate on different node types with no
+    /// common interface today — see EscriptNode.cs's class doc for why
+    /// that split representation exists at all (UIA-free unit
+    /// testability for the parser).
+    ///
+    /// BLOCKER FIX (round 2 reviewer): this is the method that actually
+    /// builds the tree EscriptTreeParser.Parse consumes in production via
+    /// FieldReader.ReadSource -&gt; BuildEscriptTree -&gt; here. Before this
+    /// fix, this method ONLY ever looked for a child literally named
+    /// "NewRx" — so for any renewal-shaped message the Body node it
+    /// returned had ZERO children, and EscriptTreeParser's own
+    /// structural-detection fallback had nothing to search: Parse() still
+    /// returned an empty record for every real renewal even after that
+    /// parser-side change. This method now applies the same two-step
+    /// rule: exact "NewRx" name match first (preserves the W-T11 cheap-
+    /// spine perf optimization for the common case — see
+    /// BuildEscriptTree's class doc), then structural fallback for
+    /// anything else: whichever Body child directly holds a
+    /// MedicationPrescribed child (the same anchor RelevantNewRxChildNames
+    /// already treats as one of the three children this class reads).
+    ///
+    /// NOT UNIT TESTED: this method is bound to a live FlaUI
+    /// AutomationElement (Windows UI Automation) with no
+    /// programmatic/synthetic construction path anywhere in this codebase
+    /// (unlike EscriptNode, purpose-built for in-memory test construction
+    /// — see EscriptTreeParserTests.cs), and no live PioneerRx workstation
+    /// is available in this dev/CI environment to capture a real renewal-
+    /// response UIA dump against. The decision rule itself (name-first,
+    /// then MedicationPrescribed-subtree fallback) is exercised against
+    /// synthetic EscriptNode trees by EscriptTreeParserTests.cs's
+    /// FindPrescriptionContainer tests; this method is a thin,
+    /// side-effect-free adapter of that same rule onto AutomationElement
+    /// and should be spot-checked against a real renewal-response UIA
+    /// dump before this ships to a live workstation (see FieldMap.cs
+    /// header for how the prior confirmed UIA shapes were captured).
+    /// </summary>
+    private static AutomationElement? FindPrescriptionContainerElement(AutomationElement bodyElement)
+    {
+        var namedNewRx = FindNamedTreeItemChild(bodyElement, FieldMap.NodeNewRx);
+        if (namedNewRx is not null) return namedNewRx;
+
+        AutomationElement[] children;
+        try { children = bodyElement.FindAllChildren(); }
+        catch { return null; }
+
+        AutomationElement? found = null;
+        var matchCount = 0;
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; }
+            catch { continue; }
+            if (controlType != ControlType.TreeItem) continue;
+
+            if (FindNamedTreeItemChild(child, FieldMap.NodeMedicationPrescribed) is null) continue;
+
+            matchCount++;
+            found ??= child;
+        }
+
+        if (matchCount > 1)
+        {
+            // Real NCPDP renewals can carry more than one section holding
+            // a MedicationPrescribed subtree (e.g. alongside a separate
+            // MedicationDispensed section). Deterministic — the first
+            // match found (in FindAllChildren order) wins, same rule as
+            // EscriptTreeParser.FindPrescriptionContainer — but flagged:
+            // there is no structured logging anywhere in this codebase
+            // (grepped Uia/ViewModels/Integrated/Parsing for
+            // ILogger/Trace/Debug — none found), so Debug.WriteLine is
+            // the smallest addition that makes an ambiguous pick visible
+            // in a debugger/Output window instead of failing silently.
+            Debug.WriteLine(
+                $"UiaTreeWalker.FindPrescriptionContainerElement: {matchCount} Body children each hold a " +
+                $"MedicationPrescribed subtree; using the first one found ('{SafeName(found!)}').");
+        }
+
+        return found;
     }
 
     /// <summary>
