@@ -100,7 +100,7 @@ public static class MainWindowAnchorRule
     private static bool IsEligible(Candidate candidate) =>
         candidate.IsVisible && !candidate.IsMinimized && IsSaneWindowRect(candidate.Bounds);
 
-    /// <summary>Same degenerate-rect guard as ForegroundAnchorRule.IsSaneWindowRect — never anchor to a zero/negative-size rect.</summary>
+    /// <summary>Same degenerate-rect guard round 5's (now-removed) ForegroundAnchorRule.IsSaneWindowRect used — never anchor to a zero/negative-size rect.</summary>
     public static bool IsSaneWindowRect(Rectangle rect) => rect.Width > 0 && rect.Height > 0;
 
     private static long Area(Rectangle rect) => (long)rect.Width * rect.Height;

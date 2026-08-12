@@ -87,12 +87,15 @@ public sealed class IntegratedOverlayCoordinator
     // ROUND 7 ("the integrated control box moves down/over to a small
     // popup Pioneer opens above its main window ... it needs to stay put
     // at the top-right of the MAIN window"): replaces round 5's
-    // GetAncestor(hwnd, GA_ROOTOWNER)-based owner walk (removed — see git
-    // history — it only resolved to the main window when the popup was
-    // OWNED, and PioneerRx opens some top-level windows that aren't) with
-    // a POSITIVE identification of PioneerRx's own main window via
-    // EnumWindows + MainWindowAnchorRule. See ResolveMainPioneerWindowAnchor
-    // and MainWindowAnchorRule's own doc for the full design.
+    // GetAncestor(hwnd, GA_ROOTOWNER)-based owner walk — it only resolved
+    // to the main window when the popup was OWNED, and PioneerRx opens
+    // some top-level windows that aren't — with a POSITIVE identification
+    // of PioneerRx's own main window via EnumWindows + MainWindowAnchorRule.
+    // The GetAncestor call itself and its ForegroundAnchorRule decision
+    // class (with its own tests) are both gone entirely now, not just
+    // unused — see git history for round 5's original version of either.
+    // See ResolveMainPioneerWindowAnchor and MainWindowAnchorRule's own
+    // doc for the full design.
     // ------------------------------------------------------------------
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -159,6 +162,22 @@ public sealed class IntegratedOverlayCoordinator
     /// this (that would defeat the whole point of stickiness).
     /// </summary>
     private IntPtr _cachedMainWindowHandle = IntPtr.Zero;
+
+    /// <summary>
+    /// REVIEWER FIX (round 7 follow-up — per-tick cost): pid -&gt; "is this
+    /// a PioneerRx process" answers, cached ACROSS ticks (never cleared)
+    /// so EnumeratePioneerTopLevelWindows pays for Process.GetProcessById
+    /// (which opens a process handle) at most once per UNIQUE pid ever,
+    /// not once per top-level window per tick. Never proactively evicted,
+    /// deliberately kept simple: a stale TRUE entry self-corrects on its
+    /// own the moment that PioneerRx process exits, since EnumWindows
+    /// simply stops reporting any hwnd for that pid at all — nothing left
+    /// to look the cache up for. A stale FALSE surviving a pid being
+    /// reused by a genuinely different (possibly Pioneer) process is a
+    /// real but vanishingly rare edge case, not worth extra bookkeeping
+    /// for a ~250ms-tick UI-positioning feature. See IsPioneerProcessId.
+    /// </summary>
+    private readonly Dictionary<uint, bool> _pidIsPioneerCache = new();
 
     /// <summary>Raised when the pharmacist changes the Method toggle FROM THE CONTROL BOX — MainWindow.xaml.cs handles this the same way as its own Source radio buttons (persist + refresh), then calls SyncToggles() so both toggles stay in lockstep.</summary>
     public event EventHandler<VerificationMethod>? MethodToggleRequested;
@@ -510,7 +529,16 @@ public sealed class IntegratedOverlayCoordinator
         return hwnd != IntPtr.Zero && IsOwnedByPioneerRx(hwnd);
     }
 
-    /// <summary>True when <paramref name="hwnd"/> belongs to a process named in FieldMap.TargetProcessNames — the single owning-process check shared by IsForegroundWindowOwnedByPioneerRx and EnumeratePioneerTopLevelWindows below.</summary>
+    /// <summary>
+    /// True when <paramref name="hwnd"/> belongs to a process named in
+    /// FieldMap.TargetProcessNames — used only by
+    /// IsForegroundWindowOwnedByPioneerRx above, which does exactly ONE
+    /// of these per tick (the single current foreground hwnd), so an
+    /// uncached Process.GetProcessById here is fine. EnumeratePioneerTopLevelWindows
+    /// below has a very different cost profile (up to one call per
+    /// top-level window on the whole desktop, every ~250ms tick) and uses
+    /// its own cached IsPioneerProcessId instead — see that method's doc.
+    /// </summary>
     private static bool IsOwnedByPioneerRx(IntPtr hwnd)
     {
         try
@@ -523,6 +551,26 @@ public sealed class IntegratedOverlayCoordinator
         {
             return false;
         }
+    }
+
+    /// <summary>Cached wrapper around the same FieldMap.TargetProcessNames check as IsOwnedByPioneerRx, keyed by pid instead of hwnd — see _pidIsPioneerCache's own doc for why EnumeratePioneerTopLevelWindows needs this cached and IsOwnedByPioneerRx doesn't.</summary>
+    private bool IsPioneerProcessId(uint processId)
+    {
+        if (_pidIsPioneerCache.TryGetValue(processId, out var cached)) return cached;
+
+        bool isPioneer;
+        try
+        {
+            using var process = Process.GetProcessById((int)processId);
+            isPioneer = FieldMap.TargetProcessNames.Any(name => string.Equals(process.ProcessName, name, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            isPioneer = false;
+        }
+
+        _pidIsPioneerCache[processId] = isPioneer;
+        return isPioneer;
     }
 
     /// <summary>
@@ -547,26 +595,44 @@ public sealed class IntegratedOverlayCoordinator
 
     /// <summary>
     /// EnumWindows over every top-level window on the system, keeping only
-    /// the ones owned by a PioneerRx process (IsOwnedByPioneerRx) and
-    /// reading the plain Win32 state MainWindowAnchorRule.Candidate needs
-    /// for each: visibility, minimized/maximized state, and its rect. A
-    /// window whose rect can't be read (GetWindowRect failure) is skipped
-    /// entirely rather than included with a degenerate rect — same
-    /// "never trust a failed read" posture as MainWindowAnchorRule.
-    /// IsSaneWindowRect's own degenerate-but-succeeded case.
+    /// the ones owned by a PioneerRx process and reading the plain Win32
+    /// state MainWindowAnchorRule.Candidate needs for each: minimized/
+    /// maximized state and its rect. A window whose rect can't be read
+    /// (GetWindowRect failure) is skipped entirely rather than included
+    /// with a degenerate rect — same "never trust a failed read" posture
+    /// as MainWindowAnchorRule.IsSaneWindowRect's own degenerate-but-
+    /// succeeded case.
+    ///
+    /// REVIEWER FIX (round 7 follow-up — per-tick cost): this callback
+    /// runs for EVERY top-level window on the desktop, every ~250ms tick,
+    /// so it's ordered to be as cheap as possible for the common case
+    /// (most top-level windows on a real desktop — message-only windows,
+    /// hidden helper windows, etc. — are invisible and aren't PioneerRx
+    /// at all): IsWindowVisible is checked FIRST, before any process
+    /// lookup, since it's a single cheap Win32 call with no process
+    /// handle involved; only visible windows pay for
+    /// GetWindowThreadProcessId + the cached IsPioneerProcessId lookup.
+    /// Selection semantics are unchanged for visible windows — every
+    /// visible, PioneerRx-owned window with a readable rect still becomes
+    /// a candidate, with IsVisible now simply hardcoded true rather than
+    /// re-queried, since reaching this point already proved it.
     /// </summary>
-    private static List<MainWindowAnchorRule.Candidate> EnumeratePioneerTopLevelWindows()
+    private List<MainWindowAnchorRule.Candidate> EnumeratePioneerTopLevelWindows()
     {
         var candidates = new List<MainWindowAnchorRule.Candidate>();
 
         EnumWindows((hWnd, _) =>
         {
-            if (!IsOwnedByPioneerRx(hWnd)) return true; // keep enumerating
+            if (!IsWindowVisible(hWnd)) return true; // keep enumerating — cheapest possible check, no process lookup at all
+
+            GetWindowThreadProcessId(hWnd, out var processId);
+            if (!IsPioneerProcessId(processId)) return true; // keep enumerating
+
             if (!GetWindowRect(hWnd, out var rect)) return true; // keep enumerating
 
             candidates.Add(new MainWindowAnchorRule.Candidate(
                 hWnd,
-                IsVisible: IsWindowVisible(hWnd),
+                IsVisible: true, // already confirmed above
                 IsMinimized: IsIconic(hWnd),
                 IsMaximized: IsZoomed(hWnd),
                 Bounds: Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom)));
