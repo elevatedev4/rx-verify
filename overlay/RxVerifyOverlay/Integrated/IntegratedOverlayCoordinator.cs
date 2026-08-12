@@ -38,10 +38,10 @@ public sealed class IntegratedOverlayCoordinator
     // maximized window) sits empty. Kept as named DIP constants (not
     // inline numbers) specifically so they're easy to retune against a
     // real workstation without hunting through positioning math.
-    private const double ControlBoxRightInsetDip = 510; // box's LEFT edge sits this far in from the window's RIGHT edge — round 4: bumped from 450 (420 + ~30px margin) to 510 (480 + ~30px margin) to keep pace with ControlBoxWidthDip's widening below, so the box's right edge doesn't run off the window's right edge
+    private const double ControlBoxRightInsetDip = 510; // box's LEFT edge sits this far in from the window's RIGHT edge — round 4: bumped from 450 (420 + ~30px margin) to 510 (480 + ~30px margin) to keep pace with ControlBoxWidthDip's widening below, so the box's right edge doesn't run off the window's right edge. Round 9: ControlBoxWidthDip shrank back to 420 for the minimal-layout redesign, so the box's right edge now sits even further inside the window's right edge than before — still safe, no retune needed; this inset is untouched.
     private const double ControlBoxTopOffsetDip = 60;   // box's TOP edge sits this far down from the window's TOP edge
-    private const double ControlBoxWidthDip = 480;      // must match ControlBoxWindow.xaml's Width — widened from 420 in round 4 to fit the new Refresh button + "Hide overlay" checkbox without crowding
-    private const double ControlBoxHeightDip = 92;      // must match ControlBoxWindow.xaml's Height
+    private const double ControlBoxWidthDip = 420;      // must match ControlBoxWindow.xaml's Width — round 9: narrowed from 480 to 420 as part of the "minimal layout" redesign (2-row layout, icon-ish action buttons, no redundant "Source:"/"View:" labels) needing less horizontal room
+    private const double ControlBoxHeightDip = 76;      // must match ControlBoxWindow.xaml's Height — round 9: shortened from 92 to 76 when the redesign collapsed the box from 3 rows to 2
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
