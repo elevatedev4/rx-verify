@@ -242,6 +242,25 @@ public static class FieldMap
     /// </summary>
     public const string RefillsKeyPrefix = "Refills (";
 
+    /// <summary>
+    /// Leaf-key prefix for a renewal-response-style refill count, e.g.
+    /// "Total fills: 4" (or the same verbose parenthetical/multi-colon
+    /// style as RefillsKeyPrefix above) — seen on RESPONDED
+    /// renewal/refill-request e-scripts, where PioneerRx/the vendor
+    /// reports the total number of fills (initial fill PLUS refills)
+    /// rather than a plain refill count. Matched case-insensitively
+    /// (real vendor casing hasn't been confirmed against a live
+    /// renewal-response dump). EscriptTreeParser.ParseRefills sets
+    /// PrescriptionRecord.RefillsFromTotalFills=true when the value came
+    /// from this key instead of RefillsKeyPrefix — the raw value itself
+    /// passes through UNTRANSFORMED; the engine
+    /// (rx-verify src/quantity/index.ts compareRefills) is the single
+    /// source of truth for subtracting 1. When BOTH keys are present on
+    /// the same MedicationPrescribed node, RefillsKeyPrefix wins — see
+    /// ParseRefills.
+    /// </summary>
+    public const string TotalFillsKeyPrefix = "Total fills";
+
     // ------------------------------------------------------------------
     // INTEGRATED MODE (Integrated/IntegratedOverlayCoordinator.cs) — maps
     // every Models.FieldOrder.Fields key to the SAME entered-side

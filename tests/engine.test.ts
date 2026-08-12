@@ -101,6 +101,22 @@ describe('verify engine', () => {
     });
   });
 
+  describe('refillsFromTotalFills flows from a deserialized PrescriptionRecord through the public verify() entry point (proves the C# overlay contract actually drives compareRefills, not just compareRefills in isolation)', () => {
+    it('source refills "4"/refillsFromTotalFills:true vs entered "3" is GREEN (4 total fills = 1 fill + 3 refills)', () => {
+      const result = verify({ refills: '4', refillsFromTotalFills: true }, { refills: '3' }, provider);
+      const refillsVerdict = result.verdicts.find((v) => v.field === 'refills')!;
+      expect(refillsVerdict.status).toBe('green');
+      expect(refillsVerdict.reasonCode).toBe('exact_match');
+    });
+
+    it('source refills "4"/refillsFromTotalFills:true vs entered "4" is RED (entering the raw total-fills count, not total-1, is a real mismatch)', () => {
+      const result = verify({ refills: '4', refillsFromTotalFills: true }, { refills: '4' }, provider);
+      const refillsVerdict = result.verdicts.find((v) => v.field === 'refills')!;
+      expect(refillsVerdict.status).toBe('red');
+      expect(refillsVerdict.reasonCode).toBe('refills_mismatch');
+    });
+  });
+
   it('every verdict includes a reason code and explanation', () => {
     const result = verify({ patientName: 'John Smith' }, { patientName: 'John Doe' }, provider);
     for (const v of result.verdicts) {
