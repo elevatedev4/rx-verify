@@ -7,9 +7,9 @@
         ShowInTaskbar="False"
         Topmost="True"
         WindowStartupLocation="Manual"
-        Width="480" Height="92"
-        Background="#FF1E1E1E"
-        BorderBrush="#FF3A3A3A"
+        Width="420" Height="76"
+        Background="#FFF3F3F3"
+        BorderBrush="#FFC8C8C8"
         BorderThickness="1"
         ShowActivated="False">
     <!--
@@ -19,10 +19,30 @@
         ControlBoxTopOffsetDip constants for exactly where). UNLIKE
         IntegratedBoxesWindow, this is a NORMAL (non-click-through)
         window — it must receive clicks — so no WS_EX_TRANSPARENT/
-        WS_EX_LAYERED here, just the app's existing dark palette (matches
-        MainWindow.xaml's colors) in a borderless, compact window that
-        moves with PioneerRx every refresh tick (see RepositionPhysical
-        in the code-behind).
+        WS_EX_LAYERED here, just a light gray palette (see below) in a
+        borderless, compact window that moves with PioneerRx every
+        refresh tick (see RepositionPhysical in the code-behind).
+
+        PALETTE (round 9, owner: "make the Integrated Display box be a
+        lighter gray to blend in with Pioneer more, it's too harsh" —
+        Pioneer's own ribbon area is a light, Windows-classic gray):
+        replaced the original dark palette (matched MainWindow.xaml's
+        #FF1E1E1E) with a light gray one so the box reads as PART OF
+        Pioneer's chrome rather than a dark floating widget on top of
+        it. MainWindow.xaml (the separate/full view) is intentionally
+        untouched — this palette swap is scoped to the integrated
+        control box only.
+
+        LAYOUT (round 9, owner: "rearrange the display to make it user
+        friendly and minimal"): collapsed from 3 rows to 2 — row 1 is
+        status + icon-ish action buttons (Refresh/Full view/Copy logs),
+        row 2 is the Method/View toggle groups (visually grouped by a
+        thin border instead of "Source:"/"View:" text labels, which
+        just restated what the toggle content already says) plus the
+        Hide checkbox. Every control that was clickable before still
+        is — nothing here removes functionality, only chrome. Row 1
+        reserves right margin for CloseButton's corner overlay (below)
+        so the two never overlap.
 
         REVIEW FIX (focus-stealing): ShowActivated="False" plus
         WS_EX_NOACTIVATE (applied in code-behind's OnSourceInitialized)
@@ -35,58 +55,88 @@
     -->
     <Window.Resources>
         <Style TargetType="Button">
-            <Setter Property="Background" Value="#FF2A2A2A" />
-            <Setter Property="Foreground" Value="#FFCCCCCC" />
-            <Setter Property="BorderBrush" Value="#FF3A3A3A" />
+            <Setter Property="Background" Value="#FFEBEBEB" />
+            <Setter Property="Foreground" Value="#FF333333" />
+            <Setter Property="BorderBrush" Value="#FFB5B5B5" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Padding" Value="6,2" />
             <Setter Property="FontSize" Value="10" />
+            <Setter Property="MinWidth" Value="20" />
+            <Setter Property="MinHeight" Value="18" />
             <Setter Property="Cursor" Value="Hand" />
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#FF353535" />
+                    <Setter Property="Background" Value="#FFD9EBF9" />
+                    <Setter Property="BorderBrush" Value="#FF99C9EF" />
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
-                    <Setter Property="Foreground" Value="#FF666666" />
-                    <Setter Property="Background" Value="#FF232323" />
+                    <Setter Property="Foreground" Value="#FFAFAFAF" />
+                    <Setter Property="Background" Value="#FFF7F7F7" />
                 </Trigger>
             </Style.Triggers>
         </Style>
         <Style TargetType="RadioButton">
-            <Setter Property="Foreground" Value="#FFCCCCCC" />
+            <Setter Property="Foreground" Value="#FF333333" />
             <Setter Property="FontSize" Value="10" />
             <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="MinHeight" Value="16" />
             <Setter Property="Margin" Value="0,0,8,0" />
             <Style.Triggers>
                 <Trigger Property="IsEnabled" Value="False">
-                    <Setter Property="Foreground" Value="#FF666666" />
+                    <Setter Property="Foreground" Value="#FFAFAFAF" />
                 </Trigger>
             </Style.Triggers>
         </Style>
         <Style TargetType="CheckBox">
-            <Setter Property="Foreground" Value="#FFCCCCCC" />
+            <Setter Property="Foreground" Value="#FF333333" />
             <Setter Property="FontSize" Value="9" />
             <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="MinHeight" Value="16" />
+        </Style>
+        <!-- Round 9: thin grouping border replacing "Source:"/"View:" text labels — visually groups the two toggle pairs without restating what their own Content already says. -->
+        <Style x:Key="ToggleGroupBorderStyle" TargetType="Border">
+            <Setter Property="Background" Value="#FFFCFCFC" />
+            <Setter Property="BorderBrush" Value="#FFD5D5D5" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="Padding" Value="5,2" />
+            <Setter Property="Margin" Value="0,0,6,0" />
         </Style>
     </Window.Resources>
 
     <Grid Margin="6">
-        <!-- NORMAL content: status summary + toggles + actions, single/two compact rows per spec -->
+        <!-- NORMAL content: status + toggles + actions, 2 compact rows -->
         <StackPanel x:Name="NormalPanel">
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                <TextBlock x:Name="StatusSummaryText" Text="Rx Verify" Foreground="White" FontWeight="Bold" FontSize="11" VerticalAlignment="Center" />
-                <TextBlock x:Name="StatusTimeText" Text="" Foreground="#FF888888" FontSize="9" Margin="6,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                <!-- Item 1: same Refresh action as the separate window's own Refresh button -->
-                <Button x:Name="RefreshButton" Content="Refresh" Margin="10,0,4,0" Click="OnRefreshClick" />
-                <Button x:Name="OpenSeparateButton" Content="Open full view" Margin="0,0,0,0" Click="OnOpenSeparateClick" />
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                <TextBlock Text="Source:" Foreground="#FF888888" FontSize="9" VerticalAlignment="Center" Margin="0,0,4,0" />
-                <RadioButton x:Name="MethodOcrRadioButton" GroupName="ControlBoxMethod" Content="OCR" Checked="OnMethodChanged" />
-                <RadioButton x:Name="MethodUiaRadioButton" GroupName="ControlBoxMethod" Content="Escript" Checked="OnMethodChanged" />
-                <TextBlock Text="View:" Foreground="#FF888888" FontSize="9" VerticalAlignment="Center" Margin="10,0,4,0" />
-                <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="ControlBoxDisplay" Content="Integrated" Checked="OnDisplayModeChanged" />
-                <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="ControlBoxDisplay" Content="Separate" Checked="OnDisplayModeChanged" />
+            <DockPanel Margin="0,0,20,4" LastChildFill="False">
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusSummaryText" Text="Rx Verify" Foreground="#FF222222" FontWeight="Bold" FontSize="11" VerticalAlignment="Center" />
+                    <TextBlock x:Name="StatusTimeText" Text="" Foreground="#FF777777" FontSize="9" Margin="6,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                    <!-- Item 1: same Refresh action as the separate window's own Refresh button — icon-ish glyph, aligned/sized consistently with CloseButton's corner glyph below -->
+                    <Button x:Name="RefreshButton" Content="&#8635;" FontSize="12" Padding="3,0" Margin="0,0,4,0" Click="OnRefreshClick" ToolTip="Refresh" />
+                    <Button x:Name="OpenSeparateButton" Content="Full view" Margin="0,0,4,0" Click="OnOpenSeparateClick" ToolTip="Open full view" />
+                    <Button x:Name="CopyLogsButton" Content="Copy" Margin="0,0,4,0" Click="OnCopyLogsClick" ToolTip="Copy logs" />
+                    <Button x:Name="CopyLogsNoHipaaButton" Content="Copy (safe)" Click="OnCopyLogsNoHipaaClick" ToolTip="Copy logs (no HIPAA)" />
+                </StackPanel>
+            </DockPanel>
+            <StackPanel Orientation="Horizontal">
+                <!-- Source (Method) toggle group -->
+                <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Verification source">
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton x:Name="MethodOcrRadioButton" GroupName="ControlBoxMethod" Content="OCR" Checked="OnMethodChanged" />
+                        <RadioButton x:Name="MethodUiaRadioButton" GroupName="ControlBoxMethod" Content="Escript" Margin="0" Checked="OnMethodChanged" />
+                    </StackPanel>
+                </Border>
+                <!-- Display mode (View) toggle group -->
+                <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Display mode">
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="ControlBoxDisplay" Content="Integrated" Checked="OnDisplayModeChanged" />
+                        <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="ControlBoxDisplay" Content="Separate" Margin="0" Checked="OnDisplayModeChanged" />
+                    </StackPanel>
+                </Border>
                 <!--
                     Item 2: hides the verdict BOXES layer only (this
                     control box stays up) — kept in sync with the global
@@ -95,11 +145,7 @@
                     (never persisted to settings.json) so a pharmacist can
                     never inherit a hidden overlay from a previous shift.
                 -->
-                <CheckBox x:Name="HideOverlayCheckBox" Content="Hide overlay (\)" Margin="10,0,0,0" Checked="OnHideOverlayToggled" Unchecked="OnHideOverlayToggled" />
-            </StackPanel>
-            <StackPanel Orientation="Horizontal">
-                <Button x:Name="CopyLogsButton" Content="Copy logs" Margin="0,0,4,0" Click="OnCopyLogsClick" />
-                <Button x:Name="CopyLogsNoHipaaButton" Content="Copy logs (no HIPAA)" Click="OnCopyLogsNoHipaaClick" />
+                <CheckBox x:Name="HideOverlayCheckBox" Content="Hide (\)" VerticalAlignment="Center" Checked="OnHideOverlayToggled" Unchecked="OnHideOverlayToggled" ToolTip="Hide overlay (\)" />
             </StackPanel>
         </StackPanel>
 
@@ -110,8 +156,8 @@
             except DisplaySeparateRadioButton, so the pharmacist can
             always escape back to Separate without maximizing first.
         -->
-        <Border x:Name="MaximizeNoteBorder" Background="#CC1E1E1E" CornerRadius="3" Padding="6,3" VerticalAlignment="Top" HorizontalAlignment="Stretch" Visibility="Collapsed">
-            <TextBlock Text="Maximize PioneerRx to use integrated view" Foreground="#FFF9A825" FontSize="10" FontWeight="Bold" TextWrapping="Wrap" />
+        <Border x:Name="MaximizeNoteBorder" Background="#FFFFF4CE" BorderBrush="#FFFFD666" BorderThickness="1" CornerRadius="3" Padding="6,3" VerticalAlignment="Top" HorizontalAlignment="Stretch" Visibility="Collapsed">
+            <TextBlock Text="Maximize PioneerRx to use integrated view" Foreground="#FF7A5900" FontSize="10" FontWeight="Bold" TextWrapping="Wrap" />
         </Border>
 
         <!--
@@ -124,7 +170,7 @@
             this is a corner escape hatch, not an action button, and must
             never draw the eye the way Refresh/Copy logs/toggles do.
         -->
-        <Button x:Name="CloseButton" Content="✕" Click="OnCloseClick"
+        <Button x:Name="CloseButton" Content="&#10005;" Click="OnCloseClick"
                 Width="18" Height="18" Padding="0" FontSize="9"
                 HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-6,-6,0"
                 Foreground="#FF888888" Background="Transparent" BorderThickness="0"
@@ -134,8 +180,8 @@
                     <Setter Property="Cursor" Value="Hand" />
                     <Style.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter Property="Foreground" Value="#FFCCCCCC" />
-                            <Setter Property="Background" Value="#FF4A1F1F" />
+                            <Setter Property="Foreground" Value="#FF333333" />
+                            <Setter Property="Background" Value="#FFF3D6D6" />
                         </Trigger>
                     </Style.Triggers>
                 </Style>

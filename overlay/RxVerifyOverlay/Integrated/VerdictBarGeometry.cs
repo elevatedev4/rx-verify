@@ -36,7 +36,7 @@ namespace RxVerifyOverlay.Integrated;
 /// first, which subtracts PioneerRx's own window origin, then
 /// BoxLayoutAdjuster.ApplyPadding expands every rect a further 2 DIP
 /// outward before this class ever sees it — so a field within
-/// PaddingDip + BarWidthDip + BarGapDip (2 + 5 + 3 = 10) DIP of Pioneer's
+/// PaddingDip + BarWidthDip + BarGapDip (2 + 5 + 1 = 8, round 9 value) DIP of Pioneer's
 /// LEFT window edge genuinely can compute a negative X here, which WPF's
 /// Canvas silently clips (invisible bar, not a rendering curiosity). See
 /// DeriveBarRect: X is clamped to a minimum of 0, and the WIDTH is never
@@ -76,11 +76,14 @@ public static class VerdictBarGeometry
     /// How much breathing room sits between a bar's RIGHT edge and the
     /// field rect's LEFT edge — owner report (round 8): the bars sat
     /// flush against the field box and were "creeping right up on the
-    /// text". 3 DIP reads as a deliberate small gap without visually
-    /// detaching the bar from the field it's marking. See DeriveBarRect
-    /// and the class doc's GAP section.
+    /// text". Originally 3 DIP; round 9 owner feedback at the live
+    /// counter walked that back ("spacing of the green/red bars is too
+    /// far from the box now — bring it back in a little bit") — 1 DIP
+    /// keeps a hairline of separation (still not flush, per round 8)
+    /// while sitting visibly closer to the field again. See
+    /// DeriveBarRect and the class doc's GAP section.
     /// </summary>
-    public const double BarGapDip = 3;
+    public const double BarGapDip = 1;
 
     /// <summary>Floating-point tolerance for "same column" (X/Width match) and "touching" (Y-ranges abut) comparisons — guards against harmless double-precision noise, never a real near-miss (genuinely different columns are already many DIPs apart, per BoxLayoutAdjuster.LeftEdgeAlignmentToleranceDip).</summary>
     private const double Epsilon = 0.01;
@@ -96,7 +99,7 @@ public static class VerdictBarGeometry
     /// here, which WPF's Canvas silently clips). Clamping shrinks the
     /// effective GAP first, never the WIDTH — <paramref name="barWidth"/>
     /// is always the bar's Width, full stop, even when X lands at 0; at
-    /// worst (a field sitting inside the 10 DIP total reach of padding +
+    /// worst (a field sitting inside the 8 DIP total reach of padding +
     /// width + gap) the bar sits flush at the window's left edge, still
     /// fully visible. Y and Height are copied through UNCHANGED (no
     /// arithmetic on them at all) specifically so a run of already-flush-
