@@ -644,3 +644,95 @@ describe('component-wise name fallback (unknown_drug branch, concept resolution 
     expect(r.reasonCode).toBe('concept_match');
   });
 });
+
+// Reviewer round 1 on commit 1743449 -- REQUEST_CHANGES. BLOCKER 1
+// (reviewer-reproduced live): isSlashUnit treated ANY '/'-split token
+// whose halves were both numeric as disposable "unit-glued" noise, so a
+// pure combo-product dose ratio like "5/325" was silently dropped from
+// BOTH ingredient identity and strength -- "Hydrocodone/Acetaminophen
+// 5/325 Mg Tablet" vs ".../10/325 Mg Tablet" (a genuinely different,
+// clinically significant dose) resolved GREEN name_component_match. Fixed
+// by (a) requiring at least one slash-half be a literal unit WORD before
+// treating it as disposable, and (b) capturing pure numeric ratios
+// (slash OR hyphen, decimals included) into a dedicated `ratios`
+// component compared for exact, order-preserved equality.
+describe('component-wise name fallback: reviewer round 1 fixes', () => {
+  describe('BLOCKER 1: combo-product dose ratio ("5/325") must be identity-bearing, not disposable', () => {
+    it('is NOT green: "Hydrocodone/Acetaminophen 5/325 Mg Tablet" vs ".../10/325 Mg Tablet" (slash ratio differs)', () => {
+      const r = compareDrugs(
+        { name: 'Hydrocodone/Acetaminophen 5/325 Mg Tablet' },
+        { name: 'Hydrocodone/Acetaminophen 10/325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+    });
+
+    it('is NOT green for the same pair written with a hyphenated ratio: "5-325" vs "10-325"', () => {
+      const r = compareDrugs(
+        { name: 'Hydrocodone/Acetaminophen 5-325 Mg Tablet' },
+        { name: 'Hydrocodone/Acetaminophen 10-325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+
+    it('is NOT green for Oxycodone/APAP with a differing slash ratio', () => {
+      const r = compareDrugs(
+        { name: 'Oxycodone/Acetaminophen 5/325 Mg Tablet' },
+        { name: 'Oxycodone/Acetaminophen 7.5/325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+
+    it('a genuinely IDENTICAL ratio on both sides can still reach GREEN (via this fallback) when every other rule also passes', () => {
+      // A one-sided salt word ("Bitartrate") keeps this pair off the
+      // pre-concept-resolution identity/route-fold fast paths (so this
+      // actually exercises compareNameComponents' ratio-equality check,
+      // not just the exact-string identity match) while the stated
+      // 5/325 ratio itself is identical on both sides.
+      const r = compareDrugs(
+        { name: 'Hydrocodone/Acetaminophen Bitartrate 5/325 Mg Tablet' },
+        { name: 'Hydrocodone/Acetaminophen 5/325 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    it('pins concentration-strength handling: "Amoxicillin 250 Mg/5 Ml Suspension" vs "Amoxicillin 250 Mg Tablet" is NOT green (form differs)', () => {
+      // Also confirms the isSlashUnit fix didn't regress the legitimate
+      // concentration case: "mg/5" (unit half present) must stay disposed
+      // of as strength noise, not get mistaken for an identity-bearing
+      // ratio token.
+      const r = compareDrugs(
+        { name: 'Amoxicillin 250 Mg/5 Ml Suspension' },
+        { name: 'Amoxicillin 250 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+  });
+
+  describe('should-fix 3: empty ingredient-token set (both sides) is never a match, even against another empty set', () => {
+    it('is NOT green when neither side has any token left over after stripping salt/route/form/strength', () => {
+      const r = compareDrugs({ name: '50 Mg Hcl Tablet' }, { name: '50 Mg Tablet' }, unresolvedProvider);
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+    });
+  });
+
+  describe('should-fix 4: injectable route/form ambiguity is deliberate and fail-safe', () => {
+    it('a stated "injection" route never reaches GREEN via this fallback, because it is consumed as a route and can never also confirm the form', () => {
+      const r = compareDrugs(
+        { name: 'Hydromorphone Hcl 2 Mg Injection' },
+        { name: 'Hydromorphone 2 Mg Injection' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+  });
+});
