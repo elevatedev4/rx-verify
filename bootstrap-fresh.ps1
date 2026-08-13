@@ -52,11 +52,23 @@
          the script throws with the exact command to remove that broken
          copy rather than silently retrying over it or deleting it
          itself.
-      5. Hands off to update-and-run.ps1 (pull + build + launch) via
+      5. Creates/refreshes the "Rx Verify" Desktop shortcut by invoking
+         install-shortcut.ps1 from inside the freshly-cloned repo, so a
+         fresh PC ends fully set up - not just installed-and-run-once,
+         but ready for every future launch to be a single double-click.
+         Non-fatal if this step fails (eg. some COM oddity creating the
+         .lnk): a warning is printed and the script continues, since the
+         app can still be run directly via update-and-run.ps1 below, and
+         install-shortcut.ps1 can always be re-run by hand later.
+      6. Hands off to update-and-run.ps1 (pull + build + launch) via
          `powershell -ExecutionPolicy Bypass -File ...`, the same command
          the "every run after" workflow in README.md uses. Since fresh PCs
          default to a Restricted execution policy, -ExecutionPolicy Bypass
-         is required for that handoff to run at all.
+         is required for that handoff to run at all. update-and-run.ps1
+         now also verifies Git/Node/dotnet are present on its own before
+         doing anything else, so this handoff is safe even if step 1-4's
+         install/PATH-refresh dance above somehow left something not
+         resolving yet in this console.
 
     Windows PowerShell 5.1 compatible on purpose (Windows' default) - no
     PS7-only syntax (ternary, ??, &&/||, Join-Path -AdditionalChildPath,
@@ -88,6 +100,7 @@ function Invoke-RxVerifyBootstrap {
     $ClaudeDir = Join-Path $env:USERPROFILE 'claude'
     $RepoPath = Join-Path $ClaudeDir 'rx-verify'
     $LauncherScriptPath = Join-Path $RepoPath 'update-and-run.ps1'
+    $InstallShortcutScriptPath = Join-Path $RepoPath 'install-shortcut.ps1'
 
     # -------------------------------------------------------------
     # Step 0: winget itself must exist - everything below depends on it.
@@ -176,7 +189,11 @@ function Invoke-RxVerifyBootstrap {
     # -------------------------------------------------------------
     if ($anyInstalled) {
         Write-Step 'Refreshing PATH in this session...'
-        $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if ($null -eq $machinePath) { $machinePath = '' }
+        if ($null -eq $userPath) { $userPath = '' }
+        $env:Path = $machinePath + ';' + $userPath
 
         $stillMissing = @()
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $stillMissing += 'git' }
@@ -225,7 +242,27 @@ function Invoke-RxVerifyBootstrap {
     }
 
     # -------------------------------------------------------------
-    # Step 6: hand off to update-and-run.ps1 (pull + build + launch). It
+    # Step 6: create/refresh the Desktop shortcut so a fresh PC ends
+    # fully set up. install-shortcut.ps1 is idempotent (overwrites any
+    # existing shortcut, never duplicates) and its own repo-clone check
+    # is a no-op here since the repo was just ensured above - safe to
+    # run on every bootstrap, including re-runs on an already-set-up
+    # PC. -NoPrompt suppresses its interactive "Press Enter to close"
+    # pause, which only makes sense when it's run standalone/by hand.
+    # Deliberately non-fatal: a failure here shouldn't block getting the
+    # app running for the first time (step 7 below still runs either
+    # way), and this can always be re-run later (see README.md).
+    # -------------------------------------------------------------
+    Write-Step 'Creating/refreshing the Desktop shortcut...'
+    powershell -ExecutionPolicy Bypass -File "$InstallShortcutScriptPath" -NoPrompt
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Could not create the Desktop shortcut (exit code $LASTEXITCODE) - continuing anyway. Re-run install-shortcut.ps1 later to try again (see README.md)." -ForegroundColor Yellow
+    } else {
+        Write-Detail 'Desktop shortcut ready.'
+    }
+
+    # -------------------------------------------------------------
+    # Step 7: hand off to update-and-run.ps1 (pull + build + launch). It
     # handles its own errors (holds the window open on failure), so this
     # is the last thing this script does either way.
     # -------------------------------------------------------------
