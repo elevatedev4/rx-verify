@@ -5,3 +5,8 @@ dist/
 .launcher-cache/
 bin/
 obj/
+
+# Wholesaler catalog source exports (proprietary, never committed --
+# see scripts/build-catalog-data.ts's header). Only the derived
+# data/catalog-data.json.gz is ever committed.
+*.xlsx
