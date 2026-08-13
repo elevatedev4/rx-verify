@@ -138,7 +138,25 @@ public sealed partial class IntegratedBoxesWindow : Window
         // there are no hotspots at all, see PollCursorForHover) and
         // stopped on Closed so it never outlives the window.
         _hoverPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(HoverPollIntervalMs) };
-        _hoverPollTimer.Tick += (_, _) => PollCursorForHover();
+        _hoverPollTimer.Tick += (_, _) =>
+        {
+            // REVIEWER HARDENING: this codebase deliberately guards every
+            // timer call site (see MainWindow.xaml.cs SafeTickIntegratedOverlay's
+            // doc — there is no DispatcherUnhandledException hook
+            // installed anywhere in this app, so an unguarded tick throwing
+            // would crash the whole process, Separate mode included, since
+            // it's the same process). The safe fallback for THIS timer
+            // specifically is always click-through — an exception here
+            // must never leave the window stuck non-transparent.
+            try
+            {
+                PollCursorForHover();
+            }
+            catch (Exception)
+            {
+                SetHitTestTransparent(true);
+            }
+        };
         _hoverPollTimer.Start();
         Closed += (_, _) => _hoverPollTimer.Stop();
     }
@@ -355,13 +373,21 @@ public sealed partial class IntegratedBoxesWindow : Window
 
     /// <summary>
     /// HOVER/RIGHT-CLICK AFFORDANCE tick — see the class doc's HOVER
-    /// section for the full design. Cheap early-out to "fully
-    /// click-through" whenever there are no hotspots (boxes hidden,
-    /// nothing to hover) or the cursor position can't be read.
+    /// section for the full design. REVIEWER BLOCKER FIX: checks
+    /// IsVisible FIRST via HoverPollDecision — a hidden window (Hide()
+    /// called from IntegratedOverlayCoordinator.HideBoxesIfShown, e.g.
+    /// PioneerRx lost focus / a different Rx is now showing) must never
+    /// have its click-through state driven by wherever the cursor happens
+    /// to be; HideAndResetHover already forces this the instant the
+    /// window is hidden, but this check is what keeps every SUBSEQUENT
+    /// poll tick (every ~60ms, for as long as the window stays hidden)
+    /// from undoing that. Cheap early-out to "fully click-through"
+    /// whenever there's nothing to hover (not visible, or no hotspots at
+    /// all) or the cursor position can't be read.
     /// </summary>
     private void PollCursorForHover()
     {
-        if (_hwnd == IntPtr.Zero || _hotspots.Count == 0)
+        if (_hwnd == IntPtr.Zero || HoverPollDecision.ShouldForceTransparent(IsVisible, _hotspots.Count))
         {
             SetHitTestTransparent(true);
             return;
@@ -379,6 +405,37 @@ public sealed partial class IntegratedBoxesWindow : Window
 
         SetHitTestTransparent(!isOverHotspot);
     }
+
+    /// <summary>
+    /// REVIEWER BLOCKER FIX: call this INSTEAD OF a bare Hide() everywhere
+    /// this window is hidden (IntegratedOverlayCoordinator.HideBoxesIfShown)
+    /// — clears _hotspots and forces WS_EX_TRANSPARENT back on BEFORE
+    /// Hide() itself runs, so a hidden window can never carry stale
+    /// hotspots or a cleared-transparency style into whatever it gets
+    /// repositioned/shown over next (a different Pioneer window, a
+    /// different Rx's field layout). See HoverPollDecision's doc for the
+    /// full failure mode this closes, and PollCursorForHover's own
+    /// IsVisible check for the belt-and-suspenders layer that also covers
+    /// every poll tick while it stays hidden.
+    /// </summary>
+    public void HideAndResetHover()
+    {
+        _hotspots.Clear();
+        SetHitTestTransparent(true);
+        Hide();
+    }
+
+    /// <summary>
+    /// REVIEWER BLOCKER FIX (layer 3, belt-and-suspenders): call right
+    /// before Show() (IntegratedOverlayCoordinator.UpdateBoxes) so this
+    /// window can never become visible already non-transparent, regardless
+    /// of whatever state history led here — HideAndResetHover and
+    /// PollCursorForHover's IsVisible check already prevent that in
+    /// practice, but a window that's ABOUT to become visible for the
+    /// first time this "shown" streak should never depend on either of
+    /// those alone having already run in the right order.
+    /// </summary>
+    public void ForceHitTestTransparent() => SetHitTestTransparent(true);
 
     /// <summary>Toggles ONLY the WS_EX_TRANSPARENT bit — WS_EX_LAYERED/WS_EX_NOACTIVATE/WS_EX_TOOLWINDOW are never touched (see the class doc's HOVER section). No-op (no SetWindowLong call at all) when the requested state already matches _hitTestTransparent, so a steady hover/steady click-through both cost nothing beyond the poll's own cursor read.</summary>
     private void SetHitTestTransparent(bool transparent)

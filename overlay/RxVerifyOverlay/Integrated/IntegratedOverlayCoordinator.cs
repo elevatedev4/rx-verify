@@ -791,6 +791,14 @@ public sealed class IntegratedOverlayCoordinator
 
         if (!_boxesShown)
         {
+            // REVIEWER BLOCKER FIX (layer 3, belt-and-suspenders): forced
+            // BEFORE Show() — see IntegratedBoxesWindow.ForceHitTestTransparent's
+            // doc. HideAndResetHover (below) and PollCursorForHover's own
+            // IsVisible check already prevent a hidden window from
+            // drifting non-transparent, but this window must never
+            // surface non-transparent the moment it becomes visible
+            // regardless of which of those ran first.
+            boxesWindow.ForceHitTestTransparent();
             boxesWindow.Show();
             _boxesShown = true;
         }
@@ -856,7 +864,11 @@ public sealed class IntegratedOverlayCoordinator
     private void HideBoxesIfShown()
     {
         if (!_boxesShown) return;
-        _boxesWindow?.Hide();
+
+        // REVIEWER BLOCKER FIX: HideAndResetHover (not a bare Hide()) —
+        // see that method's doc and HoverPollDecision's class doc for the
+        // stale-hotspot / stuck-non-transparent failure mode this closes.
+        _boxesWindow?.HideAndResetHover();
         _boxesShown = false;
     }
 
