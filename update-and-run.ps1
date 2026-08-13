@@ -370,6 +370,23 @@ if (-not (Test-Path $overlayProjectDir)) {
 # launched at the end of this script will then run alongside it as a
 # second instance.
 # ---------------------------------------------------------------------
+# .HasExited (like .Path above) can throw - eg. Win32Exception on an
+# access-denied/elevation-mismatch process. With $ErrorActionPreference
+# = 'Stop' that would crash the whole script before Stop-WithMessage
+# ever runs - on the double-click path, a window that just vanishes
+# with no message. Treat "can't tell" as "still running": it falls
+# through to the Stop-Process -Force attempt and then the final
+# re-check below, both of which already report a real failure loudly.
+function Test-ProcessStillRunning {
+    param($Process)
+    try {
+        $Process.Refresh()
+        return (-not $Process.HasExited)
+    } catch {
+        return $true
+    }
+}
+
 $overlayProcessName = 'RxVerifyOverlay'
 $runningOverlayProcesses = Get-Process -Name $overlayProcessName -ErrorAction SilentlyContinue
 
@@ -414,14 +431,12 @@ if ($processesToStop.Count -gt 0) {
 
         $waited = 0
         while ($waited -lt 5) {
-            $proc.Refresh()
-            if ($proc.HasExited) { break }
+            if (-not (Test-ProcessStillRunning $proc)) { break }
             Start-Sleep -Seconds 1
             $waited++
         }
 
-        $proc.Refresh()
-        if (-not $proc.HasExited) {
+        if (Test-ProcessStillRunning $proc) {
             try {
                 Stop-Process -Id $proc.Id -Force -ErrorAction Stop
                 Start-Sleep -Seconds 1
