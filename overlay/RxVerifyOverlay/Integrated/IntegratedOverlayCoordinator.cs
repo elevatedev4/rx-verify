@@ -217,7 +217,7 @@ public sealed class IntegratedOverlayCoordinator
     /// </summary>
     public event EventHandler? ToggleStateChanged;
 
-    /// <summary>Raised when the pharmacist picks "Report error…" from a verdict bar's hotspot context menu (IntegratedBoxesWindow) — MainWindow.xaml.cs handles this by opening Integrated/ReportErrorWindow prefilled with the field's current verdict data. Wired once, in EnsureBoxesWindow, at construction.</summary>
+    /// <summary>Raised when the poll-driven right-click detection (IntegratedBoxesWindow.PollCursorForHover — see HoverStateMachine, fix/hover-popup-live branch) fires over a verdict bar's hotspot — MainWindow.xaml.cs handles this by opening Integrated/ReportErrorWindow prefilled with the field's current verdict data. Wired once, in EnsureBoxesWindow, at construction.</summary>
     public event EventHandler<VerdictFieldInfo>? ReportErrorRequested;
 
     public IntegratedOverlayCoordinator(OverlayViewModel viewModel, OverlaySettings settings)
@@ -813,13 +813,13 @@ public sealed class IntegratedOverlayCoordinator
 
         var scale = DpiScaleFor(window.NativeWindowHandle);
 
-        // HOVER/RIGHT-CLICK AFFORDANCE (verdict-tooltips-reports branch):
-        // reportingEnabled gates ONLY the "Report error…" menu item (see
-        // IntegratedBoxesWindow.BuildHotspotContextMenu) — the hover
-        // tooltip itself is unconditional. See OverlaySettings.
-        // RxVerifyReportKey's doc for why an unset key hides the button
-        // entirely rather than showing one that could only ever queue
-        // locally forever.
+        // HOVER/RIGHT-CLICK AFFORDANCE: reportingEnabled gates ONLY
+        // whether a poll-detected right-click turns into a
+        // ReportErrorRequested (see IntegratedBoxesWindow.PollCursorForHover,
+        // fix/hover-popup-live branch) — the hover popup itself is
+        // unconditional. See OverlaySettings.RxVerifyReportKey's doc for
+        // why an unset key suppresses the affordance entirely rather than
+        // opening a dialog that could only ever queue locally forever.
         var reportingEnabled = !string.IsNullOrWhiteSpace(_settings.RxVerifyReportKey);
 
         var boxes = _viewModel.Categories
