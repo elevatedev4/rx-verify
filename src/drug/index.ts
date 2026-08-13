@@ -353,16 +353,25 @@ export function extractReleaseQualifier(rawName: string): string | null {
  *        IRON RULE, a miss/ambiguous hit here must never surface as
  *        anything but "unresolved" to the caller.
  */
-function resolveConceptByName(
+/** `ingredient|strength|doseForm` key used to tell whether two resolved candidates are the SAME distinct concept or genuinely different ones. */
+function conceptDistinctKey(c: LocalConcept): string {
+  return `${c.ingredient}|${c.strength}|${c.doseForm}`;
+}
+
+/**
+ * The original leading-prefix lookup + strength/qualifier narrowing +
+ * disambiguation logic, factored out of resolveConceptByName so its
+ * trailing-elision retry (see that function's own doc) can re-run the
+ * EXACT same matching/narrowing/disambiguation against a candidate token
+ * list that differs from the query's own tokens only in one guessed
+ * letter, rather than duplicating this logic.
+ */
+function resolveFromTokens(
   rawName: string,
+  tokens: string[],
   concepts: LocalConcept[],
   nameIndex: Map<string, number[]>
 ): LocalConcept | null {
-  const normalized = normalizeDrugNameString(rawName);
-  if (!normalized) return null;
-  const tokens = normalized.split(' ').filter(Boolean);
-  if (tokens.length === 0) return null;
-
   let candidateIndices: number[] | undefined;
   for (let len = Math.min(MAX_NAME_KEY_TOKENS, tokens.length); len >= 1; len--) {
     const key = tokens.slice(0, len).join(' ');
@@ -414,14 +423,67 @@ function resolveConceptByName(
     candidates = qualifierConfirmed;
   }
 
-  const distinctKey = (c: LocalConcept): string => `${c.ingredient}|${c.strength}|${c.doseForm}`;
   const distinct = new Map<string, LocalConcept>();
   for (const c of candidates) {
-    distinct.set(distinctKey(c), c);
+    distinct.set(conceptDistinctKey(c), c);
   }
   if (distinct.size !== 1) return null; // ambiguous (or, with 0, unreachable) -> miss, never a guess
 
   return [...distinct.values()][0] as LocalConcept;
+}
+
+function resolveConceptByName(
+  rawName: string,
+  concepts: LocalConcept[],
+  nameIndex: Map<string, number[]>
+): LocalConcept | null {
+  const normalized = normalizeDrugNameString(rawName);
+  if (!normalized) return null;
+  const tokens = normalized.split(' ').filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  const exact = resolveFromTokens(rawName, tokens, concepts, nameIndex);
+  if (exact) return exact;
+
+  // Trailing-elision tolerance (field report 2026-08-13): see
+  // tokensElisionEqual's doc (further down this file) for the full
+  // false-GREEN review this rule was already put through for the
+  // component-fallback comparison -- the same conservative shape applies
+  // here. Pioneer's free-text entry
+  // can truncate the final letter of the LEADING ingredient/brand word
+  // ("venlafaxin" for "venlafaxine") — brand/generic/ingredient names in
+  // this engine's inputs always lead the string (see this function's own
+  // doc above), so only the FIRST token is ever a candidate for the
+  // elided letter; every other token (qualifier/form/strength words that
+  // follow it) is passed through unchanged.
+  //
+  // Requerying nameIndex directly with a guessed extra letter (rather
+  // than, say, scanning nameIndex for an elision-equal key) keeps this
+  // exactly as cheap as the existing exact lookup — one extra Map.get per
+  // letter, only ever attempted after the exact lookup already missed —
+  // and reuses resolveFromTokens' full narrowing/disambiguation pipeline
+  // unchanged, so a guessed key is held to the exact same strength/
+  // qualifier/ambiguity bar as any other query.
+  //
+  // UNAMBIGUOUS ACROSS THE ALPHABET, or it's a miss: if two DIFFERENT
+  // letters each resolve to a genuinely different concept, that's a real
+  // ambiguity this fallback refuses to guess through — same
+  // never-a-guess posture as every other doubtful case in this function.
+  const firstToken = tokens[0] ?? '';
+  if (firstToken.length < 8) return null;
+  let elidedResult: LocalConcept | null = null;
+  for (let code = 97; code <= 122; code++) {
+    const letter = String.fromCharCode(code);
+    const candidateTokens = [`${firstToken}${letter}`, ...tokens.slice(1)];
+    const candidate = resolveFromTokens(rawName, candidateTokens, concepts, nameIndex);
+    if (candidate) {
+      if (elidedResult && conceptDistinctKey(elidedResult) !== conceptDistinctKey(candidate)) {
+        return null; // ambiguous across letters -- never guess
+      }
+      elidedResult = candidate;
+    }
+  }
+  return elidedResult;
 }
 
 /**
@@ -1147,6 +1209,83 @@ function tokenSetsEqual(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
+/**
+ * Field report (2026-08-13): source "VENLAFAXINE XR (EFFEXOR XR) 37.5 MG
+ * CAPSULE" (written NDC also on the e-script) vs entered "Venlafaxin Er
+ * 37.5mg Caps" went yellow unknown_drug — Pioneer's free-text entry
+ * truncated the ingredient word's trailing letter ("Venlafaxin" for
+ * "venlafaxine"). CONSERVATIVE trailing-elision tolerance: two tokens
+ * compare equal when one is EXACTLY the other minus its final 1 letter,
+ * AND the longer token is >=9 chars, AND the shorter is >=8 chars (so the
+ * shared prefix, before the elided letter, is always >=8 characters).
+ * Used by BOTH decomposeDrugNameComponents/compareNameComponents' own
+ * ingredient-token-set comparison below (see ingredientTokenSetsEqual)
+ * and resolveConceptByName's nameIndex lookup (the "equivalence layer"'s
+ * entered-name resolution — see that function's own elision retry).
+ *
+ * ADVERSARIAL REVIEW (false-GREEN hunt, documented per this branch's
+ * IRON RULE): a length-gated, single-trailing-letter, EXACT-prefix rule
+ * is deliberately much narrower than a general edit-distance tolerance
+ * (contrast src/normalize/address.ts's streetTokensMatch, which allows a
+ * same-length SUBSTITUTION anywhere in the word — a real, accepted
+ * residual risk there because address is a yellow-tier, never-blocks
+ * field). Drug identity is not that field, so this rule is intentionally
+ * an insert/delete-only, single-position(the very end)-only rule, which
+ * closes off the entire "any single-substitution collision" class
+ * address's tolerance still accepts. Considered and rejected search for a
+ * genuine same-stem, different-ingredient collision at this length:
+ *  - USAN/INN generic names sharing a drug-class SUFFIX ("-azepam",
+ *    "-statin", "-olol", "-cillin", "-pril" etc) differ in the STEM
+ *    (before the suffix), not the final letter -- e.g. "atorvastatin"/
+ *    "rosuvastatin" or "lorazepam"/"temazepam" differ throughout the
+ *    word, never by one trailing letter with an otherwise-identical
+ *    8+ char prefix.
+ *  - The one real family where the FINAL letter is the only thing that
+ *    differs between two spellings is USAN-vs-INN naming of the SAME
+ *    substance (US "-ine" vs INN "-in": "amantadine"/"amantadin",
+ *    "fluoxetine"/"fluoxetin", "quetiapine"/"quetiapin") -- these are
+ *    the SAME drug under two naming conventions, so tolerating them is
+ *    correct, not a false green.
+ *  - No real pair of DIFFERENT active ingredients sharing an 8+ char
+ *    identical prefix and differing only in one trailing letter was
+ *    found (searched confusable/LASA lists and common suffix families).
+ *    The strength/form/salt/route gates in compareNameComponents (rules
+ *    2-6, all of which still run AFTER this) provide additional
+ *    defense-in-depth even in the event such a pair exists but wasn't
+ *    found: rule 2 (strength stated-and-equal on both sides) alone
+ *    already blocks any elision-based match whose strengths don't also
+ *    agree, per this fix's own gating requirement.
+ */
+function tokensElisionEqual(a: string, b: string): boolean {
+  if (a === b) return false; // exact matches are handled by the caller already
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  if (longer.length - shorter.length !== 1) return false;
+  if (longer.length < 9 || shorter.length < 8) return false;
+  return longer.slice(0, -1) === shorter;
+}
+
+/**
+ * Ingredient-token-set equality for compareNameComponents' rule 1, with
+ * the trailing-elision tolerance above layered on top of exact
+ * tokenSetsEqual. Deliberately conservative about WHERE elision applies:
+ * only when the two sets are otherwise IDENTICAL except for exactly ONE
+ * non-matching token on each side (every other ingredient token, if any,
+ * must still match exactly) -- never multiple simultaneous elisions, and
+ * never as a substitute for the ordinary exact-match path. This is what
+ * lets "venlafaxin" (entered) match "venlafaxine" (source) in an
+ * otherwise single-ingredient name without loosening a multi-ingredient
+ * combo comparison at all.
+ */
+function ingredientTokenSetsEqual(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  if (tokenSetsEqual(a, b)) return true;
+  const onlyInA = [...a].filter((t) => !b.has(t));
+  const onlyInB = [...b].filter((t) => !a.has(t));
+  if (onlyInA.length !== 1 || onlyInB.length !== 1) return false;
+  return tokensElisionEqual(onlyInA[0] as string, onlyInB[0] as string);
+}
+
 interface DrugNameComponents {
   ingredientTokens: Set<string>;
   strength: string | null;
@@ -1320,7 +1459,10 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
  *     via two empty sets. Guards against future vocabulary growth
  *     (SALT_TOKENS/COMPONENT_ROUTE_TOKENS/COMPONENT_FORM_TOKENS all
  *     absorbing more words over time) quietly reopening this;
- *  1. ingredient token sets must be equal (order-insensitive);
+ *  1. ingredient token sets must be equal (order-insensitive) -- see
+ *     ingredientTokenSetsEqual's doc for the single, narrowly-gated
+ *     trailing-elision tolerance layered on top of exact equality
+ *     (field report 2026-08-13: "Venlafaxin" entered for "venlafaxine");
  *  1b. (reviewer round 1, BLOCKER 1 fix) ratio-shaped numeric tokens
  *      ("5/325", "5-325") must be equal IN ORDER -- a combo product's
  *      dose ratio is identity-bearing, never disposable strength noise;
@@ -1344,7 +1486,14 @@ function compareNameComponents(
     return { match: false, note: null };
   }
 
-  if (!tokenSetsEqual(src.ingredientTokens, ent.ingredientTokens)) {
+  // Rule 1 (ingredient-set equality) -- see ingredientTokenSetsEqual's
+  // doc for the trailing-elision tolerance layered on top of exact set
+  // equality here. Rule 2 immediately below (strength stated-and-equal
+  // on BOTH sides) still runs unconditionally regardless of HOW rule 1
+  // passed, which is what satisfies this fix's own gating requirement
+  // that an elision-based match may only ever contribute toward green
+  // when strength is confirmed equal too.
+  if (!ingredientTokenSetsEqual(src.ingredientTokens, ent.ingredientTokens)) {
     return { match: false, note: null };
   }
 

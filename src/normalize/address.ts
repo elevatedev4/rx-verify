@@ -55,10 +55,47 @@ const DIRECTIONALS: Record<string, string> = {
   southwest: 'sw', sw: 'sw'
 };
 
-const UNIT_DESIGNATORS = ['apt', 'apartment', 'unit', 'ste', 'suite', '#'];
+const UNIT_DESIGNATORS = [
+  'apt', 'apartment', 'unit', 'ste', 'suite', '#',
+  'level', 'lvl', 'floor', 'fl', 'bldg', 'building', 'room', 'rm', 'dept'
+];
 
+/**
+ * Field report (2026-08-13): source "4000 Cambridge St Level 2 Kansas,
+ * City, KS 66160" vs entered "4000 Cambridge St Kansas City, KS 66160" —
+ * a stray OCR comma inside a multi-word city name ("Kansas, City" instead
+ * of "Kansas City"). Commas are replaced with a SPACE (never simply
+ * deleted) so a comma with no surrounding whitespace on either side
+ * ("Kansas,City") still splits into two tokens instead of gluing them
+ * into one ("kansascity") — deletion alone would silently fuse two real
+ * words together, which is exactly the kind of token-comparison mismatch
+ * this fix exists to prevent. Periods are left as plain deletion,
+ * unchanged from before this fix — periods routinely appear as part of a
+ * tight abbreviation with no surrounding space by design ("St." immediately
+ * followed by the next word with a real space already there), and no
+ * field report has ever shown a period causing the comma-shaped gluing
+ * problem; changing that too, with no report motivating it, would be an
+ * unscoped, unreviewed change to this file's existing behavior.
+ *
+ * REVIEW FOLLOW-UP (same day): a comma sandwiched between two DIGITS
+ * ("4,000 Main St", a thousands separator) must not fold to a space
+ * either — "4,000" turning into "4 000" would split one house number
+ * into two street-core tokens and produce the exact same spurious
+ * address_differs class the owner just reported, just from the opposite
+ * direction (gluing words vs splitting a number). A digit,digit comma is
+ * a thousands separator, not a word boundary, so it's removed with NO
+ * space (collapsed back together: "4,000" -> "4000") — this pass runs
+ * BEFORE the general comma-to-space replace below, so only a comma with
+ * a non-digit on at least one side ever reaches that step.
+ */
 function foldCase(s: string): string {
-  return s.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  return s
+    .toLowerCase()
+    .replace(/(\d),(\d)/g, '$1$2')
+    .replace(/,/g, ' ')
+    .replace(/\./g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
