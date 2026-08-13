@@ -313,88 +313,100 @@ compiles. To actually run the overlay you must run the built `.exe` (or
 `dotnet run`) — or, easier, use `update-and-run.ps1` below, which builds
 *and* launches in one step.
 
-Pulling, rebuilding, and relaunching by hand every time a change lands
-gets old fast. Two scripts at the repo root turn that into a single
-double-click. Both are **self-locating** — they figure out the repo
-root from their own folder (`$PSScriptRoot`), so they work no matter
-where you've cloned the repo. The canonical location on a fresh PC is
-`%USERPROFILE%\claude\rx-verify`.
+Setup on a Windows PC is two copy/paste one-liners — everything else,
+including installing missing tools, is handled by the Desktop shortcut
+from then on.
 
-- **`update-and-run.ps1`** — pulls the latest code (`git pull
-  --ff-only` — never merges/rebases, so it can never clobber a local
-  edit), runs `npm install` only if `package-lock.json` changed since
-  the last successful install, then **always** runs `npm run build`
-  (the TypeScript engine) and `dotnet build` (the overlay) fresh —
-  every single run, no staleness guesswork — and launches the built
-  `RxVerifyOverlay.exe`. Both builds are incremental under the hood
-  (a warm `dotnet build` is well under a second), so always rebuilding
-  costs nothing and guarantees you're never looking at a stale binary.
-  If any step fails (pull, either build, or the `.exe` not being
-  found), it prints exactly which step failed and the exact path it
-  looked for, then holds the window open with "Press Enter to close"
-  so you can read it.
-- **`install-shortcut.ps1`** — one-time setup. Makes sure the repo
-  exists at `%USERPROFILE%\claude\rx-verify` (cloning it, creating the
-  `claude` parent folder if needed, if this is the very first run on
-  this machine) and creates a Desktop shortcut named **"Rx Verify"**
-  that runs `update-and-run.ps1`. This is a convenience — the primary
-  flow is running `update-and-run.ps1` directly (see below).
-
-**Brand-new PC (nothing installed yet — no Git, no Node, no .NET):**
-
-`bootstrap-fresh.ps1` is a superset of the "Fresh PC" one-liner below, for a
-machine that doesn't even have Git yet. Paste this into PowerShell:
+**1. Set up this PC** (one-time per machine, works on a totally fresh
+PC with no Git/Node/.NET yet, and is also safe to re-run on a machine
+that already has all of it):
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1 | iex
 ```
 
-It checks for `winget` (Windows' built-in package manager, present on any
-current Windows 10/11 box — if missing, it says so and points you at the
-"App Installer" Store listing, then stops), installs Git, Node.js LTS (needs
-major version 20+), and the .NET 8 SDK via `winget` — skipping whichever ones
-are already present/new enough — clones the repo to
-`%USERPROFILE%\claude\rx-verify` if it isn't there yet, then hands off to
-`update-and-run.ps1` itself (pull + fresh build + launch). Windows may show a
-few Yes/No install prompts along the way — click Yes. It's safe to re-run any
-time: already-installed tools are skipped, and if a fresh install needs a new
-console before it's picked up on PATH, the script says so — just close
-PowerShell, reopen it, and paste the same line again; nothing already
-installed or cloned is lost.
+This checks for `winget` (Windows' built-in package manager, present on
+any current Windows 10/11 box — if missing, it says so and points you
+at the "App Installer" Store listing, then stops); installs Git,
+Node.js LTS (needs major version 20+), and the .NET 8 SDK via `winget`
+— skipping whichever are already present/new enough; clones the repo
+to `%USERPROFILE%\claude\rx-verify` if it isn't there yet; creates the
+**"Rx Verify"** Desktop shortcut; then hands off to `update-and-run.ps1`
+for a fresh build + launch. Windows may show a few Yes/No install
+prompts along the way — click Yes. Safe to re-run any time:
+already-installed tools, an already-cloned repo, and an
+already-created shortcut are all detected and skipped/refreshed rather
+than duplicated — if a fresh install needs a new console before it's
+picked up on PATH, the script says so; just close PowerShell, reopen
+it, and paste the same line again.
 
-**Fresh PC (Git already installed — bootstrap just clones to `\claude\rx-verify` then runs):**
-
-```powershell
-powershell -ExecutionPolicy Bypass -Command "if (!(Test-Path $env:USERPROFILE\claude\rx-verify)) { New-Item -ItemType Directory -Force -Path $env:USERPROFILE\claude | Out-Null; git clone https://github.com/elevatedev4/rx-verify.git $env:USERPROFILE\claude\rx-verify }; powershell -ExecutionPolicy Bypass -File $env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
-```
-
-(These paths never contain spaces, so the inner path arguments are deliberately unquoted — PowerShell double-quoted strings only treat `` `" `` or `""` as an escaped quote, not `\"`, so quoting them the "obvious" way here actually truncates the `-Command` string and breaks the whole line.)
-
-**Every run after (pull + fresh build + launch):**
+**2. Re-create shortcut** — only needed if the Desktop shortcut is ever
+deleted or stops working; step 1 already creates it, so most machines
+never need this run by hand:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\claude\rx-verify\install-shortcut.ps1"
 ```
 
-**Optional one-time shortcut setup**, from inside an already-cloned repo:
+After either, **launching is just double-clicking "Rx Verify" on the
+Desktop** — before a shift, or whenever told a fix shipped. There's no
+separate "launch" one-liner to keep around: the shortcut runs
+`update-and-run.ps1`, which now **self-heals its own prerequisites**
+every time it's launched — before it does anything else, it checks that
+Git, Node.js (20+), and the .NET 8 SDK are present, and if any is
+missing (a Windows reset, an uninstalled tool, a PC that got a shortcut
+without ever running step 1) it installs it via the same `winget`
+packages step 1 uses, refreshes PATH, and re-checks. When everything's
+already present — the normal case — this is just three fast
+presence/version checks, so it doesn't slow down the everyday
+double-click.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install-shortcut.ps1
-```
+What each script does:
 
-Then double-click **"Rx Verify"** on the Desktop any time — before a
-shift, or whenever told a fix shipped.
+- **`bootstrap-fresh.ps1`** — the "Set up this PC" one-liner above.
+  Installs Git/Node/.NET 8 SDK via `winget` if missing, refreshes
+  PATH from the registry if anything was installed, clones the repo if
+  it isn't there yet ("already cloned" is judged by `update-and-run.ps1`
+  existing inside it, not just the folder existing, so an interrupted
+  clone is never silently retried over — it tells you the exact command
+  to remove the broken copy first), creates/refreshes the Desktop
+  shortcut (non-fatal if that one step fails), then hands off to
+  `update-and-run.ps1`.
+- **`update-and-run.ps1`** — what the Desktop shortcut always runs, and
+  the workhorse behind every launch. Verifies Git/Node 20+/.NET 8 SDK
+  first (installing anything missing, as above), force-syncs the local
+  checkout to exactly match `origin/main` (`git fetch` + `git checkout
+  -f -B main origin/main` — GitHub is the source of truth on these
+  deploy-and-test machines, so this discards any local drift rather
+  than merging or stashing it), runs `npm install` only if
+  `package-lock.json` changed since the last successful install, then
+  **always** runs `npm run build` (the TypeScript engine) and `dotnet
+  build` (the overlay) fresh — every single run, no staleness
+  guesswork — and launches the built `RxVerifyOverlay.exe`. Both builds
+  are incremental under the hood (a warm `dotnet build` is well under a
+  second), so always rebuilding costs nothing. If any step fails (a
+  prerequisite that still won't resolve after installing, the sync,
+  either build, or the `.exe` not being found), it prints exactly which
+  step failed and the exact path/command involved, then holds the
+  window open with "Press Enter to close" so you can read it.
+- **`install-shortcut.ps1`** — the "Re-create shortcut" one-liner
+  above, and what `bootstrap-fresh.ps1` also calls automatically.
+  Creates (or overwrites — safe to re-run any time, never duplicates) a
+  Desktop shortcut named **"Rx Verify"** that runs `update-and-run.ps1`;
+  also clones the repo first if run standalone on a machine that
+  skipped step 1.
 
-If `git pull` ever fails (diverged history, a stray local edit, no
-network), the script stops immediately, changes nothing, and tells you
-to copy the error and send it back — it will never try to stash,
-merge, or discard anything on its own.
+If the sync in `update-and-run.ps1` ever fails (no network, a
+GitHub-side issue), the script stops immediately and tells you to copy
+the error and send it back — it will never try to stash, merge, or
+discard anything beyond the intentional force-sync to `origin/main`
+described above.
 
-Both scripts are plain Windows PowerShell 5.1 (the version already on
-every Windows 10/11 box — no PS7 install needed) and are safe to
-re-run any time; nothing they do is destructive. Neither creates a
+All three scripts are plain Windows PowerShell 5.1 (the version already
+on every Windows 10/11 box — no PS7 install needed) and are safe to
+re-run any time; nothing they do is destructive. None creates a
 scheduled task or a background service — they only run when you
-double-click the shortcut or run them directly.
+double-click the shortcut or run one directly.
 
 Remaining suggested next steps:
 

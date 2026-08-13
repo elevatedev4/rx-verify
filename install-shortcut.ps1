@@ -22,8 +22,20 @@
     affects that one process - it does not change your machine's
     PowerShell execution policy setting.
 
+    Pass -NoPrompt to skip the "Press Enter to close this window" pauses
+    below (both on success and on failure). Only meant for when this
+    script is invoked programmatically - bootstrap-fresh.ps1 does this
+    to create/refresh the shortcut as part of a fresh-PC bootstrap that
+    shouldn't stop and wait for a keypress partway through. Run it
+    directly (double-click, or "Run with PowerShell") and the pauses
+    stay on, same as always.
+
     PowerShell 5.1 compatible on purpose (Windows' default).
 #>
+
+param(
+    [switch]$NoPrompt
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -40,7 +52,7 @@ function Stop-WithMessage {
     param([string]$Message)
     Write-Host $Message -ForegroundColor Red
     Write-Host 'Copy the text above (including any error output) and send it to Will/dev. Nothing has been changed or discarded.' -ForegroundColor Red
-    Read-Host 'Press Enter to close this window'
+    if (-not $NoPrompt) { Read-Host 'Press Enter to close this window' }
     exit 1
 }
 
@@ -90,4 +102,4 @@ $shortcut.Description = 'Update and launch Rx Verify'
 $shortcut.Save()
 
 Write-Step "Done. '$shortcutPath' now updates, builds fresh, and launches Rx Verify in one double-click."
-Read-Host 'Press Enter to close this window'
+if (-not $NoPrompt) { Read-Host 'Press Enter to close this window' }
