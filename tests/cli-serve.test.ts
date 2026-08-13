@@ -76,6 +76,31 @@ describe('verify-cli --serve (persistent process, line-delimited JSON — see sr
     harness = undefined;
   });
 
+  it('emits a one-time ready/handshake line (engine build stamp) before any response, with no "id" key', async () => {
+    harness = new ServeHarness();
+
+    // Round-trip one real request first — guarantees the ready line
+    // (written synchronously in serve(), before the readline interface
+    // below it starts consuming stdin at all — see src/cli.ts) has
+    // already arrived on our side too, since stdout lines are strictly
+    // ordered and this test's own readline never reorders them.
+    await harness.sendRequest('req-after-ready', {
+      source: { patientName: 'John Smith' },
+      entered: { patientName: 'John Smith' },
+      skipDrugLookup: true
+    });
+
+    expect(harness.responses[0]).toMatchObject({ ready: true });
+    expect(harness.responses[0].id).toBeUndefined();
+    const engineBuild = harness.responses[0].engineBuild as { sha: string; builtAt: string };
+    // This harness runs --serve directly against src/cli.ts via tsx, so
+    // no dist/build-info.json sibling exists — see readBuildInfo's doc:
+    // that's the documented "unknown" fallback, not a bug. A real
+    // dist/cli.js (built via `npm run build`, which runs the prebuild
+    // step first) reports the actual git sha + build timestamp instead.
+    expect(engineBuild).toEqual({ sha: 'unknown', builtAt: 'unknown' });
+  }, 15000);
+
   it('handles multiple requests over one persistent process, correlated by id', async () => {
     harness = new ServeHarness();
 

@@ -1087,6 +1087,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             CapturedAt = DateTime.Now,
             AppVersion = AppDiagnostics.GetAppVersion(),
             CommitSha = AppDiagnostics.GetCommitSha(),
+            EngineBuildSha = _engineClient.EngineBuildSha,
+            EngineBuildBuiltAt = _engineClient.EngineBuildBuiltAt,
             Method = _settings.Method == VerificationMethod.Uia ? "Escript tab (direct UIA read)" : "OCR",
             RxWindowTitle = _lastRxWindowTitle,
             StatusMessage = StatusMessage,

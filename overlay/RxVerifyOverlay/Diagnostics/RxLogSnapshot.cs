@@ -22,6 +22,27 @@ public sealed class RxLogSnapshot
     public DateTime CapturedAt { get; init; }
     public string AppVersion { get; init; } = "unknown";
     public string CommitSha { get; init; } = "unknown";
+
+    /// <summary>
+    /// Engine build stamp (RXVERIFY-TROUBLESHOOT 2026-08-13) — the git
+    /// sha + build timestamp of the dist/cli.js the TypeScript engine
+    /// subprocess is actually running from (see Engine/EngineClient.cs
+    /// EngineBuildSha/EngineBuildBuiltAt, captured from --serve's ready
+    /// handshake, src/cli.ts). Null before the engine process has
+    /// started at least once, or if the handshake was missing/malformed
+    /// (e.g. an older dist/cli.js built before this feature existed) —
+    /// RxLogFormatter omits the "Engine build:" line entirely in that
+    /// case rather than printing a confusing "unknown unknown".
+    /// Distinct from CommitSha/AppVersion above, which describe the C#
+    /// OVERLAY binary, not the separate Node engine process it spawns —
+    /// the whole point of this field is that those two can drift apart
+    /// (a stale, unrebuilt dist/ next to an up-to-date overlay checkout).
+    /// </summary>
+    public string? EngineBuildSha { get; init; }
+
+    /// <summary>See EngineBuildSha.</summary>
+    public string? EngineBuildBuiltAt { get; init; }
+
     public string Method { get; init; } = "";
     public string? RxWindowTitle { get; init; }
     public string StatusMessage { get; init; } = "";

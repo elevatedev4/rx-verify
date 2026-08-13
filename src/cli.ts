@@ -23,10 +23,18 @@
  *    line-delimited JSON over stdin/stdout — avoids paying Node's
  *    process-start cost (a few hundred ms) on every single verify call.
  *      node dist/cli.js --serve
- *    Each stdin LINE is one JSON request, same shape as the one-shot
- *    body above PLUS a required "id" (any string, echoed back verbatim
- *    so the caller can correlate a response to its request — the two
- *    sides never need to serialize calls, though EngineClient.cs
+ *    The FIRST stdout line, written before anything else and before any
+ *    request is read, is a one-time ready/handshake line (RXVERIFY-
+ *    TROUBLESHOOT 2026-08-13 — see readBuildInfo's doc for why):
+ *      { "ready": true, "engineBuild": { "sha": string, "builtAt": string } }
+ *    (never has an "id" key, unlike every response line below, so a
+ *    caller can never mistake it for one). EngineClient.cs reads and
+ *    consumes exactly this one line right after starting the process,
+ *    before sending its first request.
+ *    Each stdin LINE after that is one JSON request, same shape as the
+ *    one-shot body above PLUS a required "id" (any string, echoed back
+ *    verbatim so the caller can correlate a response to its request —
+ *    the two sides never need to serialize calls, though EngineClient.cs
  *    currently does anyway). Each stdout LINE is one JSON response:
  *      { "id": string, "verdicts": [...], "summary": {...} }
  *    or on a per-request failure (bad JSON, missing "id", missing
@@ -59,10 +67,51 @@
  */
 
 import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
 import { verify } from './engine/index.js';
 import { LocalNdcProvider, type RxNormProvider } from './drug/index.js';
 import type { ScriptData, EnteredData, VerifyResult } from './types.js';
 import { parseEscriptOcr, type OcrWord } from './ocr/parseEscriptOcr.js';
+
+/**
+ * Engine build stamp (RXVERIFY-TROUBLESHOOT 2026-08-13): npm run build's
+ * prebuild step (scripts/generate-build-info.ts) writes dist/build-info.json
+ * next to dist/cli.js — { sha, builtAt } for the exact commit and build
+ * time that produced the dist/ this process is running from. A live
+ * troubleshoot report showed a bug reproducing against the app's own
+ * embedded git commit sha even though a from-scratch repro against the
+ * TypeScript source AT that exact commit already came back correct — the
+ * commit sha alone can't distinguish "the fix landed but dist/ was never
+ * rebuilt" from "this is a genuine new regression". Read once at startup
+ * (never changes while this process is alive) and surfaced exactly once,
+ * in --serve's ready handshake below, so EngineClient.cs (and from
+ * there, RxLogFormatter's log header) can report it.
+ *
+ * Read relative to THIS FILE's own compiled location (import.meta.url),
+ * never the process's cwd — EngineClient.cs can invoke
+ * `node <path>\dist\cli.js` from any working directory. Missing/
+ * unreadable (dev mode running src/cli.ts directly via tsx, where no
+ * dist/ sibling exists at all; or an install predating this feature)
+ * falls back to "unknown" rather than failing the process — this is a
+ * diagnostic nicety, never a hard dependency of verification itself.
+ */
+interface EngineBuildInfo {
+  sha: string;
+  builtAt: string;
+}
+
+function readBuildInfo(): EngineBuildInfo {
+  try {
+    const url = new URL('./build-info.json', import.meta.url);
+    const parsed = JSON.parse(readFileSync(url, 'utf8')) as Partial<EngineBuildInfo>;
+    return {
+      sha: typeof parsed.sha === 'string' && parsed.sha ? parsed.sha : 'unknown',
+      builtAt: typeof parsed.builtAt === 'string' && parsed.builtAt ? parsed.builtAt : 'unknown'
+    };
+  } catch {
+    return { sha: 'unknown', builtAt: 'unknown' };
+  }
+}
 
 /** Never consulted when skipDrugLookup is true (verify() skips compareDrugs entirely in that mode) — exists only so a provider value is always available to pass, without paying LocalNdcProvider's dataset-load cost. */
 const NULL_PROVIDER: RxNormProvider = { getConcept: () => null };
@@ -193,6 +242,15 @@ interface ServeRequest extends CliInput {
  * pharmacist needs a fast verify.
  */
 async function serve(): Promise<void> {
+  // One-time ready/handshake line (RXVERIFY-TROUBLESHOOT 2026-08-13 —
+  // see readBuildInfo's doc). Written synchronously, before the readline
+  // interface below starts consuming stdin and before any request can
+  // possibly be processed, so this is always the very first line
+  // EngineClient.cs reads after starting the process — never racing
+  // against (or being mistaken for) a real response line, which always
+  // carries an "id" key that this line deliberately omits.
+  process.stdout.write(JSON.stringify({ ready: true, engineBuild: readBuildInfo() }) + '\n');
+
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
   rl.on('line', (line) => {

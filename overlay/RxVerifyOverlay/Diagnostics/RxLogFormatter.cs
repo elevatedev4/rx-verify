@@ -122,6 +122,16 @@ public static class RxLogFormatter
         sb.AppendLine("=== Rx Verify — copied log ===");
         sb.AppendLine($"Captured: {s.CapturedAt:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"App version: {s.AppVersion}    Commit: {s.CommitSha}");
+        // RXVERIFY-TROUBLESHOOT 2026-08-13: distinct from Commit above --
+        // that describes the C# overlay checkout, this describes the
+        // separate Node engine subprocess's dist/cli.js (see
+        // RxLogSnapshot.EngineBuildSha's doc for why those two can
+        // drift). Omitted entirely (not printed as "unknown unknown")
+        // when the handshake never happened at all.
+        if (!string.IsNullOrEmpty(s.EngineBuildSha) || !string.IsNullOrEmpty(s.EngineBuildBuiltAt))
+        {
+            sb.AppendLine($"Engine build: {s.EngineBuildSha ?? "unknown"} {s.EngineBuildBuiltAt ?? "unknown"}");
+        }
         sb.AppendLine($"Method: {s.Method}");
         if (!string.IsNullOrEmpty(s.RxWindowTitle))
         {

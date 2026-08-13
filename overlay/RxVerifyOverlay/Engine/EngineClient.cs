@@ -85,6 +85,21 @@ public sealed class EngineClient : IDisposable
     private bool _disposed;
 
     /// <summary>
+    /// Engine build stamp captured from --serve's one-time ready
+    /// handshake (src/cli.ts — see that file's readBuildInfo doc for
+    /// why this exists: RXVERIFY-TROUBLESHOOT 2026-08-13). Null until
+    /// the persistent process has started at least once, or if the
+    /// handshake line was missing/malformed/unparseable (best-effort
+    /// only — see EnsureProcessStarted). Read by
+    /// OverlayViewModel.BuildCurrentLogBlob for RxLogFormatter's
+    /// "Engine build: &lt;sha&gt; &lt;builtAt&gt;" header line.
+    /// </summary>
+    public string? EngineBuildSha { get; private set; }
+
+    /// <summary>See EngineBuildSha.</summary>
+    public string? EngineBuildBuiltAt { get; private set; }
+
+    /// <summary>
     /// Path to the compiled CLI entrypoint, e.g.
     /// "C:\Users\will\claude\rx-verify\dist\cli.js". Configurable because
     /// the overlay and the engine repo are checked out independently —
@@ -286,6 +301,37 @@ public sealed class EngineClient : IDisposable
         _process = process;
         _stdin = process.StandardInput;
         _stdout = process.StandardOutput;
+
+        // One-time ready/handshake line (RXVERIFY-TROUBLESHOOT
+        // 2026-08-13 — see src/cli.ts serve()'s header doc): the
+        // process's FIRST stdout line, written before it reads any
+        // request and before any response line can possibly exist, so
+        // reading it synchronously HERE — before this method returns and
+        // RunOnPersistentProcessAsync sends the first real request — can
+        // never race against or be confused with a real response.
+        // Best-effort only: a missing/malformed/unparseable handshake
+        // (e.g. an older dist/cli.js built before this feature existed)
+        // must never block the app from verifying — EngineBuildSha/
+        // EngineBuildBuiltAt simply stay null in that case.
+        EngineBuildSha = null;
+        EngineBuildBuiltAt = null;
+        try
+        {
+            var readyLine = _stdout.ReadLine();
+            if (readyLine is not null)
+            {
+                using var readyDoc = JsonDocument.Parse(readyLine);
+                if (readyDoc.RootElement.TryGetProperty("engineBuild", out var buildEl))
+                {
+                    if (buildEl.TryGetProperty("sha", out var shaEl)) EngineBuildSha = shaEl.GetString();
+                    if (buildEl.TryGetProperty("builtAt", out var builtAtEl)) EngineBuildBuiltAt = builtAtEl.GetString();
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort only — see doc above.
+        }
 
         // Drain stderr continuously for the life of the process. This is
         // NOT optional: an unread stderr pipe can fill its OS buffer and
