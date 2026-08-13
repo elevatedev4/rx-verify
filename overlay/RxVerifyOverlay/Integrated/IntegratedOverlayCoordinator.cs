@@ -220,6 +220,21 @@ public sealed class IntegratedOverlayCoordinator
     /// <summary>Raised when the poll-driven right-click detection (IntegratedBoxesWindow.PollCursorForHover — see HoverStateMachine, fix/hover-popup-live branch) fires over a verdict bar's hotspot — MainWindow.xaml.cs handles this by opening Integrated/ReportErrorWindow prefilled with the field's current verdict data. Wired once, in EnsureBoxesWindow, at construction.</summary>
     public event EventHandler<VerdictFieldInfo>? ReportErrorRequested;
 
+    /// <summary>
+    /// Raised with the NEW checked state whenever the control box's
+    /// "Order Assist" checkbox is clicked — see Integrated/ControlBoxWindow.cs
+    /// OrderAssistToggleRequested. Deliberately a PLAIN bool, exactly like
+    /// every other *Requested event on this class: this coordinator never
+    /// references any OrderAssist.* type and never will — MainWindow.xaml.cs
+    /// (the app's composition root) is the only place that both knows
+    /// about this event AND owns an OrderAssist.OrderAssistCoordinator
+    /// instance, so the verify flow's own composition class here stays
+    /// completely decoupled from that separate, independently-toggled
+    /// module (see OrderAssistCoordinator's class doc for why that
+    /// decoupling matters — turn-off/split-off-as-its-own-module later).
+    /// </summary>
+    public event EventHandler<bool>? OrderAssistToggleRequested;
+
     public IntegratedOverlayCoordinator(OverlayViewModel viewModel, OverlaySettings settings)
     {
         _viewModel = viewModel;
@@ -271,6 +286,10 @@ public sealed class IntegratedOverlayCoordinator
     public void SyncToggles()
     {
         _controlBox?.SetToggleState(_settings.Method, _settings.DisplayMode);
+        // Plain bool read straight from settings — see
+        // OrderAssistToggleRequested's doc for why this is the only
+        // OrderAssist-related state this class ever touches.
+        _controlBox?.SetOrderAssistState(_settings.OrderAssistEnabled);
         ToggleStateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -739,6 +758,7 @@ public sealed class IntegratedOverlayCoordinator
         _controlBox.OpenSeparateWindowRequested += (_, _) => ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.RefreshRequested += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.CloseApplicationRequested += (_, _) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
+        _controlBox.OrderAssistToggleRequested += (_, enabled) => OrderAssistToggleRequested?.Invoke(this, enabled);
         _controlBox.HideOverlayToggleRequested += (_, hidden) =>
         {
             // ITEM 2: update the session-only flag and re-evaluate

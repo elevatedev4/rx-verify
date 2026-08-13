@@ -124,6 +124,25 @@ public sealed class OverlaySettings
     /// </summary>
     public string RxVerifyReportKey { get; set; } = "";
 
+    /// <summary>
+    /// Order Assist module toggle (see overlay/RxVerifyOverlay/OrderAssist/
+    /// OrderAssistCoordinator.cs) — persisted so a pharmacist who enables
+    /// it stays enabled across restarts, same pattern as every other
+    /// toggle in this file. Defaults to OFF: per the owner's spec, this is
+    /// "a mode that can be enabled ... so we don't have to waste resources
+    /// scanning" when the order isn't being done — a fresh install (or an
+    /// old settings.json written before this field existed) must never
+    /// start Order Assist's OCR timer without an explicit opt-in. Read/
+    /// written only by OrderAssistCoordinator.SetEnabled and the "Order
+    /// Assist" control-box toggle (Integrated/ControlBoxWindow.xaml.cs,
+    /// relayed through IntegratedOverlayCoordinator.OrderAssistToggleRequested
+    /// and MainWindow.xaml.cs — see those classes' docs for why this
+    /// plain bool is the ONLY thing that crosses from the verify flow's
+    /// own composition class into OrderAssist, keeping the two modules
+    /// otherwise fully decoupled).
+    /// </summary>
+    public bool OrderAssistEnabled { get; set; }
+
     private static string SettingsFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "settings.json");
 

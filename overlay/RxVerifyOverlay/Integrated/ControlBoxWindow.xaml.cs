@@ -79,6 +79,9 @@ public sealed partial class ControlBoxWindow : Window
     private bool _suppressToggleHandlers;
     private bool _suppressHideOverlayHandler;
 
+    /// <summary>Same suppression pattern as _suppressHideOverlayHandler, for the Order Assist checkbox — see SetOrderAssistState.</summary>
+    private bool _suppressOrderAssistHandler;
+
     private IntPtr _hwnd = IntPtr.Zero;
 
     public event EventHandler<VerificationMethod>? MethodChangeRequested;
@@ -101,6 +104,17 @@ public sealed partial class ControlBoxWindow : Window
     /// carries the checkbox's own current, authoritative state).
     /// </summary>
     public event EventHandler<bool>? HideOverlayToggleRequested;
+
+    /// <summary>
+    /// Raised with the NEW checked state whenever the "Order Assist"
+    /// checkbox is clicked directly by the pharmacist (never for a
+    /// programmatic SetOrderAssistState sync — see _suppressOrderAssistHandler).
+    /// IntegratedOverlayCoordinator only relays this as a plain bool (see
+    /// its own OrderAssistToggleRequested doc) — it never references any
+    /// OrderAssist.* type itself, keeping this window's only coupling to
+    /// that module a bool in each direction.
+    /// </summary>
+    public event EventHandler<bool>? OrderAssistToggleRequested;
 
     public ControlBoxWindow()
     {
@@ -211,6 +225,20 @@ public sealed partial class ControlBoxWindow : Window
         StatusTimeText.Text = statusText;
     }
 
+    /// <summary>Reflects OverlaySettings.OrderAssistEnabled in the checkbox without re-raising OrderAssistToggleRequested — called whenever IntegratedOverlayCoordinator.SyncToggles runs, same pattern as SetToggleState above.</summary>
+    public void SetOrderAssistState(bool enabled)
+    {
+        _suppressOrderAssistHandler = true;
+        try
+        {
+            OrderAssistCheckBox.IsChecked = enabled;
+        }
+        finally
+        {
+            _suppressOrderAssistHandler = false;
+        }
+    }
+
     /// <summary>
     /// MAXIMIZED-ONLY guard (item 3): when PioneerRx is attached but NOT
     /// maximized, show the "maximize to use integrated view" note and
@@ -257,4 +285,11 @@ public sealed partial class ControlBoxWindow : Window
 
     /// <summary>Item 8: the corner X button — see CloseApplicationRequested's doc.</summary>
     private void OnCloseClick(object sender, RoutedEventArgs e) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>A REAL pharmacist click on the Order Assist checkbox (not SetOrderAssistState's programmatic sync — see _suppressOrderAssistHandler).</summary>
+    private void OnOrderAssistToggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressOrderAssistHandler) return;
+        OrderAssistToggleRequested?.Invoke(this, OrderAssistCheckBox.IsChecked == true);
+    }
 }
