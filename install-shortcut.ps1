@@ -142,7 +142,7 @@ try {
         $pinVerb = $null
         foreach ($verb in $shortcutItem.Verbs()) {
             $verbName = $verb.Name -replace '&', ''
-            if ($verbName -match '(?i)taskbar') {
+            if (($verbName -match '(?i)taskbar') -and ($verbName -notmatch '(?i)unpin')) {
                 $pinVerb = $verb
                 break
             }
