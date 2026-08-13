@@ -40,17 +40,29 @@
       5. npm run build (the TypeScript matching engine, emits
          dist\cli.js) - ALWAYS runs, every invocation. No staleness
          guesswork.
-      6. dotnet build (the WPF overlay) - ALWAYS runs, every invocation.
+      6. Before building the overlay: stops any running
+         RxVerifyOverlay.exe whose path is under THIS repo's own
+         overlay bin directory (never a same-named process from a
+         different checkout) - gracefully (CloseMainWindow, then a
+         short wait, then Stop-Process -Force if it's still up) - so
+         `dotnet build` doesn't fail trying to overwrite a running exe
+         (MSB3026). A same-named process running from elsewhere is left
+         alone but flagged, since the app launched at the end of this
+         script will then run alongside it. If it can't be stopped, the
+         script stops here and says so rather than letting the build
+         fail.
+      7. dotnet build (the WPF overlay) - ALWAYS runs, every invocation.
          Both builds are incremental under the hood and fast even when
          nothing changed.
-      7. Launches the freshly built overlay .exe.
+      8. Launches the freshly built overlay .exe.
 
     Any failed step (a missing prerequisite that still won't resolve,
-    git fetch/checkout, npm install, npm run build, dotnet build, or not
-    finding the built .exe) prints exactly which step failed and the
-    exact path/command involved, then holds the window open with
-    "Press Enter to close" so the error is readable even when this was
-    launched via double-click. On success, it just launches and exits.
+    git fetch/checkout, npm install, npm run build, a running overlay
+    that won't stop, dotnet build, or not finding the built .exe) prints
+    exactly which step failed and the exact path/command involved, then
+    holds the window open with "Press Enter to close" so the error is
+    readable even when this was launched via double-click. On success,
+    it just launches and exits.
 
     PowerShell 5.1 compatible on purpose (Windows' default) - no PS7-only
     syntax (ternary, ??, &&/||, Join-Path -AdditionalChildPath, etc.).
@@ -341,6 +353,95 @@ function Find-OverlayExe {
 
 if (-not (Test-Path $overlayProjectDir)) {
     Stop-WithMessage "Overlay project folder not found at $overlayProjectDir. The repo checkout looks incomplete or corrupted."
+}
+
+# ---------------------------------------------------------------------
+# Step 4a: stop a running overlay before rebuilding it. `dotnet build`
+# fails with MSB3026 ("Could not copy apphost.exe ... because it is
+# being used by another process") if the exe it's about to overwrite is
+# currently running - without this, re-running the shortcut while Rx
+# Verify is still open turns into a build-failure retry loop instead of
+# a clean update. Only ever stops a RxVerifyOverlay.exe whose path is
+# under THIS repo's own overlay bin directory ($overlayBinDebugDir,
+# built from $RepoPath above) - never a same-named process from a
+# different checkout (eg. an owner PC running an old copy from another
+# folder/drive while this one updates). A same-named process from
+# elsewhere is left running but flagged, since the freshly-built exe
+# launched at the end of this script will then run alongside it as a
+# second instance.
+# ---------------------------------------------------------------------
+$overlayProcessName = 'RxVerifyOverlay'
+$runningOverlayProcesses = Get-Process -Name $overlayProcessName -ErrorAction SilentlyContinue
+
+$processesToStop = @()
+$otherLocationProcesses = @()
+
+foreach ($proc in $runningOverlayProcesses) {
+    # .Path (MainModule.FileName under the hood) can throw - eg. access
+    # denied for an elevated process while this script runs
+    # non-elevated, or a process that exited between Get-Process and
+    # here. Treat "couldn't determine" the same as "different location":
+    # never stop something we can't positively confirm is our own exe.
+    $procPath = $null
+    try {
+        $procPath = $proc.Path
+    } catch {
+        $procPath = $null
+    }
+
+    if (($procPath -ne $null) -and $procPath.StartsWith($overlayBinDebugDir, [StringComparison]::OrdinalIgnoreCase)) {
+        $processesToStop += $proc
+    } else {
+        $otherLocationProcesses += $proc
+    }
+}
+
+if ($otherLocationProcesses.Count -gt 0) {
+    $otherPids = ($otherLocationProcesses | ForEach-Object { $_.Id }) -join ', '
+    Write-Host "Note: RxVerifyOverlay.exe is already running from somewhere other than this checkout (PID(s): $otherPids) - leaving it running. After this build finishes you may end up with two Rx Verify windows open; close the other one by hand if you only want one." -ForegroundColor Yellow
+}
+
+if ($processesToStop.Count -gt 0) {
+    Write-Step 'Stopping the running Rx Verify so it can be updated...'
+    foreach ($proc in $processesToStop) {
+        Write-Detail "Stopping RxVerifyOverlay.exe (PID $($proc.Id))..."
+        try {
+            $proc.CloseMainWindow() | Out-Null
+        } catch {
+            # No message loop / already gone - fall through to the
+            # wait-then-force-kill below regardless.
+        }
+
+        $waited = 0
+        while ($waited -lt 5) {
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+            Start-Sleep -Seconds 1
+            $waited++
+        }
+
+        $proc.Refresh()
+        if (-not $proc.HasExited) {
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                Start-Sleep -Seconds 1
+            } catch {
+                # Failure is caught by the still-running re-check below.
+            }
+        }
+    }
+
+    $stillRunning = @(Get-Process -Name $overlayProcessName -ErrorAction SilentlyContinue | Where-Object {
+        $stillPath = $null
+        try { $stillPath = $_.Path } catch { $stillPath = $null }
+        ($stillPath -ne $null) -and $stillPath.StartsWith($overlayBinDebugDir, [StringComparison]::OrdinalIgnoreCase)
+    })
+
+    if ($stillRunning.Count -gt 0) {
+        $stillPids = ($stillRunning | ForEach-Object { $_.Id }) -join ', '
+        Stop-WithMessage "Rx Verify (PID(s): $stillPids) is still running and could not be stopped automatically. Close it by hand - right-click its window/taskbar icon and close, or End Task in Task Manager - then re-run this script."
+    }
+    Write-Detail 'Rx Verify stopped.'
 }
 
 Write-Step 'Building overlay (dotnet build)...'
