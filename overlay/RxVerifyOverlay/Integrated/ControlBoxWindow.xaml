@@ -118,7 +118,7 @@
                     <!-- Item 1: same Refresh action as the separate window's own Refresh button — icon-ish glyph, aligned/sized consistently with CloseButton's corner glyph below -->
                     <Button x:Name="RefreshButton" Content="&#8635;" FontSize="12" Padding="3,0" Margin="0,0,4,0" Click="OnRefreshClick" ToolTip="Refresh" />
                     <Button x:Name="OpenSeparateButton" Content="Full view" Margin="0,0,4,0" Click="OnOpenSeparateClick" ToolTip="Open full view" />
-                    <Button x:Name="CopyLogsButton" Content="Copy" Margin="0,0,4,0" Click="OnCopyLogsClick" ToolTip="Copy logs" />
+                    <!-- 2026-08-13 (RXVERIFY-TROUBLESHOOT): the PHI-including "Copy" button (CopyLogsButton, redactPatient: false) was removed per owner request; "Copy (safe)" below is the only copy action now. -->
                     <Button x:Name="CopyLogsNoHipaaButton" Content="Copy (safe)" Click="OnCopyLogsNoHipaaClick" ToolTip="Copy logs (no HIPAA)" />
                 </StackPanel>
             </DockPanel>

@@ -997,6 +997,81 @@ export const SALT_TOKENS = new Set([
 ]);
 
 /**
+ * Field report (2026-08-13, RXVERIFY-TROUBLESHOOT): source "METOPROLOL
+ * SUCCINATE (XL) 50 MG ORAL TABLET" vs entered "Metoprolol Succ Er 50 Mg
+ * Tab" went yellow unknown_drug -- entered's "Succ" isn't in SALT_TOKENS
+ * (only the spelled-out "succinate" is), so it fell into the generic
+ * ingredient-token bucket below and broke rule 1's ingredient-set
+ * equality against source's {"metoprolol"}. "Succ"/"Tart" are the two
+ * salt abbreviations PioneerRx's free-text entry actually produces for
+ * this engine's field reports and are unambiguous (no other recognized
+ * salt/ingredient/form/route word starts the same way) -- scoped to
+ * exactly these two per the owner's report rather than guessing at a
+ * longer list. A token not in this map is used as-is (falls through to
+ * the ordinary SALT_TOKENS check unchanged).
+ */
+const SALT_ABBREVIATIONS: Record<string, string> = {
+  succ: 'succinate',
+  tart: 'tartrate'
+};
+
+/**
+ * Release-RATE equivalence class for the component-wise name fallback
+ * ONLY (decomposeDrugNameComponents/compareNameComponents below) --
+ * field report (2026-08-13): Metoprolol Succinate XL and Metoprolol Succ
+ * ER are the SAME dispensed product (owner confirmed; XL is simply
+ * PioneerRx/e-script shorthand for the same once-daily extended-release
+ * succinate formulation), so this fallback treats XL/ER/XR/SR/LA/CR as
+ * one interchangeable class rather than blocking green on rule 6 --
+ * BUT ONLY when ingredientTokens contains "metoprolol" (see
+ * decomposeDrugNameComponents' gating on this map, applied AFTER the
+ * token loop once ingredientTokens is fully known).
+ *
+ * Reviewer round 2, BLOCKER 1 (reviewer-reproduced live false green):
+ * this map used to apply UNCONDITIONALLY to every drug name, and the
+ * reviewer reproduced compareDrugs("Bupropion Xl 150 Mg Tablet",
+ * "Bupropion Sr 150 Mg Tablet") going GREEN through it -- Bupropion
+ * SR/XL is the exact previously-fixed live false-green
+ * RELEASE_QUALIFIER_TOKENS' own doc (below) exists to prevent (they are
+ * genuinely different, non-interchangeable products that merely share
+ * an openFDA dosage_form). Metoprolol succinate is the ONE
+ * owner-confirmed interchangeable case; this map must never be applied
+ * more broadly than that single ingredient without a matching owner
+ * report for whatever other ingredient is being added. Deliberately NOT
+ * a change to RELEASE_QUALIFIER_TOKENS/RELEASE_ABBREVS or
+ * resolveConceptByName's own release-qualifier narrowing above -- this
+ * equivalence class only ever applies inside this fallback, which
+ * itself only ever runs as a last resort once concept resolution has
+ * already failed on both names.
+ *
+ * DR (delayed-release) and IR (immediate-release) are intentionally left
+ * OUT of the class -- they describe a genuinely different release
+ * profile (delayed onset / no modification at all) than the once/twice-
+ * daily extended-release family XL/ER/XR/SR/LA/CR all describe, so a
+ * name stating DR or IR still only matches another name stating the
+ * exact same bare qualifier (or none at all), even for metoprolol.
+ */
+const RELEASE_EQUIVALENCE_CLASS: Record<string, string> = {
+  xl: 'extended-release',
+  er: 'extended-release',
+  xr: 'extended-release',
+  sr: 'extended-release',
+  la: 'extended-release',
+  cr: 'extended-release'
+};
+
+/**
+ * Release-qualifier tokens this fallback recognizes and strips out of the
+ * ingredient-token bucket -- a SUPERSET of RELEASE_QUALIFIER_TOKENS (adds
+ * "xr"/"la", which the earlier pre-concept-resolution pathway never
+ * needed to recognize) since this fallback computes its own `release`
+ * value locally (see decomposeDrugNameComponents) rather than reusing
+ * extractReleaseQualifier's, so it can fold XL/ER/XR/SR/LA/CR down to one
+ * equivalence class -- see RELEASE_EQUIVALENCE_CLASS' doc.
+ */
+const COMPONENT_RELEASE_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl', 'xr', 'la']);
+
+/**
  * Curated route-of-administration tokens for the component-wise
  * name-fallback comparison only. Deliberately a SEPARATE, smaller list
  * from FORM_ROUTE_QUALIFIERS above (that one feeds the pre-concept-
@@ -1084,10 +1159,25 @@ interface DrugNameComponents {
 function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   const concStrength = extractStatedConcentrationStrength(rawName);
   const strength = concStrength ?? extractStatedStrength(rawName);
-  const release = extractReleaseQualifier(rawName);
 
   const normalized = normalizeDrugNameString(rawName);
-  const tokens = normalized.split(' ').filter(Boolean);
+  // Strip stray parentheses off each token BEFORE classification -- field
+  // report (2026-08-13): source names carry a parenthesized release
+  // qualifier, e.g. "METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET".
+  // normalizeDrugNameString doesn't strip parens (other callers rely on
+  // them surviving), so without this the token stayed "(xl)", matched
+  // nothing in COMPONENT_RELEASE_TOKENS, and fell into the generic
+  // ingredient bucket as a literal "(xl)" token -- breaking rule 1's
+  // ingredient-set equality against a source/entered pair that's
+  // otherwise identical. Splitting on whitespace first (so an
+  // independent "(90.0000"-style token isn't affected elsewhere) then
+  // stripping parens per-token is safe here: this bucketing is local to
+  // this fallback only.
+  const tokens = normalized
+    .split(' ')
+    .filter(Boolean)
+    .map((tok) => tok.replace(/[()]/g, ''))
+    .filter(Boolean);
 
   const isNumeric = (tok: string): boolean => /^\d+(\.\d+)?%?$/.test(tok);
   const isUnitWord = (tok: string): boolean => /^(mcg|mg|ml|g|units?|unit)$/.test(tok);
@@ -1118,18 +1208,34 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   const salts = new Set<string>();
   const routes = new Set<string>();
   let form: string | null = null;
+  // Reviewer round 2, BLOCKER 1 fix: kept as the RAW bare release token
+  // (never equivalence-mapped) until AFTER the loop, when ingredientTokens
+  // is fully known -- see the equivalence-gating below `release`'s
+  // definition for why this can't be decided token-by-token during the
+  // loop itself.
+  let rawRelease: string | null = null;
   const ingredientTokens = new Set<string>();
   const ratios: string[] = [];
 
   for (const tok of tokens) {
-    if (RELEASE_QUALIFIER_TOKENS.has(tok)) continue;
+    if (COMPONENT_RELEASE_TOKENS.has(tok)) {
+      // First release token wins, same "keep only one" rule as `form`
+      // below.
+      if (rawRelease === null) rawRelease = tok;
+      continue;
+    }
     if (isNumeric(tok) || isUnitWord(tok) || isSlashUnit(tok)) continue;
     if (isRatioToken(tok)) {
       ratios.push(tok);
       continue;
     }
-    if (SALT_TOKENS.has(tok)) {
-      salts.add(tok);
+    // Salt-abbreviation normalization (SALT_ABBREVIATIONS) applied before
+    // the SALT_TOKENS lookup, so "succ"/"tart" resolve to the same
+    // canonical salt as the spelled-out "succinate"/"tartrate" would --
+    // see SALT_ABBREVIATIONS' doc.
+    const saltCandidate = SALT_ABBREVIATIONS[tok] ?? tok;
+    if (SALT_TOKENS.has(saltCandidate)) {
+      salts.add(saltCandidate);
       continue;
     }
     if (COMPONENT_ROUTE_TOKENS.has(tok)) {
@@ -1142,6 +1248,34 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
     }
     ingredientTokens.add(tok);
   }
+
+  // Reviewer round 2, BLOCKER 1 (reviewer-reproduced live false green):
+  // RELEASE_EQUIVALENCE_CLASS must NOT apply universally -- reviewer
+  // reproduced compareDrugs("Bupropion Xl 150 Mg Tablet",
+  // "Bupropion Sr 150 Mg Tablet") going GREEN through it, even though
+  // Bupropion SR/XL is the EXACT previously-fixed live false-green
+  // RELEASE_QUALIFIER_TOKENS' own doc (above) exists to prevent — they
+  // are non-interchangeable, clinically distinct products. Metoprolol
+  // succinate is the ONE owner-confirmed case where XL/ER/XR/SR/LA/CR
+  // really are interchangeable (2026-08-13 field report), so the
+  // equivalence class is gated on ingredientTokens containing
+  // "metoprolol" specifically -- everywhere else, release tokens stay
+  // identity-distinct (their own raw bare value), exactly as before this
+  // fallback ever folded them. Decided HERE, after the loop, rather than
+  // inline while classifying `rawRelease` above: ingredientTokens isn't
+  // fully known until every token has been seen, and a release token can
+  // appear before the ingredient word in some free-text order.
+  //
+  // Rule 1 (ingredient-set equality) always runs before rule 6 checks
+  // this `release` value, so by the time two sides' `release` are ever
+  // compared, their ingredientTokens are already known to be IDENTICAL —
+  // one side having "metoprolol" therefore guarantees the other does
+  // too, and gating each side independently on its own ingredientTokens
+  // is safe.
+  const release =
+    rawRelease !== null && ingredientTokens.has('metoprolol')
+      ? (RELEASE_EQUIVALENCE_CLASS[rawRelease] ?? rawRelease)
+      : rawRelease;
 
   return { ingredientTokens, strength, form, salts, routes, release, ratios };
 }

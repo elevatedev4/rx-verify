@@ -1060,22 +1060,25 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// "Copy logs" button (MainWindow.xaml/.cs OnCopyLogsClick): builds the
-    /// single text blob to put on the clipboard, entirely from whatever is
-    /// ALREADY bound to the overlay UI right now (Categories/Rows,
-    /// OcrStatusText/LastOcrRawText/_lastOcrWords, Notes, StatusMessage,
-    /// summary counts) plus the app version/commit and current method/Rx
-    /// window title. Nothing here is accumulated across calls or across
-    /// Rx's — every field read is the SAME state the compact table is
-    /// currently rendering, so the blob always reflects only the Rx
-    /// currently under review (see RxLogSnapshot doc). The actual text
-    /// formatting is a pure function (RxLogFormatter.BuildLogBlob) so it's
-    /// unit-testable without a live OverlayViewModel.
+    /// "Copy logs (no HIPAA)" button (MainWindow.xaml.cs
+    /// OnCopyLogsNoHipaaClick): builds the single text blob to put on the
+    /// clipboard, entirely from whatever is ALREADY bound to the overlay
+    /// UI right now (Categories/Rows, OcrStatusText/LastOcrRawText/
+    /// _lastOcrWords, Notes, StatusMessage, summary counts) plus the app
+    /// version/commit and current method/Rx window title. Nothing here is
+    /// accumulated across calls or across Rx's — every field read is the
+    /// SAME state the compact table is currently rendering, so the blob
+    /// always reflects only the Rx currently under review (see
+    /// RxLogSnapshot doc). The actual text formatting is a pure function
+    /// (RxLogFormatter.BuildLogBlob) so it's unit-testable without a live
+    /// OverlayViewModel.
     ///
-    /// <paramref name="redactPatient"/> backs the "Copy logs (no HIPAA)"
-    /// button (MainWindow.xaml.cs OnCopyLogsNoHipaaClick): same blob, but
-    /// with patient identifiers stripped — see RxLogFormatter.BuildLogBlob's
-    /// doc for exactly what is/isn't redacted.
+    /// <paramref name="redactPatient"/> defaults to false for callers that
+    /// don't pass it, but the ONLY UI caller left (OnCopyLogsNoHipaaClick,
+    /// 2026-08-13 RXVERIFY-TROUBLESHOOT — the plain PHI-including "Copy
+    /// logs" button was removed) always passes true, stripping patient
+    /// identifiers — see RxLogFormatter.BuildLogBlob's doc for exactly
+    /// what is/isn't redacted.
     /// </summary>
     public string BuildCurrentLogBlob(bool redactPatient = false)
     {
@@ -1084,6 +1087,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             CapturedAt = DateTime.Now,
             AppVersion = AppDiagnostics.GetAppVersion(),
             CommitSha = AppDiagnostics.GetCommitSha(),
+            EngineBuildSha = _engineClient.EngineBuildSha,
+            EngineBuildBuiltAt = _engineClient.EngineBuildBuiltAt,
             Method = _settings.Method == VerificationMethod.Uia ? "Escript tab (direct UIA read)" : "OCR",
             RxWindowTitle = _lastRxWindowTitle,
             StatusMessage = StatusMessage,

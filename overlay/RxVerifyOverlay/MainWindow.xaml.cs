@@ -199,7 +199,11 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         _integratedOverlay.MethodToggleRequested += async (_, method) => await ApplyMethodChangeAsync(method);
         _integratedOverlay.ShowSeparateWindowRequested += (_, _) => { Show(); Activate(); };
         _integratedOverlay.HideSeparateWindowRequested += (_, _) => Hide();
-        _integratedOverlay.CopyLogsRequested += async (_, button) => await CopyLogsToButtonAsync(button, redactPatient: false);
+        // 2026-08-13 (RXVERIFY-TROUBLESHOOT): CopyLogsRequested (the
+        // control box's PHI-including "Copy" button) removed along with
+        // its XAML button and event -- see Integrated/ControlBoxWindow.
+        // CopyLogsNoHipaaRequested (the sanitized "Copy (safe)" button)
+        // is the only copy-logs forwarding left.
         _integratedOverlay.CopyLogsNoHipaaRequested += async (_, button) => await CopyLogsToButtonAsync(button, redactPatient: true);
         _integratedOverlay.ToggleStateChanged += (_, _) => SyncOwnToggles();
         // Item 1: control box's Refresh button — identical handling to
@@ -513,32 +517,30 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     }
 
     /// <summary>
-    /// "Copy logs" — builds the current-Rx log blob (OverlayViewModel.
-    /// BuildCurrentLogBlob) and puts it straight on the clipboard, so Will
-    /// can paste it into a message in one click instead of digging through
-    /// %TEMP%\VerifyOCR\ocr-*.log. In-memory + clipboard only: nothing is
-    /// written to disk by this button, and the blob is rebuilt fresh from
-    /// whatever is currently on screen every time (see
-    /// BuildCurrentLogBlob's "current Rx only" doc) rather than
-    /// accumulating history.
-    /// </summary>
-    private async void OnCopyLogsClick(object sender, RoutedEventArgs e) => await CopyLogsToButtonAsync((Button)sender, redactPatient: false);
-
-    /// <summary>
-    /// "Copy logs (no HIPAA)" — mirrors OnCopyLogsClick above, but builds
-    /// the blob with BuildCurrentLogBlob(redactPatient: true), so patient
-    /// name/DOB/address are stripped from the title, verdict rows, and
-    /// raw OCR text/word list before it hits the clipboard. Lets Will
-    /// paste logs from a REAL prescription without exposing PHI. See
-    /// OverlayViewModel.BuildCurrentLogBlob / Diagnostics/RxLogFormatter.cs.
+    /// "Copy logs (no HIPAA)" — one-click clipboard copy of everything
+    /// needed to debug the CURRENTLY-DISPLAYED Rx (raw OCR text + word
+    /// geometry, parsed/mapped fields, match verdicts, warnings/errors,
+    /// app version + commit) so Will can paste it straight into a message
+    /// instead of digging through %TEMP%\VerifyOCR\ocr-*.log — with
+    /// patient name/DOB/address stripped from the title, verdict rows,
+    /// and raw OCR text/word list before it hits the clipboard, so a REAL
+    /// prescription's log can be pasted without exposing PHI. In-memory +
+    /// clipboard only: nothing is written to disk by this button, and the
+    /// blob is rebuilt fresh from whatever is currently on screen every
+    /// time (see BuildCurrentLogBlob's "current Rx only" doc) rather than
+    /// accumulating history. 2026-08-13 (RXVERIFY-TROUBLESHOOT): this is
+    /// now the ONLY copy-logs button — the plain PHI-including "Copy
+    /// logs" button (OnCopyLogsClick, redactPatient: false) was removed
+    /// per owner request. See OverlayViewModel.BuildCurrentLogBlob /
+    /// Diagnostics/RxLogFormatter.cs.
     /// </summary>
     private async void OnCopyLogsNoHipaaClick(object sender, RoutedEventArgs e) => await CopyLogsToButtonAsync((Button)sender, redactPatient: true);
 
     /// <summary>
-    /// Shared "copy logs" implementation for BOTH of this window's own
-    /// buttons AND the control box's identical buttons (forwarded via
-    /// _integratedOverlay.CopyLogsRequested/CopyLogsNoHipaaRequested — see
-    /// the constructor). Item 5 (owner asked twice — must ship): on
+    /// Shared "copy logs" implementation for this window's own
+    /// "Copy logs (no HIPAA)" button AND the control box's identical
+    /// button (forwarded via _integratedOverlay.CopyLogsNoHipaaRequested —
+    /// see the constructor). Item 5 (owner asked twice — must ship): on
     /// success, the clicked button itself flashes green with a checkmark
     /// for ~1.5s (ButtonFeedback.FlashSuccessAsync) instead of a
     /// MessageBox confirmation popup; genuine failures (couldn't build

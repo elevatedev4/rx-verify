@@ -9,6 +9,7 @@
     "rx-verify-cli": "dist/cli.js"
   },
   "scripts": {
+    "prebuild": "tsx scripts/generate-build-info.ts",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

@@ -95,4 +95,68 @@ public class EngineClientServeProtocolTests
         Assert.Empty(result.Verdicts);
         Assert.NotNull(result.Summary);
     }
+
+    // Reviewer round 2, BLOCKER 2 (deadlock fix): EngineClient.
+    // TryParseHandshakeLine — the pure logic behind lazily detecting
+    // --serve's one-time ready handshake (src/cli.ts) during the normal,
+    // already-timeout-guarded response read, instead of a dedicated
+    // blocking read in EnsureProcessStarted (which hung forever against
+    // an old dist that never sends a handshake at all — see that
+    // method's doc). Pulled out as a pure static method for the same
+    // reason ParseResponseLine is: directly testable without a live node
+    // process or Windows runtime.
+
+    [Fact]
+    public void TryParseHandshakeLineRecognizesAReadyLineAndExtractsTheBuildStamp()
+    {
+        const string line = """{"ready":true,"engineBuild":{"sha":"e3b831c","builtAt":"2026-08-13T17:14:35.655Z"}}""";
+
+        var handshake = EngineClient.TryParseHandshakeLine(line);
+
+        Assert.NotNull(handshake);
+        Assert.Equal("e3b831c", handshake!.Value.Sha);
+        Assert.Equal("2026-08-13T17:14:35.655Z", handshake.Value.BuiltAt);
+    }
+
+    [Fact]
+    public void TryParseHandshakeLineReturnsNullForARealResponseLine()
+    {
+        // A genuine response ALWAYS has an "id" key and NEVER a top-level
+        // "ready" key — this is what lets the deadlock fix's read loop
+        // tell the two apart without any ambiguity. This is exactly the
+        // shape an OLD dist/cli.js (built before the handshake existed)
+        // sends as its very first line.
+        const string line = """{"id":"1","verdicts":[],"summary":{"green":0,"yellow":0,"red":0,"total":0}}""";
+
+        Assert.Null(EngineClient.TryParseHandshakeLine(line));
+    }
+
+    [Fact]
+    public void TryParseHandshakeLineReturnsNullForUnparseableJson()
+    {
+        Assert.Null(EngineClient.TryParseHandshakeLine("not json at all"));
+    }
+
+    [Fact]
+    public void TryParseHandshakeLineReturnsNullWhenReadyIsPresentButNotBooleanTrue()
+    {
+        // Defensive: "ready": false or a non-boolean "ready" must never
+        // be treated as a handshake (or, worse, silently consumed as one
+        // and dropped, losing a real response).
+        Assert.Null(EngineClient.TryParseHandshakeLine("""{"ready":false}"""));
+        Assert.Null(EngineClient.TryParseHandshakeLine("""{"ready":"true"}"""));
+    }
+
+    [Fact]
+    public void TryParseHandshakeLineToleratesAMissingEngineBuildObject()
+    {
+        // Still recognized as a handshake (the "ready":true shape is
+        // what matters) even if "engineBuild" itself is absent —
+        // Sha/BuiltAt just come back null rather than throwing.
+        var handshake = EngineClient.TryParseHandshakeLine("""{"ready":true}""");
+
+        Assert.NotNull(handshake);
+        Assert.Null(handshake!.Value.Sha);
+        Assert.Null(handshake.Value.BuiltAt);
+    }
 }

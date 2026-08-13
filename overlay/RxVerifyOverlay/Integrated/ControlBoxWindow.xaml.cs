@@ -83,7 +83,10 @@ public sealed partial class ControlBoxWindow : Window
 
     public event EventHandler<VerificationMethod>? MethodChangeRequested;
     public event EventHandler<DisplayMode>? DisplayModeChangeRequested;
-    public event EventHandler<Button>? CopyLogsRequested;
+    // 2026-08-13 (RXVERIFY-TROUBLESHOOT): CopyLogsRequested (backed the
+    // PHI-including "Copy" button) removed along with the button itself
+    // -- see the XAML. CopyLogsNoHipaaRequested (the sanitized "Copy
+    // (safe)" button) is the only copy-logs event now.
     public event EventHandler<Button>? CopyLogsNoHipaaRequested;
     public event EventHandler? OpenSeparateWindowRequested;
     public event EventHandler? RefreshRequested;
@@ -226,8 +229,6 @@ public sealed partial class ControlBoxWindow : Window
         var mode = DisplayIntegratedRadioButton.IsChecked == true ? DisplayMode.Integrated : DisplayMode.Separate;
         DisplayModeChangeRequested?.Invoke(this, mode);
     }
-
-    private void OnCopyLogsClick(object sender, RoutedEventArgs e) => CopyLogsRequested?.Invoke(this, (Button)sender);
 
     private void OnCopyLogsNoHipaaClick(object sender, RoutedEventArgs e) => CopyLogsNoHipaaRequested?.Invoke(this, (Button)sender);
 

@@ -8,10 +8,11 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for RxLogFormatter.BuildLogBlob (Diagnostics/
-/// RxLogFormatter.cs) — the pure formatter behind the "Copy logs" button
-/// (OverlayViewModel.BuildCurrentLogBlob / MainWindow.xaml.cs
-/// OnCopyLogsClick). All values below are synthetic — no real
-/// patient/prescriber data.
+/// RxLogFormatter.cs) — the pure formatter behind the "Copy logs (no
+/// HIPAA)" button (OverlayViewModel.BuildCurrentLogBlob / MainWindow.xaml.cs
+/// OnCopyLogsNoHipaaClick; the plain PHI-including "Copy logs" button was
+/// removed 2026-08-13, see RXVERIFY-TROUBLESHOOT). All values below are
+/// synthetic — no real patient/prescriber data.
 /// </summary>
 public class RxLogFormatterTests
 {
@@ -25,13 +26,17 @@ public class RxLogFormatterTests
         int greenCount = 10,
         int yellowCount = 2,
         int redCount = 1,
-        RefreshTiming? timing = null)
+        RefreshTiming? timing = null,
+        string? engineBuildSha = null,
+        string? engineBuildBuiltAt = null)
     {
         return new RxLogSnapshot
         {
             CapturedAt = new DateTime(2026, 1, 2, 3, 4, 5),
             AppVersion = "1.2.3.0",
             CommitSha = "abc12345",
+            EngineBuildSha = engineBuildSha,
+            EngineBuildBuiltAt = engineBuildBuiltAt,
             Method = "OCR",
             RxWindowTitle = rxWindowTitle,
             StatusMessage = "Last checked 3:04:05 AM.",
@@ -76,6 +81,34 @@ public class RxLogFormatterTests
         Assert.Contains("Method: OCR", blob);
         Assert.Contains("Rx window: Edit Rx - 0000001 - PioneerRx", blob);
         Assert.Contains("Status: Last checked 3:04:05 AM.", blob);
+    }
+
+    // RXVERIFY-TROUBLESHOOT 2026-08-13: the engine build stamp
+    // (RxLogSnapshot.EngineBuildSha/EngineBuildBuiltAt, captured from
+    // --serve's ready handshake via Engine/EngineClient.cs) is distinct
+    // from AppVersion/CommitSha above -- those describe the C# overlay
+    // checkout, this describes the separate Node engine subprocess's
+    // dist/cli.js, so the two can drift (a stale, unrebuilt dist/ next
+    // to an up-to-date overlay).
+    [Fact]
+    public void IncludesEngineBuildLineWhenStampIsPresent()
+    {
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot(engineBuildSha: "e3b831c", engineBuildBuiltAt: "2026-08-13T17:14:35.655Z"));
+
+        Assert.Contains("Engine build: e3b831c 2026-08-13T17:14:35.655Z", blob);
+    }
+
+    [Fact]
+    public void OmitsEngineBuildLineWhenStampWasNeverCaptured()
+    {
+        // Default MakeSnapshot() leaves EngineBuildSha/BuiltAt null --
+        // e.g. the engine process never started, or the handshake was
+        // missing/malformed (an older dist/cli.js built before this
+        // feature existed). Must be omitted entirely, not printed as a
+        // confusing "Engine build: unknown unknown".
+        var blob = RxLogFormatter.BuildLogBlob(MakeSnapshot());
+
+        Assert.DoesNotContain("Engine build:", blob);
     }
 
     [Fact]

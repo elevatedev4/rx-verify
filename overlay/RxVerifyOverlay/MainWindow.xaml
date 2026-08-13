@@ -512,26 +512,27 @@
                 <StackPanel Orientation="Horizontal">
                     <Button Content="Refresh" Margin="0,0,6,0" Click="OnRefreshClick" />
                     <!--
-                        "Copy logs" — one-click clipboard copy of everything
-                        needed to debug the CURRENTLY-DISPLAYED Rx (raw OCR
-                        text + word geometry, parsed/mapped fields, match
-                        verdicts, warnings/errors, app version + commit) so
-                        Will can paste it straight into a message instead of
-                        digging through %TEMP%\VerifyOCR\ocr-*.log. See
+                        2026-08-13 (RXVERIFY-TROUBLESHOOT): the plain
+                        "Copy logs" button (redactPatient: false — includes
+                        raw patient name/DOB/address in the title, verdict
+                        rows, and raw OCR text/word list) was removed per
+                        owner request. "Copy logs (no HIPAA)" below is the
+                        only copy action now — same debugging blob, with
+                        patient identifiers redacted. See
                         OverlayViewModel.BuildCurrentLogBlob /
-                        Diagnostics/RxLogFormatter.cs. In-memory + clipboard
-                        only — reflects only this Rx, nothing persisted or
-                        accumulated across scripts.
+                        Diagnostics/RxLogFormatter.cs.
                     -->
-                    <Button Content="Copy logs" Margin="0,0,6,0" Click="OnCopyLogsClick" />
                     <!--
-                        "Copy logs (no HIPAA)" — same clipboard blob as
-                        "Copy logs", but with all patient identifiers
-                        (name, DOB, address — title, verdict rows, raw OCR
-                        text + word list) redacted, so a REAL prescription's
-                        log can be pasted for debugging without exposing
-                        PHI. Prescriber/drug/sig/qty/refills/dates and the
-                        OCR geometry are preserved. See
+                        "Copy logs (no HIPAA)" — one-click clipboard copy of
+                        everything needed to debug the CURRENTLY-DISPLAYED Rx
+                        (parsed/mapped fields, match verdicts, warnings/
+                        errors, app version + commit, OCR word geometry),
+                        with all patient identifiers (name, DOB, address —
+                        title, verdict rows, raw OCR text + word list)
+                        redacted, so a REAL prescription's log can be pasted
+                        for debugging without exposing PHI.
+                        Prescriber/drug/sig/qty/refills/dates and the OCR
+                        geometry are preserved. See
                         OverlayViewModel.BuildCurrentLogBlob(redactPatient:
                         true) / Diagnostics/RxLogFormatter.cs.
                     -->

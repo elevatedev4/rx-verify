@@ -1277,6 +1277,98 @@ describe('parseEscriptOcr', () => {
     expect(result.status).toBe('green');
   });
 
+  // 2026-08-13 troubleshoot report (RXVERIFY-TROUBLESHOOT): owner's live
+  // Metoprolol Succ ER capture at commit 94d4cce4 showed
+  // "Refills: Yellow, source=(not provided)" against a page that plainly
+  // read "To>l Fills 3 (including this fill)". Coordinates below are
+  // copied from the real OCR word dump (PHI patient/prescriber/pharmacy
+  // fields replaced with synthetic values; drug/quantity/refills text is
+  // not PHI and is reproduced verbatim). This pins the exact reported
+  // shape end-to-end (raw extraction AND the compareRefills verdict),
+  // plus the other outcomes called for by the branch brief.
+  describe('Live troubleshoot 0813: OCR Total-Fills real-capture regression', () => {
+    it('mangled "To>l Fills 3 (including this fill)" on the quantity row extracts refills=3/fromTotalFills=true and compares GREEN against an entered value of 2', () => {
+      const quantityLabelRow = row(334, ['Medicabon:']);
+      const mergedRow: OcrWord[] = [
+        { text: '90.0000', x: 121, y: 358, w: 61, h: 12 },
+        { text: 'Each', x: 186, y: 358, w: 37, h: 12 },
+        { text: '(90.0000', x: 227, y: 358, w: 62, h: 16 },
+        { text: 'Tablet)', x: 291, y: 358, w: 50, h: 16 },
+        { text: 'To>l', x: 573, y: 358, w: 30, h: 11 },
+        { text: 'Fills', x: 605, y: 358, w: 25, h: 11 },
+        { text: '3', x: 637, y: 358, w: 10, h: 12 },
+        { text: '(including', x: 650, y: 358, w: 71, h: 16 },
+        { text: 'this', x: 725, y: 358, w: 25, h: 12 },
+        { text: 'fill)', x: 753, y: 358, w: 21, h: 16 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), quantityLabelRow, mergedRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('3');
+      expect(record.refillsFromTotalFills).toBe(true);
+
+      const result = compareRefills(record.refills, 2, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('clean "Total Fills 1 (including this fill)" (N=1, the minimum real value) extracts refills=1/fromTotalFills=true and compares GREEN against an entered value of 0', () => {
+      const totalFillsRow: OcrWord[] = [
+        { text: 'Total', x: 573, y: 358, w: 30, h: 11 },
+        { text: 'Fills', x: 605, y: 358, w: 25, h: 11 },
+        { text: '1', x: 637, y: 358, w: 10, h: 12 },
+        { text: '(including', x: 650, y: 358, w: 71, h: 16 },
+        { text: 'this', x: 725, y: 358, w: 25, h: 12 },
+        { text: 'fill)', x: 753, y: 358, w: 21, h: 16 }
+      ];
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('1');
+      expect(record.refillsFromTotalFills).toBe(true);
+
+      const result = compareRefills(record.refills, 0, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('plain "Refills: 3" (new-rx style, no Total-fills text anywhere) still extracts refills=3 with no fromTotalFills flag', () => {
+      const refillsRow = row(358, ['Refills:', '3']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('3');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+
+      const result = compareRefills(record.refills, 3, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('both an explicit "Refills" label and a mangled "To>l Fills" tail on the same page: explicit Refills wins (no double-counting), regardless of which one is on the quantity row', () => {
+      const explicitRefillsRow = row(320, ['Refills:', '2']);
+      const quantityLabelRow = row(334, ['Medicabon:']);
+      const mergedRow: OcrWord[] = [
+        { text: '90.0000', x: 121, y: 358, w: 61, h: 12 },
+        { text: 'Each', x: 186, y: 358, w: 37, h: 12 },
+        { text: 'To>l', x: 573, y: 358, w: 30, h: 11 },
+        { text: 'Fills', x: 605, y: 358, w: 25, h: 11 },
+        { text: '5', x: 637, y: 358, w: 10, h: 12 },
+        { text: '(including', x: 650, y: 358, w: 71, h: 16 },
+        { text: 'this', x: 725, y: 358, w: 25, h: 12 },
+        { text: 'fill)', x: 753, y: 358, w: 21, h: 16 }
+      ];
+      const ocr = flatten([
+        TOOLBAR_ROW,
+        row(100, ['Patient']),
+        explicitRefillsRow,
+        quantityLabelRow,
+        mergedRow
+      ]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('2');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+  });
+
   it('(x) [live-tuning fixture 9, real capture] prescriberAddress continuation row also carries an unrelated right-column value (wrapped "Agent name" tail) on the SAME OCR row — must not bleed into the address', () => {
     // SYNTHETIC — coordinates copied verbatim from a real owner OCR
     // word-position dump (PHI replaced with fabricated street/city/zip/

@@ -8,25 +8,30 @@ namespace RxVerifyOverlay.Diagnostics;
 
 /// <summary>
 /// Formats one RxLogSnapshot into the single copy-pasteable text blob
-/// behind the "Copy logs" button (MainWindow.xaml/.cs OnCopyLogsClick) —
-/// per Will's ask: everything needed to debug the CURRENT Rx (raw OCR
-/// text + word geometry, parsed/mapped fields, match verdicts, warnings/
-/// errors) in one clipboard copy, nothing accumulated across scripts. A
-/// pure function of its input (no file/clipboard/UI access here) so it's
-/// directly unit-testable without standing up a whole OverlayViewModel —
-/// see RxVerifyOverlay.Tests/RxLogFormatterTests.cs.
+/// behind the "Copy logs (no HIPAA)" button (MainWindow.xaml/.cs
+/// OnCopyLogsNoHipaaClick) — per Will's ask: everything needed to debug
+/// the CURRENT Rx (raw OCR text + word geometry, parsed/mapped fields,
+/// match verdicts, warnings/errors) in one clipboard copy, nothing
+/// accumulated across scripts. A pure function of its input (no
+/// file/clipboard/UI access here) so it's directly unit-testable without
+/// standing up a whole OverlayViewModel — see
+/// RxVerifyOverlay.Tests/RxLogFormatterTests.cs.
 ///
 /// <see cref="BuildLogBlob(RxLogSnapshot, bool)"/>'s <c>redactPatient</c>
-/// flag backs the "Copy logs (no HIPAA)" button (OverlayViewModel.
-/// BuildCurrentLogBlob(redactPatient: true) / MainWindow.xaml.cs
-/// OnCopyLogsNoHipaaClick): it strips every patient identifier (name,
-/// DOB, address, and their appearance in the Rx-window title and raw OCR
-/// text/word list) while keeping prescriber/drug/sig/quantity/refills/
-/// dates and the OCR geometry, so a real prescription's log can be
-/// pasted for debugging without exposing PHI. Redaction is deliberately
-/// over-inclusive: a patient token that also happens to appear in
-/// prescriber context (e.g. a shared surname) gets scrubbed everywhere,
-/// and a final full-blob pass re-applies the scrub as a safety net.
+/// flag backs that same "Copy logs (no HIPAA)" button (OverlayViewModel.
+/// BuildCurrentLogBlob(redactPatient: true)): it strips every patient
+/// identifier (name, DOB, address, and their appearance in the Rx-window
+/// title and raw OCR text/word list) while keeping prescriber/drug/sig/
+/// quantity/refills/dates and the OCR geometry, so a real prescription's
+/// log can be pasted for debugging without exposing PHI. Redaction is
+/// deliberately over-inclusive: a patient token that also happens to
+/// appear in prescriber context (e.g. a shared surname) gets scrubbed
+/// everywhere, and a final full-blob pass re-applies the scrub as a
+/// safety net. 2026-08-13 (RXVERIFY-TROUBLESHOOT): the plain,
+/// PHI-including "Copy logs" button (redactPatient: false) was removed
+/// from the UI — this formatter itself is unchanged and still supports
+/// redactPatient: false for completeness/tests, it's just no longer
+/// reachable from any button.
 /// </summary>
 public static class RxLogFormatter
 {
@@ -117,6 +122,16 @@ public static class RxLogFormatter
         sb.AppendLine("=== Rx Verify — copied log ===");
         sb.AppendLine($"Captured: {s.CapturedAt:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"App version: {s.AppVersion}    Commit: {s.CommitSha}");
+        // RXVERIFY-TROUBLESHOOT 2026-08-13: distinct from Commit above --
+        // that describes the C# overlay checkout, this describes the
+        // separate Node engine subprocess's dist/cli.js (see
+        // RxLogSnapshot.EngineBuildSha's doc for why those two can
+        // drift). Omitted entirely (not printed as "unknown unknown")
+        // when the handshake never happened at all.
+        if (!string.IsNullOrEmpty(s.EngineBuildSha) || !string.IsNullOrEmpty(s.EngineBuildBuiltAt))
+        {
+            sb.AppendLine($"Engine build: {s.EngineBuildSha ?? "unknown"} {s.EngineBuildBuiltAt ?? "unknown"}");
+        }
         sb.AppendLine($"Method: {s.Method}");
         if (!string.IsNullOrEmpty(s.RxWindowTitle))
         {

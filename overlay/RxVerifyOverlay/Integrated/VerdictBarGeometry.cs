@@ -22,21 +22,24 @@ namespace RxVerifyOverlay.Integrated;
 /// same place the old encircling border's left edge did, just wider.
 ///
 /// GAP (owner report, round 8: the bars sat flush against the field box
-/// and were "creeping right up on the text"): each bar now sits OUTSIDE
+/// and were "creeping right up on the text"): each bar sits OUTSIDE
 /// the field's left edge with BarGapDip DIP of breathing room, i.e. the
 /// bar's RIGHT edge lands at (rect.X - BarGapDip), not at rect.X itself —
-/// see DeriveBarRect. Every rect in a column shares the same original
-/// rect.X, so this shift is applied identically to every bar in that
-/// column; the (X, Width) merge key MergeVerticallyTouchingBars compares
-/// on is computed AFTER the shift, so column alignment and merging are
-/// both unaffected by it.
+/// see DeriveBarRect. Round 10 (owner, live: still "a little too far from
+/// the fields" even at round 9's 1 DIP) walked BarGapDip down to 0 — bars
+/// now sit flush against the field rect's left edge, same math, just a
+/// zero gap. Every rect in a column shares the same original rect.X, so
+/// this shift is applied identically to every bar in that column; the
+/// (X, Width) merge key MergeVerticallyTouchingBars compares on is
+/// computed AFTER the shift, so column alignment and merging are both
+/// unaffected by it.
 ///
 /// CLAMPING (review fix — these are WINDOW-RELATIVE DIPs, NOT screen-
 /// relative: IntegratedBoxesWindow.SetBoxes runs DpiRectConverter.ToDipRect
 /// first, which subtracts PioneerRx's own window origin, then
 /// BoxLayoutAdjuster.ApplyPadding expands every rect a further 2 DIP
 /// outward before this class ever sees it — so a field within
-/// PaddingDip + BarWidthDip + BarGapDip (2 + 5 + 1 = 8, round 9 value) DIP of Pioneer's
+/// PaddingDip + BarWidthDip + BarGapDip (2 + 5 + 0 = 7, round 10 value) DIP of Pioneer's
 /// LEFT window edge genuinely can compute a negative X here, which WPF's
 /// Canvas silently clips (invisible bar, not a rendering curiosity). See
 /// DeriveBarRect: X is clamped to a minimum of 0, and the WIDTH is never
@@ -77,13 +80,15 @@ public static class VerdictBarGeometry
     /// field rect's LEFT edge — owner report (round 8): the bars sat
     /// flush against the field box and were "creeping right up on the
     /// text". Originally 3 DIP; round 9 owner feedback at the live
-    /// counter walked that back ("spacing of the green/red bars is too
-    /// far from the box now — bring it back in a little bit") — 1 DIP
-    /// keeps a hairline of separation (still not flush, per round 8)
-    /// while sitting visibly closer to the field again. See
-    /// DeriveBarRect and the class doc's GAP section.
+    /// counter walked that back to 1 DIP ("spacing of the green/red bars
+    /// is too far from the box now — bring it back in a little bit").
+    /// Round 10 (owner, still too far even at 1 DIP): 0 — bars now sit
+    /// flush against the field rect's left edge (the Math.Max(0, ...)
+    /// clamp in DeriveBarRect and the per-color merge behavior are
+    /// unchanged; a zero gap is just another value flowing through the
+    /// same math). See DeriveBarRect and the class doc's GAP section.
     /// </summary>
-    public const double BarGapDip = 1;
+    public const double BarGapDip = 0;
 
     /// <summary>Floating-point tolerance for "same column" (X/Width match) and "touching" (Y-ranges abut) comparisons — guards against harmless double-precision noise, never a real near-miss (genuinely different columns are already many DIPs apart, per BoxLayoutAdjuster.LeftEdgeAlignmentToleranceDip).</summary>
     private const double Epsilon = 0.01;
@@ -99,7 +104,7 @@ public static class VerdictBarGeometry
     /// here, which WPF's Canvas silently clips). Clamping shrinks the
     /// effective GAP first, never the WIDTH — <paramref name="barWidth"/>
     /// is always the bar's Width, full stop, even when X lands at 0; at
-    /// worst (a field sitting inside the 8 DIP total reach of padding +
+    /// worst (a field sitting inside the 7 DIP total reach of padding +
     /// width + gap) the bar sits flush at the window's left edge, still
     /// fully visible. Y and Height are copied through UNCHANGED (no
     /// arithmetic on them at all) specifically so a run of already-flush-
