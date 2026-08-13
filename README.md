@@ -26,6 +26,20 @@ identify real drugs offline (see "Drug data: LocalNdcProvider" below).
 It does not relax the rule above for patient/prescriber/prescription
 data — that rule still applies to everything else in this repo.
 
+Same exception, same scope, for two more bundled files added for real
+RxNorm-grade equivalence (see "RxNorm and wholesaler-catalog
+equivalence" below):
+
+- `data/rxnorm-data.json.gz` — **public**, from NLM's RxNorm "Current
+  Prescribable Content" (public domain; NLM requests the release date
+  be disclosed — see that file's own `generatedAt`/`source`/
+  `attribution` fields). Same drug-reference-data exception as above.
+- `data/catalog-data.json.gz` — **NOT public**. Derived from the
+  pharmacy owner's own wholesaler catalog (GCN is First DataBank
+  proprietary reference data, owner-supplied for his own tool).
+  Internal use only within this private tool; never redistribute. The
+  source `.xlsx` is never committed — only this derived file is.
+
 ## Verdict philosophy
 
 Every field gets exactly one verdict: `green`, `yellow`, or `red`.
@@ -84,7 +98,9 @@ refactor can't silently break it.
 | Date normalization | `src/normalize/date.ts` | MM/DD/YYYY, M/D/YY, ISO, "Jul 2, 2026" → ISO; DOB/date-written comparison |
 | Address normalization | `src/normalize/address.ts` | USPS street-suffix/directional/unit abbreviation tables, component compare |
 | Sig parsing/comparison | `src/sig/index.ts` | Abbreviation expansion (route, frequency, PRN, duration, roman-numeral doses), structural comparison |
-| Drug identity | `src/drug/index.ts` | `RxNormProvider` interface, `LocalNdcProvider` (real, local, offline — see below), `FixtureProvider` (20 synthetic concepts, tests only), NDC parser (10/11-digit) |
+| Drug identity | `src/drug/index.ts` | `RxNormProvider` interface, `LocalNdcProvider` (real, local, offline — see below), `FixtureProvider` (20 synthetic concepts, tests only), NDC parser (10/11-digit), `compareDrugs` + optional `DrugEquivalenceEvidence` (RxNorm/catalog upgrade layers — see below) |
+| RxNorm equivalence (primary, public) | `src/drug/rxnorm.ts` | `RxNormDataProvider` (real, local, offline — `data/rxnorm-data.json.gz`), dose-form reconciliation (`doseFormsEquivalent`) |
+| Wholesaler-catalog equivalence (secondary, internal) | `src/drug/catalog.ts` | `CatalogDataProvider` (real, local, offline — `data/catalog-data.json.gz`, NOT public data), GCN name resolution |
 | Quantity / days supply / refills / prescriber | `src/quantity/index.ts` | Unit normalization, sig-math reconciliation for quantity splits, NPI-based prescriber compare |
 | Engine | `src/engine/index.ts` | `verify(source, entered, provider)` → ordered `FieldVerdict[]` + summary counts |
 | Types | `src/types.ts` | Shared, JSON-serializable data shapes; `FIELD_ORDER` |
@@ -159,18 +175,62 @@ same drug via different salt forms) — but it can only ever fail toward
 *more* yellow/red, never a false green, so it's safe under this
 engine's verdict philosophy.
 
-### Precise RxNorm equivalence — owner follow-on, not done here
+### RxNorm and wholesaler-catalog equivalence (real RxCUI-backed upgrade layer)
 
-1. Create a free NLM UTS (UMLS Terminology Services) account —
-   https://uts.nlm.nih.gov/uts/signup-login. **This is an owner task**
-   (requires an individual sign-up), not something a subagent can do.
-2. Pull the RxNorm data files (RXNCONSO.RRF, RXNSAT.RRF, etc.) or use the
-   RxNorm REST API (build-time-only fetch, same offline-at-runtime rule
-   as above).
-3. Implement `RxNormProvider` (`getConcept(ndcOrName): RxConcept | null`)
-   against that real data, with a real per-product rxcui.
-4. Pass the new provider into `verify(source, entered, provider)` in
-   place of `LocalNdcProvider`. No other engine code changes.
+The approximation above is what `LocalNdcProvider`/`compareDrugs` fall
+back to on their own. `compareDrugs` also accepts an optional 4th
+argument, `DrugEquivalenceEvidence`, with two independent, real-data
+equivalence sources that can *upgrade* an existing `yellow` verdict to
+`green` — never override a `red`, never invent one:
+
+1. **RxNorm (primary, public)** — `RxNormDataProvider`
+   (`src/drug/rxnorm.ts`), backed by `data/rxnorm-data.json.gz`, built
+   from NLM's free, no-account-required **RxNorm Current Prescribable
+   Content** monthly release (`scripts/build-rxnorm-data.ts`). The
+   written NDC resolves to a real RXCUI-backed SCD/SBD concept
+   (ingredient/strength/dose-form, plus an SBD's linked generic SCD via
+   RXNREL `has_tradename`); the entered name resolves via the existing
+   `LocalNdcProvider`/openFDA `resolveConceptByName`. The two don't
+   share an id space (real RXCUI vs. the openFDA-derived synthetic
+   `rxcui` above), so they're compared on the derived
+   ingredient/strength/dose-form triple instead — see
+   `rxNormMatchesLocalConcept`/`doseFormsEquivalent` in
+   `src/drug/rxnorm.ts` (the latter reconciles RxNorm's "Extended
+   Release Oral Tablet"-style dose-form text against openFDA's "TABLET,
+   EXTENDED RELEASE"-style text via a route-word-stripped token-set
+   comparison, since the two vocabularies order/word dose forms
+   differently). A confirmed match is GREEN, reason `rxnorm_scd_match`.
+2. **Wholesaler catalog (secondary, internal)** — `CatalogDataProvider`
+   (`src/drug/catalog.ts`), backed by `data/catalog-data.json.gz`, built
+   from the pharmacy's own wholesaler catalog export
+   (`scripts/build-catalog-data.ts`; **not public data** — see the
+   SYNTHETIC DATA section above). The written NDC's GCN (FDB Generic
+   Code Number) is compared against the entered name's GCN, resolved via
+   `resolveGcnByName` — a conservative, prefix-trial name matcher that
+   deliberately mirrors `resolveConceptByName`'s discipline (narrow by
+   stated strength, then release qualifier; any ambiguity → `null`,
+   never a guess). A confirmed match is GREEN, reason `catalog_gcn_match`;
+   a confirmed *mismatch* (both sides resolve, to different GCNs) is
+   relabeled `catalog_gcn_mismatch` — still `yellow`, never `red` or
+   `green`, from this layer alone.
+
+Both providers are **optional and independently absent-safe**: a
+missing/unbuilt data file degrades to "no evidence," and `compareDrugs`
+with no `evidence` argument at all reproduces the pre-existing ladder's
+behavior byte-for-byte (see `tests/drug-equivalence.test.ts`). Refresh
+each dataset with:
+
+```bash
+npx tsx scripts/build-rxnorm-data.ts                                   # network (NLM), no account needed
+npx tsx scripts/build-catalog-data.ts /path/to/catalog-export.xlsx     # local file, no network
+```
+
+**Still not done, follow-on if ever needed:** a real UMLS/UTS-licensed
+full RxNorm release (this uses the free, license-free Prescribable
+Content SUBSET instead — see `scripts/build-rxnorm-data.ts`'s header for
+exactly what that subset contains); GPCK/BPCK combination-pack parsing
+(deliberately out of scope for v1 — see `rxnorm-data-format.ts`'s
+header).
 
 ## Portability
 
@@ -205,10 +265,15 @@ npm run build      # emit dist/
 
 - `LocalNdcProvider` (drug identity) is real, local, offline openFDA
   data, but its generic-equivalence key is an approximation, not real
-  RxNorm — see "Generic-equivalence approximation" above. It also only
-  resolves via NDC, not free-text drug name (a name-only side falls
-  through to `unknown_drug` yellow rather than guessing — see the class
-  comment in `src/drug/index.ts`).
+  RxNorm — see "Generic-equivalence approximation" above. `compareDrugs`
+  can optionally be handed real RxNorm/catalog evidence to upgrade some
+  of those cases to a confirmed green — see "RxNorm and
+  wholesaler-catalog equivalence" above — but that evidence is not
+  wired into `src/cli.ts`/`src/engine/index.ts` yet (this branch is
+  engine-only; wiring it into the live verify path is a small,
+  separate follow-on: construct `RxNormDataProvider`/
+  `CatalogDataProvider` the same way `LocalNdcProvider` already is, and
+  pass them as `compareDrugs`'s 4th argument).
 - Nickname table covers ~100 common US first-name pairs; it is not
   exhaustive. Unrecognized nicknames fall through to a light
   prefix-based fuzzy check, and failing that, a `red` surname-based

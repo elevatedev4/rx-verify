@@ -50,6 +50,14 @@ import { gunzipSync } from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deriveRxcui, deriveName, type LocalConcept, type LocalDrugData } from './local-data-format.js';
+// Safe one-directional import: rxnorm.ts depends only on
+// rxnorm-data-format.ts, never on this file, so this creates no cycle.
+// Reused here purely for the dose-form vocabulary reconciliation logic
+// (see rxNormMatchesLocalConcept's doc) — this file never imports
+// catalog.ts the same way, since catalog.ts itself imports FROM this
+// file (see catalog.ts's normalizeDrugNameString/extractStatedStrength/
+// extractReleaseQualifier reuse) and that direction would cycle.
+import { rxNormMatchesLocalConcept, type RxNormConcept as RxNormEquivalenceConceptShape } from './rxnorm.js';
 
 export type DrugCompareStatus = 'green' | 'yellow' | 'red';
 
@@ -287,7 +295,7 @@ const RELEASE_QUALIFIER_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl']);
  * RELEASE_QUALIFIER_TOKENS' doc for why this exists and both call
  * sites (resolveConceptByName, compareDrugs) for how it's used.
  */
-function extractReleaseQualifier(rawName: string): string | null {
+export function extractReleaseQualifier(rawName: string): string | null {
   const normalized = normalizeDrugNameString(rawName);
   for (const tok of normalized.split(' ')) {
     if (RELEASE_QUALIFIER_TOKENS.has(tok)) return tok;
@@ -1362,7 +1370,17 @@ function compareNameComponents(
   return { match: true };
 }
 
-export function compareDrugs(
+/**
+ * The unchanged, pre-existing verdict ladder (name identity -> exact NDC
+ * -> strength-contradiction reds -> concept resolution -> concept_match/
+ * generic_substitution/pack_size -> IRON RULE name-fallback -> red).
+ * Renamed from `compareDrugs` (which is now the thin wrapper just below
+ * that ALSO tries the new RxNorm/catalog equivalence evidence — see
+ * DrugEquivalenceEvidence) purely so that wrapper can call this exact,
+ * behaviorally-unchanged ladder first and only ever consider upgrading
+ * ITS result, never altering how the ladder itself reaches a verdict.
+ */
+function compareDrugsCore(
   sourceRaw: { name?: string; ndc?: string } | null | undefined,
   enteredRaw: { name?: string; ndc?: string } | null | undefined,
   provider: RxNormProvider
@@ -1726,4 +1744,154 @@ export function compareDrugs(
     reasonCode: 'drug_mismatch',
     explanation: `Drug does not match: ${diffs.join('; ')}.`
   };
+}
+
+/**
+ * Structural (duck-typed) shape RxNormDataProvider (src/drug/rxnorm.ts)
+ * satisfies. Declared locally rather than imported so this file's only
+ * dependency on rxnorm.ts is the pure rxNormMatchesLocalConcept helper
+ * above — compareDrugs itself never constructs or type-imports the
+ * concrete provider class, matching how it already only depends on the
+ * RxNormProvider INTERFACE, never LocalNdcProvider's concrete shape,
+ * anywhere else in this file.
+ */
+export interface RxNormEquivalenceProvider {
+  getByNdc(ndc11: string): RxNormEquivalenceConceptShape | null;
+  /** Optional: see RxNormData.scdDisplayNames' doc (src/drug/rxnorm-data-format.ts). */
+  getScdDisplayName?(scdRxcui: string): string | null;
+}
+
+/**
+ * Structural shape CatalogDataProvider (src/drug/catalog.ts) satisfies.
+ * Declared locally for the SAME reason as RxNormEquivalenceProvider
+ * above, but here it's not just stylistic: catalog.ts imports FROM this
+ * file (normalizeDrugNameString/extractStatedStrength/
+ * extractReleaseQualifier), so an import in the other direction would be
+ * a circular dependency.
+ */
+export interface CatalogEquivalenceProvider {
+  getByNdc(ndc11: string): { gcn: string | null } | null;
+  resolveGcnByName(rawName: string): string | null;
+}
+
+/**
+ * Optional evidence sources for compareDrugs (see the exported
+ * compareDrugs wrapper below). Both are OPTIONAL and independently
+ * absent-safe — a caller with neither (or whose providers' backing data
+ * files are missing, per RxNormDataProvider/CatalogDataProvider's own
+ * graceful-absence contract) gets EXACTLY compareDrugsCore's behavior,
+ * unchanged.
+ */
+export interface DrugEquivalenceEvidence {
+  rxnormProvider?: RxNormEquivalenceProvider;
+  catalogProvider?: CatalogEquivalenceProvider;
+}
+
+/**
+ * Attempts to UPGRADE an existing YELLOW verdict to GREEN using the new
+ * RxNorm (primary, public) and wholesaler-catalog (secondary, internal)
+ * equivalence evidence — see this feature's brief section C. Both
+ * signals key off the WRITTEN NDC (the one piece of structured identity
+ * the source e-script reliably carries — see this file's header) and
+ * the ENTERED free-text name.
+ *
+ * Tried in order: RxNorm first (real RXCUI-backed, public, more
+ * trustworthy), then the wholesaler catalog only if RxNorm didn't
+ * confirm a match. Returns null (no change) whenever evidence is
+ * missing, ambiguous, or the entered side simply doesn't resolve — this
+ * function NEVER independently produces a RED (a resolved disagreement
+ * on either signal is, at most, relabeled to a more specific YELLOW —
+ * see catalog_gcn_mismatch below) and NEVER runs at all unless the
+ * caller (compareDrugs) has already established the pre-existing ladder
+ * landed on YELLOW; a RED or GREEN from compareDrugsCore is never
+ * reconsidered.
+ */
+function tryEquivalenceUpgrade(
+  src: { name?: string; ndc?: string },
+  ent: { name?: string; ndc?: string },
+  provider: RxNormProvider,
+  evidence: DrugEquivalenceEvidence
+): DrugCompareResult | null {
+  const srcNdc = src.ndc ? parseNdc(src.ndc) : null;
+  if (!srcNdc) return null; // both new evidence layers key off the WRITTEN NDC
+
+  if (evidence.rxnormProvider) {
+    const rxEntry = evidence.rxnormProvider.getByNdc(srcNdc.normalized11);
+    if (rxEntry) {
+      const entConcept = ent.name ? provider.getConcept(ent.name) : null;
+      if (entConcept) {
+        if (rxNormMatchesLocalConcept(rxEntry, entConcept)) {
+          const scdDisplayName = rxEntry.scdRxcui ? evidence.rxnormProvider.getScdDisplayName?.(rxEntry.scdRxcui) : null;
+          const genericName = scdDisplayName ?? rxEntry.displayName;
+          return {
+            status: 'green',
+            reasonCode: 'rxnorm_scd_match',
+            explanation:
+              `Written product resolves in RxNorm to "${rxEntry.displayName}" ` +
+              `(generic: ${genericName}), which matches the entered drug's ingredient, ` +
+              `strength, and dose form — confirmed via RxNorm, independent of the ` +
+              `openFDA-derived concept data used elsewhere in this engine.`
+          };
+        }
+        // Both sides resolved but genuinely differ on this real-RXCUI
+        // evidence -- never a green, and per this function's IRON-RULE-
+        // style posture (see doc above), never a red either. This is
+        // corroborating evidence for the existing yellow, not a new
+        // distinct signal, so it falls through silently rather than
+        // inventing a bespoke mismatch reasonCode the brief didn't ask
+        // for; the catalog layer below still gets its own chance.
+      }
+    }
+  }
+
+  if (evidence.catalogProvider && ent.name) {
+    const catEntry = evidence.catalogProvider.getByNdc(srcNdc.normalized11);
+    const writtenGcn = catEntry?.gcn ?? null;
+    if (writtenGcn) {
+      const enteredGcn = evidence.catalogProvider.resolveGcnByName(ent.name);
+      if (enteredGcn) {
+        if (enteredGcn === writtenGcn) {
+          return {
+            status: 'green',
+            reasonCode: 'catalog_gcn_match',
+            explanation:
+              `Written and entered products share the same wholesaler-catalog GCN ` +
+              `(${writtenGcn}) — generically equivalent per the pharmacy's own catalog.`
+          };
+        }
+        return {
+          status: 'yellow',
+          reasonCode: 'catalog_gcn_mismatch',
+          explanation:
+            `Written product's wholesaler-catalog GCN (${writtenGcn}) differs from the ` +
+            `entered drug's resolved catalog GCN (${enteredGcn}); needs human review.`
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * PUBLIC compareDrugs: runs the unchanged compareDrugsCore ladder, then
+ * — only when both an `evidence` argument was supplied AND the ladder's
+ * own result is YELLOW — gives the new RxNorm/catalog equivalence layers
+ * one chance to upgrade it (see tryEquivalenceUpgrade). A GREEN or RED
+ * from the core ladder is returned exactly as-is, always; omitting
+ * `evidence` entirely (every pre-existing call site in this repo, and
+ * every test that doesn't opt in) reproduces compareDrugsCore's behavior
+ * byte-for-byte.
+ */
+export function compareDrugs(
+  sourceRaw: { name?: string; ndc?: string } | null | undefined,
+  enteredRaw: { name?: string; ndc?: string } | null | undefined,
+  provider: RxNormProvider,
+  evidence?: DrugEquivalenceEvidence
+): DrugCompareResult {
+  const result = compareDrugsCore(sourceRaw, enteredRaw, provider);
+  if (!evidence || result.status !== 'yellow' || result.reasonCode === 'not_provided') return result;
+  if (!sourceRaw || !enteredRaw) return result;
+  const upgraded = tryEquivalenceUpgrade(sourceRaw, enteredRaw, provider, evidence);
+  return upgraded ?? result;
 }
