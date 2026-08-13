@@ -110,10 +110,22 @@
         <!-- NORMAL content: status + toggles + actions, 2 compact rows -->
         <StackPanel x:Name="NormalPanel">
             <DockPanel Margin="0,0,20,4" LastChildFill="False">
-                <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
-                    <TextBlock x:Name="StatusSummaryText" Text="Rx Verify" Foreground="#FF222222" FontWeight="Bold" FontSize="11" VerticalAlignment="Center" />
-                    <TextBlock x:Name="StatusTimeText" Text="" Foreground="#FF777777" FontSize="9" Margin="6,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                </StackPanel>
+                <!--
+                    Owner request (2026-08-13): "Remove the counter showing
+                    the accurate/errors. that is not needed on the top
+                    right box." Removed StatusSummaryText (the bold
+                    "N✓ M✗" glyph counter, built by
+                    IntegratedOverlayCoordinator.BuildStatusSummary — that
+                    method and its call are gone too, see that file) along
+                    with the StackPanel that only existed to hold it next
+                    to StatusTimeText. StatusTimeText (the "Checked
+                    h:mm:ss..." status/timing message — NOT a counter,
+                    untouched by this request) now docks directly to the
+                    left, with its stale left margin (it used to sit AFTER
+                    the counter) removed so it isn't left with a dangling
+                    gap.
+                -->
+                <TextBlock x:Name="StatusTimeText" Text="" DockPanel.Dock="Left" Foreground="#FF777777" FontSize="9" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                     <!-- Item 1: same Refresh action as the separate window's own Refresh button — icon-ish glyph, aligned/sized consistently with CloseButton's corner glyph below -->
                     <Button x:Name="RefreshButton" Content="&#8635;" FontSize="12" Padding="3,0" Margin="0,0,4,0" Click="OnRefreshClick" ToolTip="Refresh" />

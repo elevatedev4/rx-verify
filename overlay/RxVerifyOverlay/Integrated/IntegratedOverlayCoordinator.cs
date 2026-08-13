@@ -773,7 +773,11 @@ public sealed class IntegratedOverlayCoordinator
         var physicalHeight = (int)Math.Round(ControlBoxHeightDip * scale);
 
         box.SetMaximizedGuardState(isMaximized);
-        box.SetStatusSummary(BuildStatusSummary(), _viewModel.StatusMessage);
+        // Owner request (2026-08-13): "Remove the counter showing the
+        // accurate/errors. that is not needed on the top right box." —
+        // BuildStatusSummary (the "N✓ M✗" glyph counter builder) is
+        // removed entirely; only the status/timing message is set now.
+        box.SetStatusMessage(_viewModel.StatusMessage);
 
         if (!_controlBoxShown)
         {
@@ -842,16 +846,6 @@ public sealed class IntegratedOverlayCoordinator
     {
         var dpi = GetDpiForWindow(windowHandle);
         return dpi > 0 ? dpi / 96.0 : 1.0;
-    }
-
-    private string BuildStatusSummary()
-    {
-        // "check" here means "needs a look" — yellow + red combined,
-        // matching the boxes layer's own green/red binary collapse (see
-        // BoxColorMapper) so the summary text and the boxes on screen
-        // never disagree about what counts as "matches" vs. "check it".
-        var checkCount = _viewModel.YellowCount + _viewModel.RedCount;
-        return $"{_viewModel.GreenCount}✓ {checkCount}✗";
     }
 
     private void HideControlBoxIfShown()
