@@ -189,7 +189,11 @@ function Invoke-RxVerifyBootstrap {
     # -------------------------------------------------------------
     if ($anyInstalled) {
         Write-Step 'Refreshing PATH in this session...'
-        $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if ($null -eq $machinePath) { $machinePath = '' }
+        if ($null -eq $userPath) { $userPath = '' }
+        $env:Path = $machinePath + ';' + $userPath
 
         $stillMissing = @()
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $stillMissing += 'git' }

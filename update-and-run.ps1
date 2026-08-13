@@ -114,24 +114,40 @@ function Set-CachedValue {
 
 # Prerequisite checks shared by the "everything present" fast path and
 # the post-install re-check below. Mirrors bootstrap-fresh.ps1's checks
-# exactly so both scripts agree on what "present" means.
+# exactly so both scripts agree on what "present" means. Each body is
+# wrapped in try/catch: a binary that resolves via Get-Command but is
+# corrupted (bad install, AV quarantine, a missing DLL) throws a
+# terminating exception when actually invoked, not a non-zero exit code
+# - uncaught, that would crash the whole script before Stop-WithMessage
+# ever runs, which on the double-click path means the window just closes
+# with no message at all. Routing that through "return $false" instead
+# sends it through the same reinstall/re-check/Stop-WithMessage
+# machinery as a plain missing tool.
 function Test-NodeVersionOk {
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { return $false }
-    $nodeVersionRaw = (node --version)
-    $nodeMajor = $null
-    if ($nodeVersionRaw -match 'v(\d+)\.') {
-        $nodeMajor = [int]$Matches[1]
+    try {
+        $nodeVersionRaw = (node --version)
+        $nodeMajor = $null
+        if ($nodeVersionRaw -match 'v(\d+)\.') {
+            $nodeMajor = [int]$Matches[1]
+        }
+        return (($nodeMajor -ne $null) -and ($nodeMajor -ge 20))
+    } catch {
+        return $false
     }
-    return (($nodeMajor -ne $null) -and ($nodeMajor -ge 20))
 }
 
 function Test-Dotnet8Ok {
     if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { return $false }
-    $installedSdks = dotnet --list-sdks
-    foreach ($line in $installedSdks) {
-        if ($line -like '8.*') { return $true }
+    try {
+        $installedSdks = dotnet --list-sdks
+        foreach ($line in $installedSdks) {
+            if ($line -like '8.*') { return $true }
+        }
+        return $false
+    } catch {
+        return $false
     }
-    return $false
 }
 
 # Runs a native command, capturing merged stdout+stderr, WITHOUT letting
@@ -216,7 +232,11 @@ if ($gitOk -and $nodeOk -and $dotnetOk) {
     }
 
     Write-Step 'Refreshing PATH in this session...'
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($null -eq $machinePath) { $machinePath = '' }
+    if ($null -eq $userPath) { $userPath = '' }
+    $env:Path = $machinePath + ';' + $userPath
 
     $gitOk = [bool](Get-Command git -ErrorAction SilentlyContinue)
     $nodeOk = Test-NodeVersionOk
