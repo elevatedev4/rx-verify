@@ -25,11 +25,12 @@
         text, never editable — the pharmacist's only input is the
         Correction TextBox. Source/Entered here are shown verbatim (this
         dialog is never opened for a patient field at all — see
-        IntegratedBoxesWindow.BuildHotspotContextMenu, which omits
-        "Report error…" entirely for patientName/patientDOB/patientAddress
-        — so there is nothing to redact on screen here); Reporting/
-        RxReportBuilder.cs still redacts defensively before anything is
-        ever sent, belt-and-suspenders.
+        IntegratedBoxesWindow.PollCursorForHover, which never raises
+        ReportErrorRequested for patientName/patientDOB/patientAddress
+        (fix/hover-popup-live branch — right-click is poll-detected, not a
+        WPF ContextMenu) — so there is nothing to redact on screen here);
+        Reporting/RxReportBuilder.cs still redacts defensively before
+        anything is ever sent, belt-and-suspenders.
     -->
     <Grid Margin="14">
         <Grid.RowDefinitions>

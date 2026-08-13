@@ -46,11 +46,17 @@
          different checkout) - gracefully (CloseMainWindow, then a
          short wait, then Stop-Process -Force if it's still up) - so
          `dotnet build` doesn't fail trying to overwrite a running exe
-         (MSB3026). A same-named process running from elsewhere is left
-         alone but flagged, since the app launched at the end of this
-         script will then run alongside it. If it can't be stopped, the
-         script stops here and says so rather than letting the build
-         fail.
+         (MSB3026). If it can't be stopped, the script stops here and
+         says so rather than letting the build fail.
+         A same-named process running from elsewhere (an older install
+         location, a different drive/folder) is CLOSED too, same
+         graceful pattern, per the owner's answer to W-T67 ("make it
+         close the current program when the new install is done") - so
+         only the freshly built copy ends up running. Unlike this
+         checkout's own exe above, a failure to close an old-location
+         copy is only a warning, not a hard stop - it was never blocking
+         the build to begin with, so the build/launch still proceed
+         either way.
       7. dotnet build (the WPF overlay) - ALWAYS runs, every invocation.
          Both builds are incremental under the hood and fast even when
          nothing changed.
@@ -387,6 +393,42 @@ function Test-ProcessStillRunning {
     }
 }
 
+# Shared graceful-stop loop (CloseMainWindow -> wait up to 5s ->
+# Stop-Process -Force if still up) - used for BOTH this checkout's own
+# running exe (which MUST stop, or the build below fails with MSB3026)
+# and, per W-T67, any same-named copy running from an older/different
+# install location (a nice-to-have close, not a build blocker - see each
+# call site's own still-running re-check for how they differ on failure).
+function Stop-OverlayProcessList {
+    param([Parameter(Mandatory)]$Processes)
+    foreach ($proc in $Processes) {
+        Write-Detail "Stopping RxVerifyOverlay.exe (PID $($proc.Id))..."
+        try {
+            $proc.CloseMainWindow() | Out-Null
+        } catch {
+            # No message loop / already gone - fall through to the
+            # wait-then-force-kill below regardless.
+        }
+
+        $waited = 0
+        while ($waited -lt 5) {
+            if (-not (Test-ProcessStillRunning $proc)) { break }
+            Start-Sleep -Seconds 1
+            $waited++
+        }
+
+        if (Test-ProcessStillRunning $proc) {
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                Start-Sleep -Seconds 1
+            } catch {
+                # Failure is caught by each call site's own still-running
+                # re-check below.
+            }
+        }
+    }
+}
+
 $overlayProcessName = 'RxVerifyOverlay'
 $runningOverlayProcesses = Get-Process -Name $overlayProcessName -ErrorAction SilentlyContinue
 
@@ -414,37 +456,30 @@ foreach ($proc in $runningOverlayProcesses) {
 }
 
 if ($otherLocationProcesses.Count -gt 0) {
+    # W-T67 (owner: "if there's a way to make it close the current
+    # program when the new install is done or when the shortcut is
+    # clicked, please do that") - was warn-and-leave-running; now
+    # actually closed, same graceful pattern as this checkout's own exe
+    # below. SOFTER failure mode than that one on purpose: an old-location
+    # copy was never blocking this script's own build/launch, so a
+    # failure to close it is a warning, not Stop-WithMessage - the script
+    # still proceeds either way.
     $otherPids = ($otherLocationProcesses | ForEach-Object { $_.Id }) -join ', '
-    Write-Host "Note: RxVerifyOverlay.exe is already running from somewhere other than this checkout (PID(s): $otherPids) - leaving it running. After this build finishes you may end up with two Rx Verify windows open; close the other one by hand if you only want one." -ForegroundColor Yellow
+    Write-Step "Closing the Rx Verify running from the old location... (PID(s): $otherPids)"
+    Stop-OverlayProcessList -Processes $otherLocationProcesses
+
+    $stillRunningElsewhere = @($otherLocationProcesses | Where-Object { Test-ProcessStillRunning $_ })
+    if ($stillRunningElsewhere.Count -gt 0) {
+        $stillElsewherePids = ($stillRunningElsewhere | ForEach-Object { $_.Id }) -join ', '
+        Write-Host "Note: couldn't close the old-location Rx Verify (PID(s): $stillElsewherePids) - leaving it running. After this build finishes you may end up with two Rx Verify windows open; close the other one by hand if you only want one." -ForegroundColor Yellow
+    } else {
+        Write-Detail 'Old-location Rx Verify closed.'
+    }
 }
 
 if ($processesToStop.Count -gt 0) {
     Write-Step 'Stopping the running Rx Verify so it can be updated...'
-    foreach ($proc in $processesToStop) {
-        Write-Detail "Stopping RxVerifyOverlay.exe (PID $($proc.Id))..."
-        try {
-            $proc.CloseMainWindow() | Out-Null
-        } catch {
-            # No message loop / already gone - fall through to the
-            # wait-then-force-kill below regardless.
-        }
-
-        $waited = 0
-        while ($waited -lt 5) {
-            if (-not (Test-ProcessStillRunning $proc)) { break }
-            Start-Sleep -Seconds 1
-            $waited++
-        }
-
-        if (Test-ProcessStillRunning $proc) {
-            try {
-                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-                Start-Sleep -Seconds 1
-            } catch {
-                # Failure is caught by the still-running re-check below.
-            }
-        }
-    }
+    Stop-OverlayProcessList -Processes $processesToStop
 
     $stillRunning = @(Get-Process -Name $overlayProcessName -ErrorAction SilentlyContinue | Where-Object {
         $stillPath = $null

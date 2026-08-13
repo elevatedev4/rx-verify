@@ -45,17 +45,34 @@ public static class CursorHitTest
         return new DipPoint(x, y);
     }
 
-    /// <summary>Inclusive on every edge (a cursor sitting exactly on a hotspot's boundary counts as "inside") — errs toward the transparent-toggle being ON (interactive) rather than a pharmacist's cursor sitting right at a bar's edge finding it unresponsive.</summary>
-    public static bool IsWithinAnyRect(double x, double y, IReadOnlyList<DipRect> rects)
+    /// <summary>Inclusive on every edge (a cursor sitting exactly on a hotspot's boundary counts as "inside") — errs toward the transparent-toggle being ON (interactive) rather than a pharmacist's cursor sitting right at a bar's edge finding it unresponsive. Implemented via FindContainingRectIndex so the two methods can never disagree on what counts as "inside".</summary>
+    public static bool IsWithinAnyRect(double x, double y, IReadOnlyList<DipRect> rects) => FindContainingRectIndex(x, y, rects) >= 0;
+
+    /// <summary>
+    /// Custom-popup redesign (fix/hover-popup-live branch — WPF's own
+    /// ToolTipService/ContextMenu turned out unreliable on this window's
+    /// exotic styles, see IntegratedBoxesWindow's HOVER section): the
+    /// hover popup and poll-driven right-click both need to know WHICH
+    /// field the cursor is over, not just whether it's over ANY hotspot —
+    /// this is the same inclusive-edges rect test as IsWithinAnyRect, but
+    /// returns the matching index (into whatever parallel hotspot/field
+    /// list the caller keeps) instead of a bool, or -1 when none match.
+    /// First match wins — hotspots aren't expected to overlap in practice
+    /// (each is one field's own left-edge bar), but this defines
+    /// deterministic behavior rather than leaving it unspecified if they
+    /// ever did.
+    /// </summary>
+    public static int FindContainingRectIndex(double x, double y, IReadOnlyList<DipRect> rects)
     {
-        foreach (var rect in rects)
+        for (var i = 0; i < rects.Count; i++)
         {
+            var rect = rects[i];
             if (x >= rect.X && x <= rect.X + rect.Width && y >= rect.Y && y <= rect.Y + rect.Height)
             {
-                return true;
+                return i;
             }
         }
 
-        return false;
+        return -1;
     }
 }

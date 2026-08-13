@@ -32,8 +32,9 @@ public sealed record VerdictFieldInfo(
 {
     /// <summary>
     /// True for the 3 patient-identity fields (RxLogFormatter.IsPatientField)
-    /// — IntegratedBoxesWindow hides the "Report error…" menu item entirely
-    /// for these (see BuildHotspotContextMenu), rather than merely
+    /// — IntegratedBoxesWindow's poll-driven right-click detection
+    /// (PollCursorForHover, fix/hover-popup-live branch) never raises
+    /// ReportErrorRequested for these, rather than merely
     /// redacting the prefilled Source/Entered in the dialog: the free-text
     /// correction box a pharmacist would type into next is exactly the
     /// kind of PHI leak the owner's "NO patient fields in the payload"

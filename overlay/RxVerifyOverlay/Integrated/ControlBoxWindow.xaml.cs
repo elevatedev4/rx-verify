@@ -193,10 +193,21 @@ public sealed partial class ControlBoxWindow : Window
         }
     }
 
-    /// <summary>Updates the compact status line — e.g. "11✓ 2✗" plus a "Checked h:mm:ss" style status message. Plain text (no ViewModel/DataContext binding — this window intentionally has neither, per its doc above).</summary>
-    public void SetStatusSummary(string summaryText, string statusText)
+    /// <summary>
+    /// Updates the compact status line — a "Checked h:mm:ss" style status/
+    /// timing message. Plain text (no ViewModel/DataContext binding — this
+    /// window intentionally has neither, per its doc above).
+    ///
+    /// Owner request (2026-08-13): "Remove the counter showing the
+    /// accurate/errors. that is not needed on the top right box." This
+    /// used to be SetStatusSummary(summaryText, statusText), also setting
+    /// StatusSummaryText to the "N✓ M✗" glyph counter
+    /// (IntegratedOverlayCoordinator.BuildStatusSummary, now removed) —
+    /// that element and parameter are both gone; this method now only
+    /// ever sets the status/timing message.
+    /// </summary>
+    public void SetStatusMessage(string statusText)
     {
-        StatusSummaryText.Text = summaryText;
         StatusTimeText.Text = statusText;
     }
 

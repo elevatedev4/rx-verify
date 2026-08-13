@@ -87,4 +87,53 @@ public class CursorHitTestTests
     {
         Assert.False(CursorHitTest.IsWithinAnyRect(0, 0, new List<DipRect>()));
     }
+
+    // ------------------------------------------------------------------
+    // FindContainingRectIndex (fix/hover-popup-live branch) — added so
+    // IntegratedBoxesWindow's poll can tell HoverStateMachine WHICH field
+    // the cursor is over, not just whether it's over any hotspot at all.
+    // IsWithinAnyRect is now implemented in terms of this method — these
+    // tests double as regression coverage for that refactor too.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void FindContainingRectIndexReturnsTheMatchingIndex()
+    {
+        var rects = new List<DipRect>
+        {
+            new(X: 0, Y: 0, Width: 10, Height: 10),
+            new(X: 100, Y: 200, Width: 5, Height: 20),
+        };
+
+        Assert.Equal(1, CursorHitTest.FindContainingRectIndex(102, 210, rects));
+    }
+
+    [Fact]
+    public void FindContainingRectIndexReturnsMinusOneWhenNoRectMatches()
+    {
+        var rects = new List<DipRect> { new(X: 0, Y: 0, Width: 10, Height: 10) };
+
+        Assert.Equal(-1, CursorHitTest.FindContainingRectIndex(50, 50, rects));
+    }
+
+    [Fact]
+    public void FindContainingRectIndexReturnsMinusOneForAnEmptyList()
+    {
+        Assert.Equal(-1, CursorHitTest.FindContainingRectIndex(0, 0, new List<DipRect>()));
+    }
+
+    [Fact]
+    public void FindContainingRectIndexReturnsTheFirstMatchWhenRectsOverlap()
+    {
+        // Hotspots aren't expected to overlap in real use (each is one
+        // field's own left-edge bar), but first-match-wins is the defined,
+        // deterministic behavior rather than leaving it unspecified.
+        var rects = new List<DipRect>
+        {
+            new(X: 0, Y: 0, Width: 20, Height: 20),
+            new(X: 5, Y: 5, Width: 20, Height: 20),
+        };
+
+        Assert.Equal(0, CursorHitTest.FindContainingRectIndex(10, 10, rects));
+    }
 }
