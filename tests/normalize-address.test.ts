@@ -782,3 +782,108 @@ describe('compareAddresses', () => {
     });
   });
 });
+
+/**
+ * Field report (2026-08-13): source "4000 Cambridge St Level 2 Kansas,
+ * City, KS 66160" vs entered "4000 Cambridge St Kansas City, KS 66160"
+ * went yellow address_differs. Owner: "Level 2 is not relevant (kind of
+ * like suite)." Two independent fixes:
+ *  (a) "level"/"lvl"/"floor"/"fl"/"bldg"/"building"/"room"/"rm"/"dept"
+ *      added to UNIT_DESIGNATORS, so a secondary-unit designator + its
+ *      following value token is stripped out of the street CORE exactly
+ *      like "suite"/"apt" already were;
+ *  (b) foldCase now replaces a comma with a SPACE (never a bare
+ *      deletion), so a stray OCR comma inside a multi-word city name
+ *      ("Kansas, City") can't glue two real words together into one
+ *      unrecognizable token.
+ */
+describe('compareAddresses -- secondary-unit designators + stray-comma normalization (2026-08-13 field report)', () => {
+  it('TARGET OUTCOME: the exact reported pair matches (both sides given as the OCR-shaped single blob the report quoted)', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St Level 2 Kansas, City, KS 66160' },
+      { street: '4000 Cambridge St Kansas City, KS 66160' }
+    );
+    expect(r.status).toBe('green');
+  });
+
+  it('TARGET OUTCOME: matches when both sides give city/state/zip as separate structured fields (only the Level-2 unit and the source-side stray comma differ)', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St Level 2', city: 'Kansas, City', state: 'KS', zip: '66160' },
+      { street: '4000 Cambridge St', city: 'Kansas City', state: 'KS', zip: '66160' }
+    );
+    expect(r.status).toBe('green');
+  });
+
+  it('"Level 2" vs "Level 3" -- both stripped as a secondary-unit designator, so this is a unit_differs (suite semantics), never address_differs', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St Level 2', city: 'Kansas City', state: 'KS', zip: '66160' },
+      { street: '4000 Cambridge St Level 3', city: 'Kansas City', state: 'KS', zip: '66160' }
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('unit_differs');
+  });
+
+  it('a genuinely different street number still differs, even with a Level unit present', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St Level 2', city: 'Kansas City', state: 'KS', zip: '66160' },
+      { street: '4002 Cambridge St Level 2', city: 'Kansas City', state: 'KS', zip: '66160' }
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('address_differs');
+  });
+
+  it('a genuinely different street name still differs', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St', city: 'Kansas City', state: 'KS', zip: '66160' },
+      { street: '4000 Sycamore St', city: 'Kansas City', state: 'KS', zip: '66160' }
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('address_differs');
+  });
+
+  it('a genuinely different city still differs, even after comma normalization', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St', city: 'Kansas, City', state: 'KS', zip: '66160' },
+      { street: '4000 Cambridge St', city: 'Topeka', state: 'KS', zip: '66160' }
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('address_differs');
+  });
+
+  it('other new secondary-unit designators (floor/room/bldg/dept) are stripped the same way suite already was', () => {
+    const floor = compareAddresses(
+      { street: '100 Main St Floor 3', city: 'Lawrence', state: 'KS', zip: '66047' },
+      { street: '100 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+    );
+    expect(floor.status).toBe('green');
+
+    const room = compareAddresses(
+      { street: '100 Main St Room 12', city: 'Lawrence', state: 'KS', zip: '66047' },
+      { street: '100 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+    );
+    expect(room.status).toBe('green');
+
+    const bldg = compareAddresses(
+      { street: '100 Main St Bldg A', city: 'Lawrence', state: 'KS', zip: '66047' },
+      { street: '100 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+    );
+    expect(bldg.status).toBe('green');
+  });
+
+  it('a comma glued directly with no surrounding space ("Kansas,City") still splits into two tokens rather than fusing into one unrecognizable word', () => {
+    const r = compareAddresses(
+      { street: '4000 Cambridge St', city: 'Kansas,City', state: 'KS', zip: '66160' },
+      { street: '4000 Cambridge St', city: 'Kansas City', state: 'KS', zip: '66160' }
+    );
+    expect(r.status).toBe('green');
+  });
+
+  it('regression: unit-only difference via the pre-existing "Apt"/"Suite" designators is unaffected by the UNIT_DESIGNATORS list growing', () => {
+    const r = compareAddresses(
+      { street: '123 Main St Apt 4', city: 'Springfield', state: 'IL', zip: '62704' },
+      { street: '123 Main St Apt 5', city: 'Springfield', state: 'IL', zip: '62704' }
+    );
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('unit_differs');
+  });
+});

@@ -55,10 +55,30 @@ const DIRECTIONALS: Record<string, string> = {
   southwest: 'sw', sw: 'sw'
 };
 
-const UNIT_DESIGNATORS = ['apt', 'apartment', 'unit', 'ste', 'suite', '#'];
+const UNIT_DESIGNATORS = [
+  'apt', 'apartment', 'unit', 'ste', 'suite', '#',
+  'level', 'lvl', 'floor', 'fl', 'bldg', 'building', 'room', 'rm', 'dept'
+];
 
+/**
+ * Field report (2026-08-13): source "4000 Cambridge St Level 2 Kansas,
+ * City, KS 66160" vs entered "4000 Cambridge St Kansas City, KS 66160" —
+ * a stray OCR comma inside a multi-word city name ("Kansas, City" instead
+ * of "Kansas City"). Commas are replaced with a SPACE (never simply
+ * deleted) so a comma with no surrounding whitespace on either side
+ * ("Kansas,City") still splits into two tokens instead of gluing them
+ * into one ("kansascity") — deletion alone would silently fuse two real
+ * words together, which is exactly the kind of token-comparison mismatch
+ * this fix exists to prevent. Periods are left as plain deletion,
+ * unchanged from before this fix — periods routinely appear as part of a
+ * tight abbreviation with no surrounding space by design ("St." immediately
+ * followed by the next word with a real space already there), and no
+ * field report has ever shown a period causing the comma-shaped gluing
+ * problem; changing that too, with no report motivating it, would be an
+ * unscoped, unreviewed change to this file's existing behavior.
+ */
 function foldCase(s: string): string {
-  return s.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  return s.toLowerCase().replace(/,/g, ' ').replace(/\./g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
