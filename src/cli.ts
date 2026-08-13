@@ -49,15 +49,17 @@
  * NOTE ON DRUG DATA: this CLI wires in LocalNdcProvider (see
  * src/drug/index.ts) — a real, local, offline dataset derived from the
  * public openFDA NDC directory (data/ndc-data.json.gz). It makes zero
- * network calls at lookup time. Precise RxNorm-rxcui equivalence (vs.
- * LocalNdcProvider's ingredient+strength+form approximation) is a
- * documented follow-on owner task (free NLM UTS account) — see the
- * header comment in src/drug/index.ts; once a real RxNormProvider
- * exists, swap it in below — nothing else in this file needs to change.
- * LocalNdcProvider itself caches the parsed dataset at MODULE scope (see
- * its constructor doc), so constructing a fresh instance per request in
- * --serve mode still only pays the gunzip/parse cost once per process,
- * not once per request.
+ * network calls at lookup time. LocalNdcProvider itself caches the
+ * parsed dataset at MODULE scope (see its constructor doc), so
+ * constructing a fresh instance per request in --serve mode still only
+ * pays the gunzip/parse cost once per process, not once per request.
+ *
+ * Also wires in the real RxNorm + wholesaler-catalog equivalence
+ * evidence (see DrugEquivalenceEvidence in src/drug/index.ts and
+ * README.md's "RxNorm and wholesaler-catalog equivalence" section) —
+ * rxnormProvider/catalogProvider below, constructed ONCE at module
+ * scope (see their own doc for why that's safe/cheap even when one or
+ * both backing data files don't exist on a given checkout yet).
  *
  * This file intentionally does the minimum possible: read stdin,
  * JSON.parse, call verify(), JSON.stringify the result back out. No
@@ -69,7 +71,9 @@
 import { createInterface } from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { verify } from './engine/index.js';
-import { LocalNdcProvider, type RxNormProvider } from './drug/index.js';
+import { LocalNdcProvider, type RxNormProvider, type DrugEquivalenceEvidence } from './drug/index.js';
+import { RxNormDataProvider } from './drug/rxnorm.js';
+import { CatalogDataProvider } from './drug/catalog.js';
 import type { ScriptData, EnteredData, VerifyResult } from './types.js';
 import { parseEscriptOcr, type OcrWord } from './ocr/parseEscriptOcr.js';
 
@@ -115,6 +119,30 @@ function readBuildInfo(): EngineBuildInfo {
 
 /** Never consulted when skipDrugLookup is true (verify() skips compareDrugs entirely in that mode) — exists only so a provider value is always available to pass, without paying LocalNdcProvider's dataset-load cost. */
 const NULL_PROVIDER: RxNormProvider = { getConcept: () => null };
+
+/**
+ * RxNorm (public) + wholesaler-catalog (internal) equivalence evidence —
+ * see DrugEquivalenceEvidence in src/drug/index.ts. Constructed ONCE
+ * here at module scope (unlike LocalNdcProvider, which is constructed
+ * per-call inside runVerify so skipDrugLookup can skip it entirely) —
+ * these two are safe to construct unconditionally because:
+ *  1. they're cheap even when their data file IS present (~1-1.5MB
+ *     gzipped each vs. LocalNdcProvider's ~5.4MB/130k-concept dataset),
+ *     and
+ *  2. each provider's OWN constructor fails open — a missing/unreadable
+ *     data/rxnorm-data.json.gz or data/catalog-data.json.gz degrades to
+ *     "no evidence, every lookup misses" and NEVER throws (see the
+ *     "GRACEFUL ABSENCE" doc on RxNormDataProvider/CatalogDataProvider
+ *     in src/drug/rxnorm.ts / src/drug/catalog.ts) — so on a checkout
+ *     where either file doesn't exist yet, this is exactly as safe, and
+ *     produces exactly the same verify() output, as never constructing
+ *     them at all.
+ * Reused across every request in --serve mode, same as LocalNdcProvider's
+ * own module-scope dataset cache.
+ */
+const rxnormProvider = new RxNormDataProvider();
+const catalogProvider = new CatalogDataProvider();
+const DRUG_EQUIVALENCE_EVIDENCE: DrugEquivalenceEvidence = { rxnormProvider, catalogProvider };
 
 interface CliInput {
   /**
@@ -194,7 +222,7 @@ function runVerify(input: CliInput): VerifyResult {
   // file's header doc) when a real drug lookup is actually going to
   // happen — see CliInput.skipDrugLookup doc above.
   const provider = skipDrugLookup ? NULL_PROVIDER : new LocalNdcProvider();
-  return verify(resolvedSource, entered, provider, { skipDrugLookup });
+  return verify(resolvedSource, entered, provider, { skipDrugLookup, evidence: DRUG_EQUIVALENCE_EVIDENCE });
 }
 
 async function main(): Promise<void> {
