@@ -444,4 +444,32 @@ public class RxLogFormatterTests
         Assert.Contains("Supervising: Dr. Kyle", blob);
         Assert.Contains("MD approved this refill", blob);
     }
+
+    // ------------------------------------------------------------------
+    // IsPatientField (verdict-tooltips-reports branch) — the canonical
+    // patient-field list, exposed publicly so Reporting/RxReportBuilder.cs
+    // reuses it instead of re-declaring its own copy. See
+    // RxReportBuilderTests.cs for that consumer's own coverage.
+    // ------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("patientName")]
+    [InlineData("patientDOB")]
+    [InlineData("patientAddress")]
+    [InlineData("PATIENTNAME")] // PatientFieldKeys uses OrdinalIgnoreCase
+    public void IsPatientFieldTrueForEveryPatientIdentityField(string fieldKey)
+    {
+        Assert.True(RxLogFormatter.IsPatientField(fieldKey));
+    }
+
+    [Theory]
+    [InlineData("prescriberName")]
+    [InlineData("drug")]
+    [InlineData("quantity")]
+    [InlineData("sig")]
+    [InlineData("dateWritten")]
+    public void IsPatientFieldFalseForEveryNonPatientField(string fieldKey)
+    {
+        Assert.False(RxLogFormatter.IsPatientField(fieldKey));
+    }
 }

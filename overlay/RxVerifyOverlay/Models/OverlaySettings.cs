@@ -103,6 +103,27 @@ public sealed class OverlaySettings
     /// <summary>Capture region height in pixels — only used when UseExplicitCaptureRegion is true.</summary>
     public int CaptureRegionHeight { get; set; }
 
+    /// <summary>
+    /// Bearer key for HQ's dedicated, low-privilege /api/rxverify-reports
+    /// endpoint (see HQ-ENDPOINT-SPEC.md at the repo root) — lets this
+    /// workstation CREATE pharmacist-submitted "Report error…" corrections
+    /// only. Deliberately NOT the full Manager HQ secret: rx-verify has no
+    /// cloud of its own and must never embed that broader credential in a
+    /// client that ships to a pharmacy workstation (see
+    /// Reporting/RxReportSubmitter.cs).
+    ///
+    /// DEFAULT/UNSET BEHAVIOR: empty string (the default) means "Report
+    /// error…" is hidden entirely on every verdict bar — see
+    /// Integrated/IntegratedOverlayCoordinator.cs UpdateBoxes
+    /// (reportingEnabled). There is deliberately no reporting affordance
+    /// shown on a workstation this hasn't been configured for yet, rather
+    /// than showing a button that can only ever queue locally forever.
+    /// No settings-UI field for this yet (out of scope for the branch that
+    /// added it) — set by hand-editing settings.json until HQ's coder side
+    /// ships the endpoint and issues a real key.
+    /// </summary>
+    public string RxVerifyReportKey { get; set; } = "";
+
     private static string SettingsFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "settings.json");
 

@@ -217,6 +217,9 @@ public sealed class IntegratedOverlayCoordinator
     /// </summary>
     public event EventHandler? ToggleStateChanged;
 
+    /// <summary>Raised when the pharmacist picks "Report error…" from a verdict bar's hotspot context menu (IntegratedBoxesWindow) — MainWindow.xaml.cs handles this by opening Integrated/ReportErrorWindow prefilled with the field's current verdict data. Wired once, in EnsureBoxesWindow, at construction.</summary>
+    public event EventHandler<VerdictFieldInfo>? ReportErrorRequested;
+
     public IntegratedOverlayCoordinator(OverlayViewModel viewModel, OverlaySettings settings)
     {
         _viewModel = viewModel;
@@ -750,7 +753,14 @@ public sealed class IntegratedOverlayCoordinator
         return _controlBox;
     }
 
-    private IntegratedBoxesWindow EnsureBoxesWindow() => _boxesWindow ??= new IntegratedBoxesWindow();
+    private IntegratedBoxesWindow EnsureBoxesWindow()
+    {
+        if (_boxesWindow is not null) return _boxesWindow;
+
+        _boxesWindow = new IntegratedBoxesWindow();
+        _boxesWindow.ReportErrorRequested += (_, field) => ReportErrorRequested?.Invoke(this, field);
+        return _boxesWindow;
+    }
 
     private void UpdateControlBox(IntPtr windowHandle, Rectangle bounds, bool isMaximized)
     {
@@ -781,6 +791,14 @@ public sealed class IntegratedOverlayCoordinator
 
         if (!_boxesShown)
         {
+            // REVIEWER BLOCKER FIX (layer 3, belt-and-suspenders): forced
+            // BEFORE Show() — see IntegratedBoxesWindow.ForceHitTestTransparent's
+            // doc. HideAndResetHover (below) and PollCursorForHover's own
+            // IsVisible check already prevent a hidden window from
+            // drifting non-transparent, but this window must never
+            // surface non-transparent the moment it becomes visible
+            // regardless of which of those ran first.
+            boxesWindow.ForceHitTestTransparent();
             boxesWindow.Show();
             _boxesShown = true;
         }
@@ -795,6 +813,15 @@ public sealed class IntegratedOverlayCoordinator
 
         var scale = DpiScaleFor(window.NativeWindowHandle);
 
+        // HOVER/RIGHT-CLICK AFFORDANCE (verdict-tooltips-reports branch):
+        // reportingEnabled gates ONLY the "Report error…" menu item (see
+        // IntegratedBoxesWindow.BuildHotspotContextMenu) — the hover
+        // tooltip itself is unconditional. See OverlaySettings.
+        // RxVerifyReportKey's doc for why an unset key hides the button
+        // entirely rather than showing one that could only ever queue
+        // locally forever.
+        var reportingEnabled = !string.IsNullOrWhiteSpace(_settings.RxVerifyReportKey);
+
         var boxes = _viewModel.Categories
             .SelectMany(c => c.Rows)
             .Where(r => r.ScreenRect.HasValue)
@@ -802,10 +829,13 @@ public sealed class IntegratedOverlayCoordinator
             // "in play" for this Rx — see DawBoxRule's doc. Every other
             // field is unaffected.
             .Where(r => r.FieldKey != "daw" || DawBoxRule.ShouldDrawBox(r.Status, r.EnteredValue, r.SourceValue))
-            .Select(r => (r.ScreenRect!.Value, BoxColorMapper.IsGreenBox(r.Status)))
+            .Select(r => (
+                r.ScreenRect!.Value,
+                BoxColorMapper.IsGreenBox(r.Status),
+                new VerdictFieldInfo(r.FieldKey, r.DisplayName, r.Status, r.SourceValue, r.EnteredValue, r.Explanation, r.ReasonCode)))
             .ToList();
 
-        boxesWindow.SetBoxes(boxes, bounds.Location, scale, scale);
+        boxesWindow.SetBoxes(boxes, bounds.Location, scale, scale, reportingEnabled);
     }
 
     private static double DpiScaleFor(IntPtr windowHandle)
@@ -834,7 +864,11 @@ public sealed class IntegratedOverlayCoordinator
     private void HideBoxesIfShown()
     {
         if (!_boxesShown) return;
-        _boxesWindow?.Hide();
+
+        // REVIEWER BLOCKER FIX: HideAndResetHover (not a bare Hide()) —
+        // see that method's doc and HoverPollDecision's class doc for the
+        // stale-hotspot / stuck-non-transparent failure mode this closes.
+        _boxesWindow?.HideAndResetHover();
         _boxesShown = false;
     }
 

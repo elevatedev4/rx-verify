@@ -1,0 +1,66 @@
+<Window x:Class="RxVerifyOverlay.Integrated.ReportErrorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Report an error — Rx Verify"
+        Width="420" SizeToContent="Height"
+        MinWidth="360"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True">
+    <!--
+        "Report error…" dialog (verdict-tooltips-reports branch) — opened
+        from a verdict bar's right-click context menu
+        (Integrated/IntegratedBoxesWindow.cs ReportErrorRequested ->
+        Integrated/IntegratedOverlayCoordinator.cs -> MainWindow.xaml.cs).
+        UNLIKE IntegratedBoxesWindow/ControlBoxWindow, this is a NORMAL
+        (activatable, non-click-through) window — it needs real keyboard
+        focus for the correction TextBox. Owner is deliberately NOT set to
+        MainWindow (see MainWindow.xaml.cs OpenReportErrorDialog's doc):
+        MainWindow can be hidden in Integrated display mode, and a
+        ShowDialog against a hidden owner is unreliable — WindowStartupLocation
+        ="CenterScreen" instead of "CenterOwner" is what makes that safe.
+
+        Prefilled fields (Field/Status/Source/Entered) are READ-ONLY plain
+        text, never editable — the pharmacist's only input is the
+        Correction TextBox. Source/Entered here are shown verbatim (this
+        dialog is never opened for a patient field at all — see
+        IntegratedBoxesWindow.BuildHotspotContextMenu, which omits
+        "Report error…" entirely for patientName/patientDOB/patientAddress
+        — so there is nothing to redact on screen here); Reporting/
+        RxReportBuilder.cs still redacts defensively before anything is
+        ever sent, belt-and-suspenders.
+    -->
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="FieldNameText" Grid.Row="0" Text="Field" FontSize="16" FontWeight="Bold" Margin="0,0,0,8" />
+
+        <Border Grid.Row="1" Background="#FFF3F3F3" BorderBrush="#FFD5D5D5" BorderThickness="1" CornerRadius="3" Padding="8" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock x:Name="StatusText" Text="Status: " TextWrapping="Wrap" Margin="0,0,0,4" />
+                <TextBlock x:Name="SourceText" Text="Source: " TextWrapping="Wrap" Margin="0,0,0,4" />
+                <TextBlock x:Name="EnteredText" Text="Entered: " TextWrapping="Wrap" Margin="0,0,0,4" />
+                <TextBlock x:Name="ExplanationText" Text="" TextWrapping="Wrap" FontStyle="Italic" Foreground="#FF555555" />
+            </StackPanel>
+        </Border>
+
+        <TextBlock Grid.Row="2" Text="What's wrong / what should this have been?" Margin="0,0,0,4" />
+        <TextBox x:Name="CorrectionTextBox" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap"
+                 Height="80" VerticalScrollBarVisibility="Auto" Margin="0,0,0,10" />
+
+        <TextBlock x:Name="SubmitStatusText" Grid.Row="4" Text="" Foreground="#FF2E7D32" Margin="0,0,0,8" HorizontalAlignment="Left" />
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="CancelButton" Content="Cancel" Padding="12,4" Margin="0,0,8,0" Click="OnCancelClick" IsCancel="True" />
+            <Button x:Name="SubmitButton" Content="Submit" Padding="12,4" Click="OnSubmitClick" IsDefault="True" />
+        </StackPanel>
+    </Grid>
+</Window>
