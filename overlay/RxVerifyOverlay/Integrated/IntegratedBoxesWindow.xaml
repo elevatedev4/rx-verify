@@ -30,6 +30,21 @@
         NativeWindowPositioning.cs) — this Canvas is the coordinate space
         every box (added in SetBoxes) is positioned within, in DIPs
         relative to this window's own top-left.
+
+        Background DELIBERATELY UNSET (verdict-tooltips-reports branch —
+        was "Transparent"): WPF only hit-tests a Panel's own bounds when
+        its Background is an actual Brush, even a fully transparent one —
+        an unset Background lets a click fall through to whatever's behind
+        it instead. This matters now that IntegratedBoxesWindow.xaml.cs
+        dynamically clears WS_EX_TRANSPARENT while the cursor hovers a
+        verdict bar's hotspot (see that file's class doc, HOVER section):
+        with Background="Transparent" here, clearing the Win32 style would
+        have made this ENTIRE Canvas (i.e. the whole PioneerRx-sized
+        window) swallow clicks, not just the small hotspot Border elements
+        SetBoxes/AddHotspot add as children — those children set their own
+        Background explicitly (Brushes.Transparent) specifically so THEIR
+        bounds stay hit-testable while this root Canvas's empty space
+        does not.
     -->
-    <Canvas x:Name="BoxCanvas" Background="Transparent" />
+    <Canvas x:Name="BoxCanvas" />
 </Window>

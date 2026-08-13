@@ -1,0 +1,83 @@
+using System;
+using RxVerifyOverlay.Diagnostics;
+using RxVerifyOverlay.Integrated;
+
+namespace RxVerifyOverlay.Reporting;
+
+/// <summary>
+/// Wire shape POSTed to HQ's dedicated /api/rxverify-reports endpoint (see
+/// HQ-ENDPOINT-SPEC.md at the repo root) — one pharmacist-submitted
+/// correction against a single field's verdict, plus enough context (app,
+/// engine build, overlay commit) for whoever triages it on the HQ side to
+/// know exactly which build produced the verdict being reported. CamelCase
+/// on the wire via Reporting/RxReportSubmitter.cs's JsonSerializerOptions —
+/// same convention as Engine/EngineClient.cs's wire types. Also the JSONL
+/// record shape for Reporting/PendingReportsQueue.cs's store-and-forward
+/// file (one of these, serialized, per line).
+/// </summary>
+public sealed class RxReportPayload
+{
+    public string App { get; set; } = "rx-verify";
+
+    /// <summary>"&lt;sha&gt; &lt;builtAt&gt;" of the TypeScript engine subprocess (see Engine/EngineClient.cs EngineBuildSha/EngineBuildBuiltAt), or null if the engine's --serve handshake never happened / was malformed — same "omit rather than print unknown" posture as RxLogFormatter's "Engine build:" line.</summary>
+    public string? EngineBuild { get; set; }
+
+    /// <summary>The C# overlay's own git commit (AppDiagnostics.GetCommitSha()) — distinct from EngineBuild for the same reason RxLogFormatter's header keeps them on separate lines (the two can drift).</summary>
+    public string? Commit { get; set; }
+
+    /// <summary>One of Models/EngineModels.cs FieldOrder.Fields, e.g. "drug", "quantity".</summary>
+    public string Field { get; set; } = "";
+
+    /// <summary>The engine's SourceValue for this field — "[redacted]" (RxLogFormatter.RedactedValue) instead of the real value when Field is a patient-identity field. See RxReportBuilder.</summary>
+    public string? Source { get; set; }
+
+    /// <summary>The engine's EnteredValue for this field — same redaction rule as Source.</summary>
+    public string? Entered { get; set; }
+
+    /// <summary>Lowercase verdict color word ("green"/"yellow"/"red") — matches the engine's own JSON enum casing (Engine/EngineClient.cs JsonOptions), NOT the HQ-side report lifecycle status (new/accepted/fixed/rejected — see HQ-ENDPOINT-SPEC.md) which is a completely separate concept the server adds.</summary>
+    public string Status { get; set; } = "";
+
+    public string? ReasonCode { get; set; }
+
+    public string? Explanation { get; set; }
+
+    /// <summary>The pharmacist's free-text description of what's wrong / what it should have been. Never auto-redacted (see VerdictFieldInfo.IsPatientField's doc for why the whole affordance is hidden for patient fields instead of trying to scrub this).</summary>
+    public string Correction { get; set; } = "";
+
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Pure builder for RxReportPayload — the ONLY place a VerdictFieldInfo
+/// plus a pharmacist's correction turns into the wire/JSONL payload, so
+/// the "NO patient fields in the payload" design decision (HQ-ENDPOINT-SPEC.md)
+/// can never be bypassed by some future call site that forgets to redact.
+/// Belt-and-suspenders alongside the UI-level guard (Integrated/
+/// IntegratedBoxesWindow hides "Report error…" entirely for a patient
+/// field — see VerdictFieldInfo.IsPatientField): this still redacts
+/// Source/Entered even if a future caller somehow reaches this with a
+/// patient field's raw values. No I/O, no ViewModel/WPF dependency — see
+/// RxVerifyOverlay.Tests/RxReportBuilderTests.cs.
+/// </summary>
+public static class RxReportBuilder
+{
+    public static RxReportPayload Build(VerdictFieldInfo field, string correction, string? engineBuild, string? commit, DateTime createdAtUtc)
+    {
+        var isPatientField = RxLogFormatter.IsPatientField(field.FieldKey);
+
+        return new RxReportPayload
+        {
+            App = "rx-verify",
+            EngineBuild = engineBuild,
+            Commit = commit,
+            Field = field.FieldKey,
+            Source = isPatientField ? RxLogFormatter.RedactedValue : field.SourceValue,
+            Entered = isPatientField ? RxLogFormatter.RedactedValue : field.EnteredValue,
+            Status = field.Status.ToString().ToLowerInvariant(),
+            ReasonCode = field.ReasonCode,
+            Explanation = field.Explanation,
+            Correction = correction ?? "",
+            CreatedAt = createdAtUtc
+        };
+    }
+}

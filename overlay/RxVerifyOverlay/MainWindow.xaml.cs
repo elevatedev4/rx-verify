@@ -7,10 +7,12 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using RxVerifyOverlay.Diagnostics;
 using RxVerifyOverlay.Engine;
 using RxVerifyOverlay.Integrated;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
+using RxVerifyOverlay.Reporting;
 using RxVerifyOverlay.Uia;
 using RxVerifyOverlay.ViewModels;
 
@@ -222,6 +224,12 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // mode) — Window.Close() doesn't require Show() to have been
         // called first, and still raises Closed either way.
         _integratedOverlay.CloseApplicationRequested += (_, _) => Close();
+        // "Report error…" (verdict-tooltips-reports branch): the boxes
+        // window's per-field context menu bubbles up through the
+        // coordinator to here, the one place that knows how to build a
+        // ReportErrorWindow (engine build/commit context — see that
+        // constructor's params).
+        _integratedOverlay.ReportErrorRequested += (_, field) => OpenReportErrorDialog(field);
 
         // VerifyOCR capture-region override — see Models/OverlaySettings.cs
         // and MainWindow.xaml's "OCR capture region" section.
@@ -308,6 +316,17 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             await SafeRefreshAsync();
             SafeTickIntegratedOverlay();
         };
+
+        // "Report error…" store-and-forward (verdict-tooltips-reports
+        // branch): retries anything queued in pending-reports.jsonl from a
+        // previous session (no key configured yet at the time, or a
+        // network blip) — a no-op fast-exit when RxVerifyReportKey is
+        // still unset (see RxReportSubmitter.RetryPendingAsync's doc).
+        // Fire-and-forget: never blocks startup, and every failure mode
+        // inside it is already caught (fail-soft — see RxReportSubmitter's
+        // class doc), so there's nothing here that needs a try/catch of
+        // its own.
+        _ = new RxReportSubmitter(_settings).RetryPendingAsync();
 
         // EngineClient now owns a PERSISTENT node.exe (latency fix — see
         // Engine/EngineClient.cs) instead of spawning one per call, so it
@@ -599,6 +618,37 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Opens Integrated/ReportErrorWindow for one field's verdict — see
+    /// _integratedOverlay.ReportErrorRequested's wiring in the
+    /// constructor. Deliberately does NOT set Owner=this: MainWindow can
+    /// be hidden right now (Integrated display mode is the default — see
+    /// Models/OverlaySettings.cs DisplayMode), and ShowDialog against a
+    /// hidden owner is unreliable on WPF; the dialog's own
+    /// WindowStartupLocation="CenterScreen" (see its XAML) is what makes
+    /// skipping Owner safe instead of leaving the dialog positioned at
+    /// (0,0). ShowDialog (not Show) so the pharmacist finishes or cancels
+    /// this one report before doing anything else with it — it's a short,
+    /// single-purpose form, not a panel meant to stay open alongside work.
+    /// </summary>
+    private void OpenReportErrorDialog(VerdictFieldInfo field)
+    {
+        var engineBuild = string.IsNullOrEmpty(_engineClient.EngineBuildSha) && string.IsNullOrEmpty(_engineClient.EngineBuildBuiltAt)
+            ? null
+            : $"{_engineClient.EngineBuildSha ?? "unknown"} {_engineClient.EngineBuildBuiltAt ?? "unknown"}";
+
+        try
+        {
+            var dialog = new ReportErrorWindow(field, engineBuild, AppDiagnostics.GetCommitSha(), _settings);
+            dialog.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Couldn't open the report dialog: {ex.Message}", "Rx Verify",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void OnDumpTreeClick(object sender, RoutedEventArgs e)

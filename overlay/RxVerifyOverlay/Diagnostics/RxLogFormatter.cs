@@ -35,13 +35,32 @@ namespace RxVerifyOverlay.Diagnostics;
 /// </summary>
 public static class RxLogFormatter
 {
-    private const string RedactedValue = "[redacted]";
+    /// <summary>
+    /// Was private; made public (2026-08-13, verdict-tooltips-reports
+    /// branch) so Reporting/RxReportBuilder.cs can redact a patient
+    /// field's Source/Entered value the SAME way this file already does,
+    /// instead of re-declaring its own "[redacted]" literal — see that
+    /// class's "NO patient fields in the payload" doc.
+    /// </summary>
+    public const string RedactedValue = "[redacted]";
     private const string RedactedTitleSuffix = "[patient redacted]";
 
     private static readonly HashSet<string> PatientFieldKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "patientName", "patientDOB", "patientAddress"
     };
+
+    /// <summary>
+    /// True for the 3 patient-identity fields (patientName/patientDOB/
+    /// patientAddress) — the same set BuildLogBlob's redactPatient:true
+    /// scrubs. Exposed publicly (2026-08-13, verdict-tooltips-reports
+    /// branch) so any OTHER feature that must never leak a patient
+    /// field's raw value off this workstation — see
+    /// Reporting/RxReportBuilder.cs and Integrated/VerdictFieldInfo.cs —
+    /// reuses this one canonical list instead of maintaining a second copy
+    /// that could drift from it.
+    /// </summary>
+    public static bool IsPatientField(string fieldKey) => PatientFieldKeys.Contains(fieldKey);
 
     /// <summary>
     /// Latency fix (Will's field report — verdicts noticeably slower
