@@ -6,7 +6,8 @@ import {
   extractStatedDurationHours,
   extractStatedConcentrationStrength,
   FixtureProvider,
-  type RxNormProvider
+  type RxNormProvider,
+  type RxConcept
 } from '../src/drug/index.js';
 
 const provider = new FixtureProvider();
@@ -642,6 +643,86 @@ describe('component-wise name fallback (unknown_drug branch, concept resolution 
         unresolvedProvider
       );
       expect(r.status).not.toBe('green');
+    });
+
+    // Reviewer round 2, BLOCKER 1 (reviewer-reproduced live false green):
+    // RELEASE_EQUIVALENCE_CLASS used to apply to EVERY ingredient, not
+    // just metoprolol -- reproduced going GREEN for Bupropion XL vs SR,
+    // the exact previously-fixed live false-green RELEASE_QUALIFIER_TOKENS'
+    // own doc exists to prevent (SR and XL bupropion are genuinely
+    // different, non-interchangeable products). Now gated on
+    // ingredientTokens containing "metoprolol" specifically.
+    it('does NOT apply the release-equivalence class outside metoprolol: "Bupropion Xl 150 Mg Tablet" vs "Bupropion Sr 150 Mg Tablet" stays non-green (yellow)', () => {
+      const r = compareDrugs(
+        { name: 'Bupropion Xl 150 Mg Tablet' },
+        { name: 'Bupropion Sr 150 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+    });
+
+    it('metoprolol succinate (XL) vs Succ ER is STILL green after the Bupropion gating fix (the one owner-confirmed interchangeable case)', () => {
+      const r = compareDrugs(
+        { name: 'METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET' },
+        { name: 'Metoprolol Succ Er 50 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    // Reviewer round 2, BLOCKER 1: pins the metoprolol equivalence class
+    // working even when only ONE side falls through to this name-based
+    // fallback -- the OTHER side already resolved a concept via its NDC
+    // (compareDrugs' `!srcConcept || !entConcept` branch triggers this
+    // fallback whenever AT LEAST ONE side fails to resolve, and calls
+    // compareNameComponents on both RAW names regardless of whether the
+    // other side already resolved). Mirrors the real overlay shape: the
+    // entered side never carries an NDC at all (PioneerRx's item field
+    // is free-text only), so the source resolving via NDC while entered
+    // falls to name components is the realistic asymmetric case, not a
+    // contrived one.
+    it('asymmetric resolution: source resolves via NDC concept, entered falls through to name components -- still GREEN for metoprolol XL/ER', () => {
+      const metoprololConcept: RxConcept = {
+        rxcui: 'RX-TEST-METOPROLOL',
+        ingredient: 'metoprolol',
+        strength: '50 mg',
+        doseForm: 'tablet',
+        name: 'Metoprolol Succinate 50mg ER Tablet'
+      };
+      const asymmetricProvider: RxNormProvider = {
+        getConcept: (ndcOrName: string) => (ndcOrName === '00000123456' ? metoprololConcept : null)
+      };
+
+      const r = compareDrugs(
+        { name: 'METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET', ndc: '00000-1234-56' },
+        { name: 'Metoprolol Succ Er 50 Mg Tab' },
+        asymmetricProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    // Reviewer-suggested explicit test (round 2): "CD" (controlled
+    // delivery -- a real diltiazem release qualifier) is NOT in
+    // COMPONENT_RELEASE_TOKENS at all, so it falls through as an ordinary
+    // ingredient token instead of a release qualifier -- ingredientTokens
+    // ends up {"diltiazem","cd"} on one side vs {"diltiazem"} on the
+    // other, and rule 1 (ingredient-set equality) already blocks green.
+    // Correct today only BY ACCIDENT of "cd" not being recognized as
+    // anything special; pinned explicitly so a future change that adds
+    // "cd" to the release-token vocabulary can't silently reopen a false
+    // green here without a test catching it.
+    it('diltiazem CD vs SR stays yellow (never green) -- "cd" is not a recognized release token, so this currently blocks on ingredient-set equality, not release-equivalence', () => {
+      const r = compareDrugs(
+        { name: 'Diltiazem CD 240 Mg Capsule' },
+        { name: 'Diltiazem SR 240 Mg Capsule' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
     });
   });
 

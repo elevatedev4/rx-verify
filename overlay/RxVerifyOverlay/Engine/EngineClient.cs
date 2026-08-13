@@ -100,6 +100,17 @@ public sealed class EngineClient : IDisposable
     public string? EngineBuildBuiltAt { get; private set; }
 
     /// <summary>
+    /// Re-armed to true every time EnsureProcessStarted starts a fresh
+    /// process; flips to false the first time the response-reading loop
+    /// in RunOnPersistentProcessAsync inspects a non-blank line, whether
+    /// or not that line turned out to be the ready handshake — see
+    /// TryParseHandshakeLine and BLOCKER 2's doc in EnsureProcessStarted.
+    /// This is what makes the handshake check happen AT MOST ONCE per
+    /// process lifetime, never on every request.
+    /// </summary>
+    private bool _awaitingHandshake;
+
+    /// <summary>
     /// Path to the compiled CLI entrypoint, e.g.
     /// "C:\Users\will\claude\rx-verify\dist\cli.js". Configurable because
     /// the overlay and the engine repo are checked out independently —
@@ -237,6 +248,32 @@ public sealed class EngineClient : IDisposable
                 do
                 {
                     line = await stdout.ReadLineAsync(linkedCts.Token).ConfigureAwait(false);
+
+                    // Reviewer round 2, BLOCKER 2 (deadlock fix): the
+                    // one-time ready handshake (src/cli.ts serve()'s
+                    // header doc) is checked for LAZILY here, on the
+                    // first non-blank line of a process's life, instead
+                    // of via a dedicated blocking read in
+                    // EnsureProcessStarted (which hung forever against an
+                    // old dist that never sends one at all). Correct for
+                    // both: an old dist's first line already IS the real
+                    // response, so TryParseHandshakeLine returns false
+                    // and `line` is used as-is below; a new dist's first
+                    // line IS the handshake, so it's consumed here and
+                    // the NEXT line (the actual response) is read in its
+                    // place — still inside this same timeout-guarded
+                    // request/response round-trip.
+                    if (line is not null && line.Trim().Length > 0 && _awaitingHandshake)
+                    {
+                        _awaitingHandshake = false; // at most once per process lifetime
+                        var handshake = TryParseHandshakeLine(line);
+                        if (handshake is not null)
+                        {
+                            EngineBuildSha = handshake.Value.Sha;
+                            EngineBuildBuiltAt = handshake.Value.BuiltAt;
+                            line = await stdout.ReadLineAsync(linkedCts.Token).ConfigureAwait(false);
+                        }
+                    }
                 }
                 while (line is not null && line.Trim().Length == 0); // skip stray blank lines, same tolerance as src/cli.ts serve()
 
@@ -302,36 +339,29 @@ public sealed class EngineClient : IDisposable
         _stdin = process.StandardInput;
         _stdout = process.StandardOutput;
 
-        // One-time ready/handshake line (RXVERIFY-TROUBLESHOOT
-        // 2026-08-13 — see src/cli.ts serve()'s header doc): the
-        // process's FIRST stdout line, written before it reads any
-        // request and before any response line can possibly exist, so
-        // reading it synchronously HERE — before this method returns and
-        // RunOnPersistentProcessAsync sends the first real request — can
-        // never race against or be confused with a real response.
-        // Best-effort only: a missing/malformed/unparseable handshake
-        // (e.g. an older dist/cli.js built before this feature existed)
-        // must never block the app from verifying — EngineBuildSha/
-        // EngineBuildBuiltAt simply stay null in that case.
+        // Reviewer round 2, BLOCKER 2 (deadlock fix): there used to be a
+        // dedicated, synchronous, UNBOUNDED _stdout.ReadLine() right here
+        // to consume --serve's one-time ready handshake (RXVERIFY-
+        // TROUBLESHOOT 2026-08-13 — src/cli.ts serve()'s header doc). That
+        // hangs FOREVER against an OLD dist/cli.js built before the
+        // handshake existed: old serve() writes NOTHING to stdout until
+        // it actually receives a request line, so this read would block
+        // indefinitely waiting for a line that will never come — and
+        // machines running a stale, not-yet-rebuilt dist/ are exactly the
+        // population this feature exists to help. There is now NO
+        // dedicated startup read at all. Instead, re-arm the one-shot
+        // handshake check for the response-reading loop in
+        // RunOnPersistentProcessAsync (see TryParseHandshakeLine) — it
+        // lazily inspects the FIRST line of the first request's normal,
+        // already-timeout-guarded read, which is correct either way: an
+        // old dist's first line IS the real response (no ready line ever
+        // sent), and a new dist's ready line precedes it. Also clear any
+        // stale stamp from a previous process — a freshly (re)started
+        // process may be running different dist/ content than whatever
+        // just died.
+        _awaitingHandshake = true;
         EngineBuildSha = null;
         EngineBuildBuiltAt = null;
-        try
-        {
-            var readyLine = _stdout.ReadLine();
-            if (readyLine is not null)
-            {
-                using var readyDoc = JsonDocument.Parse(readyLine);
-                if (readyDoc.RootElement.TryGetProperty("engineBuild", out var buildEl))
-                {
-                    if (buildEl.TryGetProperty("sha", out var shaEl)) EngineBuildSha = shaEl.GetString();
-                    if (buildEl.TryGetProperty("builtAt", out var builtAtEl)) EngineBuildBuiltAt = builtAtEl.GetString();
-                }
-            }
-        }
-        catch
-        {
-            // Best-effort only — see doc above.
-        }
 
         // Drain stderr continuously for the life of the process. This is
         // NOT optional: an unread stderr pipe can fill its OS buffer and
@@ -417,6 +447,60 @@ public sealed class EngineClient : IDisposable
         public List<FieldVerdict>? Verdicts { get; set; }
         public VerifySummary? Summary { get; set; }
         public string? Error { get; set; }
+    }
+
+    /// <summary>
+    /// Engine build stamp extracted from a --serve ready handshake line
+    /// — see TryParseHandshakeLine. Either field may be null if the
+    /// handshake's own "engineBuild" object was missing that key (should
+    /// never happen against src/cli.ts's own readBuildInfo, which always
+    /// supplies both as at least "unknown", but this stays defensive
+    /// rather than assuming a well-formed shape from another process).
+    /// </summary>
+    public readonly record struct EngineBuildStamp(string? Sha, string? BuiltAt);
+
+    /// <summary>
+    /// Reviewer round 2, BLOCKER 2 (deadlock fix — see the doc in
+    /// EnsureProcessStarted for the full story): pure parse of whether
+    /// <paramref name="line"/> is --serve's one-time ready handshake
+    /// (src/cli.ts serve()'s header doc) rather than a real response
+    /// line. Returns null for anything that doesn't match — including a
+    /// genuine response line, which never has a top-level "ready": true
+    /// key at all (every response either echoes back the required "id"
+    /// key, or is a parse/shape error — see ParseResponseLine/
+    /// ServeResponseEnvelope), and any JSON-parse failure — so a real
+    /// verdict line can never be misread as a handshake, and this can
+    /// never throw. Public and static, same "pure logic pulled out for
+    /// direct testing" pattern as ParseResponseLine — see
+    /// RxVerifyOverlay.Tests/EngineClientServeProtocolTests.cs. Called
+    /// from the response-reading loop in RunOnPersistentProcessAsync,
+    /// gated by _awaitingHandshake so it only ever runs on the first
+    /// non-blank line of a process's life.
+    /// </summary>
+    public static EngineBuildStamp? TryParseHandshakeLine(string line)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (!doc.RootElement.TryGetProperty("ready", out var readyEl) || readyEl.ValueKind != JsonValueKind.True)
+            {
+                return null;
+            }
+
+            string? sha = null;
+            string? builtAt = null;
+            if (doc.RootElement.TryGetProperty("engineBuild", out var buildEl))
+            {
+                if (buildEl.TryGetProperty("sha", out var shaEl)) sha = shaEl.GetString();
+                if (buildEl.TryGetProperty("builtAt", out var builtAtEl)) builtAt = builtAtEl.GetString();
+            }
+
+            return new EngineBuildStamp(sha, builtAt);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

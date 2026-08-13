@@ -1021,25 +1021,35 @@ const SALT_ABBREVIATIONS: Record<string, string> = {
  * field report (2026-08-13): Metoprolol Succinate XL and Metoprolol Succ
  * ER are the SAME dispensed product (owner confirmed; XL is simply
  * PioneerRx/e-script shorthand for the same once-daily extended-release
- * succinate formulation), so this fallback must treat XL/ER/XR/SR/LA/CR
- * as one interchangeable class rather than blocking green on rule 6.
+ * succinate formulation), so this fallback treats XL/ER/XR/SR/LA/CR as
+ * one interchangeable class rather than blocking green on rule 6 --
+ * BUT ONLY when ingredientTokens contains "metoprolol" (see
+ * decomposeDrugNameComponents' gating on this map, applied AFTER the
+ * token loop once ingredientTokens is fully known).
  *
- * Deliberately NOT a change to RELEASE_QUALIFIER_TOKENS/RELEASE_ABBREVS
- * or resolveConceptByName's own release-qualifier narrowing above --
- * that earlier, pre-concept-resolution pathway deliberately keeps SR and
- * XL apart (see RELEASE_QUALIFIER_TOKENS' own doc: Bupropion SR and XL
- * are genuinely different, non-interchangeable products that merely
- * share an openFDA dosage_form). This equivalence class only ever
- * applies inside this fallback, which itself only ever runs as a last
- * resort once concept resolution has already failed on both names --
- * it is not a blanket "XL always equals ER" claim.
+ * Reviewer round 2, BLOCKER 1 (reviewer-reproduced live false green):
+ * this map used to apply UNCONDITIONALLY to every drug name, and the
+ * reviewer reproduced compareDrugs("Bupropion Xl 150 Mg Tablet",
+ * "Bupropion Sr 150 Mg Tablet") going GREEN through it -- Bupropion
+ * SR/XL is the exact previously-fixed live false-green
+ * RELEASE_QUALIFIER_TOKENS' own doc (below) exists to prevent (they are
+ * genuinely different, non-interchangeable products that merely share
+ * an openFDA dosage_form). Metoprolol succinate is the ONE
+ * owner-confirmed interchangeable case; this map must never be applied
+ * more broadly than that single ingredient without a matching owner
+ * report for whatever other ingredient is being added. Deliberately NOT
+ * a change to RELEASE_QUALIFIER_TOKENS/RELEASE_ABBREVS or
+ * resolveConceptByName's own release-qualifier narrowing above -- this
+ * equivalence class only ever applies inside this fallback, which
+ * itself only ever runs as a last resort once concept resolution has
+ * already failed on both names.
  *
  * DR (delayed-release) and IR (immediate-release) are intentionally left
  * OUT of the class -- they describe a genuinely different release
  * profile (delayed onset / no modification at all) than the once/twice-
  * daily extended-release family XL/ER/XR/SR/LA/CR all describe, so a
  * name stating DR or IR still only matches another name stating the
- * exact same bare qualifier (or none at all).
+ * exact same bare qualifier (or none at all), even for metoprolol.
  */
 const RELEASE_EQUIVALENCE_CLASS: Record<string, string> = {
   xl: 'extended-release',
@@ -1198,16 +1208,20 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   const salts = new Set<string>();
   const routes = new Set<string>();
   let form: string | null = null;
-  let release: string | null = null;
+  // Reviewer round 2, BLOCKER 1 fix: kept as the RAW bare release token
+  // (never equivalence-mapped) until AFTER the loop, when ingredientTokens
+  // is fully known -- see the equivalence-gating below `release`'s
+  // definition for why this can't be decided token-by-token during the
+  // loop itself.
+  let rawRelease: string | null = null;
   const ingredientTokens = new Set<string>();
   const ratios: string[] = [];
 
   for (const tok of tokens) {
     if (COMPONENT_RELEASE_TOKENS.has(tok)) {
       // First release token wins, same "keep only one" rule as `form`
-      // below -- folded through RELEASE_EQUIVALENCE_CLASS so XL/ER/XR/
-      // SR/LA/CR all compare equal (DR/IR keep their own bare value).
-      if (release === null) release = RELEASE_EQUIVALENCE_CLASS[tok] ?? tok;
+      // below.
+      if (rawRelease === null) rawRelease = tok;
       continue;
     }
     if (isNumeric(tok) || isUnitWord(tok) || isSlashUnit(tok)) continue;
@@ -1234,6 +1248,34 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
     }
     ingredientTokens.add(tok);
   }
+
+  // Reviewer round 2, BLOCKER 1 (reviewer-reproduced live false green):
+  // RELEASE_EQUIVALENCE_CLASS must NOT apply universally -- reviewer
+  // reproduced compareDrugs("Bupropion Xl 150 Mg Tablet",
+  // "Bupropion Sr 150 Mg Tablet") going GREEN through it, even though
+  // Bupropion SR/XL is the EXACT previously-fixed live false-green
+  // RELEASE_QUALIFIER_TOKENS' own doc (above) exists to prevent — they
+  // are non-interchangeable, clinically distinct products. Metoprolol
+  // succinate is the ONE owner-confirmed case where XL/ER/XR/SR/LA/CR
+  // really are interchangeable (2026-08-13 field report), so the
+  // equivalence class is gated on ingredientTokens containing
+  // "metoprolol" specifically -- everywhere else, release tokens stay
+  // identity-distinct (their own raw bare value), exactly as before this
+  // fallback ever folded them. Decided HERE, after the loop, rather than
+  // inline while classifying `rawRelease` above: ingredientTokens isn't
+  // fully known until every token has been seen, and a release token can
+  // appear before the ingredient word in some free-text order.
+  //
+  // Rule 1 (ingredient-set equality) always runs before rule 6 checks
+  // this `release` value, so by the time two sides' `release` are ever
+  // compared, their ingredientTokens are already known to be IDENTICAL —
+  // one side having "metoprolol" therefore guarantees the other does
+  // too, and gating each side independently on its own ingredientTokens
+  // is safe.
+  const release =
+    rawRelease !== null && ingredientTokens.has('metoprolol')
+      ? (RELEASE_EQUIVALENCE_CLASS[rawRelease] ?? rawRelease)
+      : rawRelease;
 
   return { ingredientTokens, strength, form, salts, routes, release, ratios };
 }
