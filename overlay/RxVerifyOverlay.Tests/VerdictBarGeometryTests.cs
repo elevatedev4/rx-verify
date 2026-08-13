@@ -56,9 +56,9 @@ public class VerdictBarGeometryTests
         // BLOCKER 2 (review): these are WINDOW-relative DIPs (not screen-
         // relative), and BoxLayoutAdjuster.ApplyPadding already reaches 2
         // DIP further left before this class ever sees the rect — a field
-        // at rect.X=4 is well within the 8 DIP total reach
-        // (2 padding + 5 width + 1 gap, round 9 value), so the unclamped
-        // math would go negative (4 - 5 - 1 = -2) and WPF would silently
+        // at rect.X=4 is well within the 7 DIP total reach
+        // (2 padding + 5 width + 0 gap, round 10 value), so the unclamped
+        // math would go negative (4 - 5 - 0 = -1) and WPF would silently
         // clip it.
         var rect = new DipRect(X: 4, Y: 50, Width: 40, Height: 10);
 
@@ -77,7 +77,7 @@ public class VerdictBarGeometryTests
 
         var bar = VerdictBarGeometry.DeriveBarRect(rect);
 
-        Assert.Equal(14, bar.X); // 20 - 5 - 1 = 14, unclamped
+        Assert.Equal(15, bar.X); // 20 - 5 - 0 = 15, unclamped
         Assert.Equal(VerdictBarGeometry.BarWidthDip, bar.Width);
     }
 
@@ -102,7 +102,7 @@ public class VerdictBarGeometryTests
         var bars = VerdictBarGeometry.DeriveMergedBarRects(new[] { rect });
 
         var bar = Assert.Single(bars);
-        Assert.Equal(new DipRect(4, 10, 5, 20), bar); // X: 10 - 5 - 1 = 4
+        Assert.Equal(new DipRect(5, 10, 5, 20), bar); // X: 10 - 5 - 0 = 5
     }
 
     [Fact]
@@ -119,7 +119,7 @@ public class VerdictBarGeometryTests
         var bars = VerdictBarGeometry.DeriveMergedBarRects(new[] { top, bottom });
 
         var bar = Assert.Single(bars);
-        Assert.Equal(4, bar.X); // 10 - 5 - 1 = 4
+        Assert.Equal(5, bar.X); // 10 - 5 - 0 = 5
         Assert.Equal(0, bar.Y);
         Assert.Equal(5, bar.Width);
         Assert.Equal(35, bar.Height); // 0 -> 35, spanning both original rects with no seam
@@ -136,7 +136,7 @@ public class VerdictBarGeometryTests
         var bars = VerdictBarGeometry.DeriveMergedBarRects(new[] { c, a, b });
 
         var bar = Assert.Single(bars);
-        Assert.Equal(new DipRect(4, 0, 5, 30), bar); // X: 10 - 5 - 1 = 4
+        Assert.Equal(new DipRect(5, 0, 5, 30), bar); // X: 10 - 5 - 0 = 5
     }
 
     [Fact]
@@ -148,8 +148,8 @@ public class VerdictBarGeometryTests
         var bars = VerdictBarGeometry.DeriveMergedBarRects(new[] { top, farBelow });
 
         Assert.Equal(2, bars.Count);
-        Assert.Contains(bars, b => b == new DipRect(4, 0, 5, 20)); // X: 10 - 5 - 1 = 4
-        Assert.Contains(bars, b => b == new DipRect(4, 100, 5, 20));
+        Assert.Contains(bars, b => b == new DipRect(5, 0, 5, 20)); // X: 10 - 5 - 0 = 5
+        Assert.Contains(bars, b => b == new DipRect(5, 100, 5, 20));
     }
 
     [Fact]
@@ -163,8 +163,8 @@ public class VerdictBarGeometryTests
         var bars = VerdictBarGeometry.DeriveMergedBarRects(new[] { left, right });
 
         Assert.Equal(2, bars.Count);
-        Assert.Contains(bars, b => b.X == 4); // 10 - 5 - 1 = 4
-        Assert.Contains(bars, b => b.X == 194); // 200 - 5 - 1 = 194
+        Assert.Contains(bars, b => b.X == 5); // 10 - 5 - 0 = 5
+        Assert.Contains(bars, b => b.X == 195); // 200 - 5 - 0 = 195
     }
 
     [Fact]
@@ -189,7 +189,7 @@ public class VerdictBarGeometryTests
 
         var bar = VerdictBarGeometry.DeriveBarRect(rect);
 
-        Assert.Equal(294, bar.X); // 300 - 5 - 1 = 294
+        Assert.Equal(295, bar.X); // 300 - 5 - 0 = 295
         Assert.Equal(400, bar.Y);
         Assert.Equal(VerdictBarGeometry.BarWidthDip, bar.Width);
         Assert.Equal(25, bar.Height);
@@ -204,7 +204,7 @@ public class VerdictBarGeometryTests
         var bars = VerdictBarGeometry.DeriveMergedBarRects(new[] { top, bottom });
 
         var bar = Assert.Single(bars);
-        Assert.Equal(new DipRect(14, 0, 5, 40), bar); // X: 20 - 5 - 1 = 14
+        Assert.Equal(new DipRect(15, 0, 5, 40), bar); // X: 20 - 5 - 0 = 15
     }
 
     [Fact]
