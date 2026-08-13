@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { LocalNdcProvider, compareDrugs, type RxNormProvider } from '../src/drug/index.js';
+import { LocalNdcProvider, compareDrugs, type RxNormProvider, type RxNormEquivalenceProvider } from '../src/drug/index.js';
 import type { LocalConcept, LocalDrugData } from '../src/drug/local-data-format.js';
 
 /**
@@ -257,5 +257,137 @@ describe('trailing-elision tolerance (equivalence layer / resolveConceptByName)'
       provider
     );
     expect(r.status).not.toBe('red');
+  });
+});
+
+/**
+ * Reviewer follow-up (attack review, same field report): tryEquivalenceUpgrade
+ * (src/drug/index.ts) is ANOTHER consumer of provider.getConcept — it calls
+ * it on the entered name to compare against the WRITTEN NDC's honest RxNorm
+ * evidence (see rxNormMatchesLocalConcept in src/drug/rxnorm.ts). Since
+ * resolveConceptByName is now widened with the elision retry above, this
+ * locks in that a local concept the elision retry resolves to, but which
+ * DOESN'T actually match the honest RxNorm evidence for the written
+ * product, is still correctly rejected -- rxNormMatchesLocalConcept's
+ * ingredient/strength comparison is a STRICT string equality (see its own
+ * doc), so a widened-but-wrong local resolution can never slip through as
+ * a green rxnorm_scd_match. The RxNorm side here is the "honest evidence"
+ * (a hand-stubbed RxNormEquivalenceProvider standing in for the real,
+ * NLM-derived RxNormDataProvider) and is deliberately NOT run through any
+ * elision logic of its own -- it's the ground truth this test checks the
+ * widened local resolution against.
+ */
+describe('tryEquivalenceUpgrade: a widened (elision-retried) local concept must still fail honest RxNorm evidence on a genuine mismatch', () => {
+  const CONCEPTS: LocalConcept[] = [
+    // Reachable ONLY via the elision retry ("venlafaxin" -> "venlafaxine"),
+    // and deliberately missing the salt name ("venlafaxine", not
+    // "venlafaxine hydrochloride") -- a plausible, but WRONG, resolution:
+    // this local dataset's own ingredient string doesn't match the real
+    // product's honest ingredient identity.
+    { displayName: 'Venlafaxine ER', ingredient: 'venlafaxine', strength: '37.5mg', doseForm: 'capsule, extended release' }
+  ];
+  const DATA: LocalDrugData = {
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    source: 'synthetic-fixture',
+    concepts: CONCEPTS,
+    ndcIndex: {},
+    nameIndex: { venlafaxine: [0] },
+    formsByIngredient: {}
+  };
+
+  let workDir: string;
+  let provider: LocalNdcProvider;
+
+  beforeAll(() => {
+    workDir = mkdtempSync(path.join(tmpdir(), 'rx-verify-equivalence-fixture-'));
+    const dataPath = path.join(workDir, 'fixture.json.gz');
+    writeFileSync(dataPath, gzipSync(Buffer.from(JSON.stringify(DATA), 'utf8')));
+    provider = new LocalNdcProvider(dataPath);
+  });
+
+  afterAll(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it('confirms the widened resolver DOES resolve the truncated entered name (so this is a real elision-retry consumer, not a vacuous test)', () => {
+    const c = provider.getConcept('Venlafaxin Er 37.5mg Caps');
+    expect(c?.ingredient).toBe('venlafaxine');
+    expect(c?.strength).toBe('37.5mg');
+  });
+
+  it('REGRESSION: honest RxNorm evidence for the written NDC states the full salt name ("venlafaxine hydrochloride") -- the elision-widened local concept\'s bare "venlafaxine" does not match, so this stays yellow, never a false green', () => {
+    const honestRxnormEvidence: RxNormEquivalenceProvider = {
+      getByNdc: (ndc11) =>
+        ndc11 === '00093715601'
+          ? {
+              rxcui: '900002',
+              tty: 'SCD',
+              displayName: 'venlafaxine hydrochloride 37.5 MG Extended Release Oral Capsule',
+              ingredient: 'venlafaxine hydrochloride',
+              strength: '37.5mg',
+              doseForm: 'extended release oral capsule'
+            }
+          : null
+    };
+
+    const r = compareDrugs(
+      { name: 'Some Unresolvable Brand Name 37.5 MG Capsule', ndc: '00093-7156-01' },
+      { name: 'Venlafaxin Er 37.5mg Caps' },
+      provider,
+      { rxnormProvider: honestRxnormEvidence }
+    );
+    expect(r.status).not.toBe('green');
+    expect(r.reasonCode).not.toBe('rxnorm_scd_match');
+    expect(r.status).toBe('yellow');
+  });
+
+  it('REGRESSION: honest RxNorm evidence with the SAME ingredient string but a DIFFERENT strength is also rejected (strict on BOTH fields, not just ingredient)', () => {
+    const honestRxnormEvidenceWrongStrength: RxNormEquivalenceProvider = {
+      getByNdc: (ndc11) =>
+        ndc11 === '00093715601'
+          ? {
+              rxcui: '900003',
+              tty: 'SCD',
+              displayName: 'venlafaxine 75 MG Extended Release Oral Capsule',
+              ingredient: 'venlafaxine',
+              strength: '75mg',
+              doseForm: 'capsule, extended release'
+            }
+          : null
+    };
+
+    const r = compareDrugs(
+      { name: 'Some Unresolvable Brand Name 75 MG Capsule', ndc: '00093-7156-01' },
+      { name: 'Venlafaxin Er 37.5mg Caps' },
+      provider,
+      { rxnormProvider: honestRxnormEvidenceWrongStrength }
+    );
+    expect(r.status).not.toBe('green');
+    expect(r.reasonCode).not.toBe('rxnorm_scd_match');
+  });
+
+  it('sanity (positive control): when the widened local resolution DOES honestly match the RxNorm evidence, it correctly upgrades to green -- proves the strict check isn\'t just always failing closed', () => {
+    const matchingRxnormEvidence: RxNormEquivalenceProvider = {
+      getByNdc: (ndc11) =>
+        ndc11 === '00093715601'
+          ? {
+              rxcui: '900004',
+              tty: 'SCD',
+              displayName: 'venlafaxine 37.5 MG Extended Release Oral Capsule',
+              ingredient: 'venlafaxine',
+              strength: '37.5mg',
+              doseForm: 'capsule, extended release'
+            }
+          : null
+    };
+
+    const r = compareDrugs(
+      { name: 'Some Unresolvable Brand Name 37.5 MG Capsule', ndc: '00093-7156-01' },
+      { name: 'Venlafaxin Er 37.5mg Caps' },
+      provider,
+      { rxnormProvider: matchingRxnormEvidence }
+    );
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('rxnorm_scd_match');
   });
 });

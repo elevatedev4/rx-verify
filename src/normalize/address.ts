@@ -76,9 +76,26 @@ const UNIT_DESIGNATORS = [
  * field report has ever shown a period causing the comma-shaped gluing
  * problem; changing that too, with no report motivating it, would be an
  * unscoped, unreviewed change to this file's existing behavior.
+ *
+ * REVIEW FOLLOW-UP (same day): a comma sandwiched between two DIGITS
+ * ("4,000 Main St", a thousands separator) must not fold to a space
+ * either — "4,000" turning into "4 000" would split one house number
+ * into two street-core tokens and produce the exact same spurious
+ * address_differs class the owner just reported, just from the opposite
+ * direction (gluing words vs splitting a number). A digit,digit comma is
+ * a thousands separator, not a word boundary, so it's removed with NO
+ * space (collapsed back together: "4,000" -> "4000") — this pass runs
+ * BEFORE the general comma-to-space replace below, so only a comma with
+ * a non-digit on at least one side ever reaches that step.
  */
 function foldCase(s: string): string {
-  return s.toLowerCase().replace(/,/g, ' ').replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  return s
+    .toLowerCase()
+    .replace(/(\d),(\d)/g, '$1$2')
+    .replace(/,/g, ' ')
+    .replace(/\./g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**

@@ -878,6 +878,40 @@ describe('compareAddresses -- secondary-unit designators + stray-comma normaliza
     expect(r.status).toBe('green');
   });
 
+  // Attack-review follow-up (same day): a thousands-separator comma
+  // between two DIGITS ("4,000 Main St") must NOT fold to a space --
+  // "4,000" -> "4 000" would split one house number into two street-core
+  // tokens and produce the exact same spurious address_differs class the
+  // owner just reported, just via the opposite mechanism (splitting a
+  // number instead of gluing two words). It's collapsed back together
+  // with NO space instead ("4,000" -> "4000").
+  describe('a comma between two digits (thousands separator) is never treated as a word boundary', () => {
+    it('"4,000 Main St" matches "4000 Main St"', () => {
+      const r = compareAddresses(
+        { street: '4,000 Main St', city: 'Lawrence', state: 'KS', zip: '66047' },
+        { street: '4000 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('"Kansas, City" (digit-free comma) is still fixed the same way it always was', () => {
+      const r = compareAddresses(
+        { street: '4000 Cambridge St', city: 'Kansas, City', state: 'KS', zip: '66160' },
+        { street: '4000 Cambridge St', city: 'Kansas City', state: 'KS', zip: '66160' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('a genuinely different house number still differs even with a thousands-separator comma present', () => {
+      const r = compareAddresses(
+        { street: '4,000 Main St', city: 'Lawrence', state: 'KS', zip: '66047' },
+        { street: '4,002 Main St', city: 'Lawrence', state: 'KS', zip: '66047' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+  });
+
   it('regression: unit-only difference via the pre-existing "Apt"/"Suite" designators is unaffected by the UNIT_DESIGNATORS list growing', () => {
     const r = compareAddresses(
       { street: '123 Main St Apt 4', city: 'Springfield', state: 'IL', zip: '62704' },
