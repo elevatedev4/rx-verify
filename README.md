@@ -266,14 +266,12 @@ npm run build      # emit dist/
 - `LocalNdcProvider` (drug identity) is real, local, offline openFDA
   data, but its generic-equivalence key is an approximation, not real
   RxNorm — see "Generic-equivalence approximation" above. `compareDrugs`
-  can optionally be handed real RxNorm/catalog evidence to upgrade some
-  of those cases to a confirmed green — see "RxNorm and
-  wholesaler-catalog equivalence" above — but that evidence is not
-  wired into `src/cli.ts`/`src/engine/index.ts` yet (this branch is
-  engine-only; wiring it into the live verify path is a small,
-  separate follow-on: construct `RxNormDataProvider`/
-  `CatalogDataProvider` the same way `LocalNdcProvider` already is, and
-  pass them as `compareDrugs`'s 4th argument).
+  is handed real RxNorm/catalog evidence (`RxNormDataProvider` +
+  `CatalogDataProvider`, constructed once at module scope in
+  `src/cli.ts`, gracefully absent if either data file is missing) to
+  upgrade some of those cases to a confirmed green — see "RxNorm and
+  wholesaler-catalog equivalence" above — live in both CLI modes
+  (one-shot and `--serve`).
 - Nickname table covers ~100 common US first-name pairs; it is not
   exhaustive. Unrecognized nicknames fall through to a light
   prefix-based fuzzy check, and failing that, a `red` surname-based

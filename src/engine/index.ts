@@ -19,7 +19,7 @@ import { compareNames } from '../normalize/name.js';
 import { compareDates, compareWrittenOrAvailableDate } from '../normalize/date.js';
 import { compareAddresses } from '../normalize/address.js';
 import { compareSigs, parseSig } from '../sig/index.js';
-import { compareDrugs, type RxNormProvider } from '../drug/index.js';
+import { compareDrugs, type RxNormProvider, type DrugEquivalenceEvidence } from '../drug/index.js';
 import {
   compareQuantity,
   compareRefills,
@@ -122,6 +122,18 @@ export interface VerifyOptions {
    * of a blank field.
    */
   skipDrugLookup?: boolean;
+
+  /**
+   * Optional real-data equivalence evidence (RxNorm + wholesaler
+   * catalog — see DrugEquivalenceEvidence in src/drug/index.ts) passed
+   * straight through to compareDrugs. Absent/undefined reproduces
+   * compareDrugs' pre-evidence behavior exactly (see that function's
+   * own doc) — callers that don't construct RxNormDataProvider/
+   * CatalogDataProvider (e.g. most tests) are completely unaffected.
+   * Ignored entirely when skipDrugLookup is true, same as `provider`
+   * itself, since compareDrugs isn't called at all in that case.
+   */
+  evidence?: DrugEquivalenceEvidence;
 }
 
 /** Reason code the drug field carries while skipDrugLookup defers the real comparison — see VerifyOptions.skipDrugLookup. Callers (the overlay) check for this exact code to know a field is still computing, not actually unverifiable. */
@@ -155,7 +167,7 @@ export function verify(
         reasonCode: PENDING_DRUG_LOOKUP_REASON_CODE,
         explanation: 'Drug identity lookup is still running against the local NDC dataset — this field will update in place.'
       }
-    : compareDrugs(source.drug, entered.drug, provider);
+    : compareDrugs(source.drug, entered.drug, provider, options.evidence);
   const sigResult = compareSigs(source.sig, entered.sig);
   const quantityResult = compareQuantity(
     source.quantity,

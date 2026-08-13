@@ -28,14 +28,25 @@
  * so it's safe for this engine's philosophy even though it's coarser
  * than real RxNorm.
  *
- * TO GET PRECISE RXNORM EQUIVALENCE LATER (owner task, follow-on):
- * implement a provider against the actual NLM RxNorm RRF files
- * (RXNCONSO.RRF / RXNSAT.RRF etc, or the RxNorm REST API — note the
- * REST API would need a build-time-only fetch too, same offline rule
- * as above). That requires a free UTS (UMLS Terminology Services)
- * account — https://uts.nlm.nih.gov/uts/signup-login. Once that
- * provider exists, pass it into `verify()` in place of
- * LocalNdcProvider; no other engine code changes.
+ * PRECISE RXNORM EQUIVALENCE (real RXCUI-backed, DONE — see
+ * DrugEquivalenceEvidence below): compareDrugs takes an OPTIONAL 4th
+ * argument carrying two independent real-data sources that can UPGRADE
+ * one of the above approximation's yellows to a confirmed green — never
+ * override a red, never invent one:
+ *  - RxNormDataProvider (src/drug/rxnorm.ts, data/rxnorm-data.json.gz) —
+ *    built from NLM's free "RxNorm Current Prescribable Content"
+ *    monthly release (scripts/build-rxnorm-data.ts; no UTS/UMLS account
+ *    needed, unlike the full release). rxnorm_scd_match.
+ *  - CatalogDataProvider (src/drug/catalog.ts,
+ *    data/catalog-data.json.gz) — built from the pharmacy's own
+ *    wholesaler catalog (scripts/build-catalog-data.ts; NOT public
+ *    data, internal use only). catalog_gcn_match /
+ *    catalog_gcn_mismatch.
+ * Both are wired into the live verify path in src/cli.ts (constructed
+ * once at module scope, gracefully absent when either data file is
+ * missing) and are entirely optional — omitting `evidence` reproduces
+ * this file's pre-existing behavior exactly. See README.md's "RxNorm
+ * and wholesaler-catalog equivalence" section for the full picture.
  *
  * Verdict philosophy:
  *  - identical NDC = GREEN
