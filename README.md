@@ -394,7 +394,12 @@ What each script does:
   Creates (or overwrites — safe to re-run any time, never duplicates) a
   Desktop shortcut named **"Rx Verify"** that runs `update-and-run.ps1`;
   also clones the repo first if run standalone on a machine that
-  skipped step 1.
+  skipped step 1. It then makes a best-effort attempt to pin that
+  shortcut to the taskbar; Windows has no supported way for a script to
+  guarantee this (Microsoft blocked it starting Windows 10 1903, and
+  Windows 11 is stricter still), so on most current PCs you'll instead
+  see a one-line prompt to right-click the Desktop shortcut and choose
+  "Pin to taskbar" yourself, once.
 
 If the sync in `update-and-run.ps1` ever fails (no network, a
 GitHub-side issue), the script stops immediately and tells you to copy

@@ -56,9 +56,15 @@
          install-shortcut.ps1 from inside the freshly-cloned repo, so a
          fresh PC ends fully set up - not just installed-and-run-once,
          but ready for every future launch to be a single double-click.
-         Non-fatal if this step fails (eg. some COM oddity creating the
-         .lnk): a warning is printed and the script continues, since the
-         app can still be run directly via update-and-run.ps1 below, and
+         install-shortcut.ps1 also makes a best-effort attempt to pin
+         that shortcut to the taskbar there (Windows has no supported
+         API for a script to do this reliably - see that script's header
+         for why - so it either pins successfully on Windows builds that
+         still allow it, or prints a one-line "pin it yourself" fallback;
+         either way it never fails this step). Non-fatal if this whole
+         step fails (eg. some COM oddity creating the .lnk): a warning is
+         printed and the script continues, since the app can still be
+         run directly via update-and-run.ps1 below, and
          install-shortcut.ps1 can always be re-run by hand later.
       6. Hands off to update-and-run.ps1 (pull + build + launch) via
          `powershell -ExecutionPolicy Bypass -File ...`, the same command
@@ -249,6 +255,10 @@ function Invoke-RxVerifyBootstrap {
     # run on every bootstrap, including re-runs on an already-set-up
     # PC. -NoPrompt suppresses its interactive "Press Enter to close"
     # pause, which only makes sense when it's run standalone/by hand.
+    # install-shortcut.ps1 also attempts, best-effort, to pin the
+    # shortcut to the taskbar (see that script's header - Windows has no
+    # reliable scriptable API for this on current builds); that attempt
+    # is itself never fatal, and prints its own success/fallback line.
     # Deliberately non-fatal: a failure here shouldn't block getting the
     # app running for the first time (step 7 below still runs either
     # way), and this can always be re-run later (see README.md).

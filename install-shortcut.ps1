@@ -17,6 +17,16 @@
       2. Creates (or overwrites - safe to re-run any time) a Desktop
          shortcut named "Rx Verify" that runs:
            powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\claude\rx-verify\update-and-run.ps1"
+      3. Makes a best-effort attempt to pin that shortcut to the Windows
+         taskbar. Microsoft removed the supported way to do this from a
+         script (the shell "Pin to taskbar" verb was blocked starting
+         Windows 10 1903, and Windows 11 is stricter still - there is no
+         supported per-app pinning API; it's a genuine user action or
+         MDM/provisioning-only). This never fails the script either way:
+         if the verb exists on this Windows build, it's invoked and you
+         get a one-line "pinned" confirmation; if not (the common case on
+         current Windows 10/11), you get a one-line instruction to
+         right-click the Desktop shortcut and pin it yourself, once.
 
     -ExecutionPolicy Bypass on the shortcut's own invocation only
     affects that one process - it does not change your machine's
@@ -100,6 +110,57 @@ $shortcut.WorkingDirectory = $RepoPath
 $shortcut.IconLocation = $powershellExePath + ',0'
 $shortcut.Description = 'Update and launch Rx Verify'
 $shortcut.Save()
+
+# ---------------------------------------------------------------------
+# Step 3: best-effort pin to taskbar. There is no supported, documented
+# API for an app to pin its own shortcut to the Windows taskbar -
+# Microsoft blocked the shell "Pin to taskbar" verb from programmatic
+# invocation starting with Windows 10 1903, specifically to stop exactly
+# this kind of script from doing it; Windows 11 is stricter still, with
+# pinning treated as a genuine user action (or an MDM/provisioning-time
+# operation, not something a normal install script can reach). What
+# follows is a good-faith attempt using the same Shell.Application COM
+# verb-enumeration approach that still works on some older/edge-case
+# Windows builds where that verb wasn't fully locked down: ask the shell
+# for the shortcut's context-menu verbs and look for one that pins to
+# the taskbar (name match is loose/case-insensitive since wording varies
+# by locale and Windows build - "Pin to tas&kbar", "Pin to taskbar",
+# etc.), invoke it if present. Deliberately NOT a registry/explorer-
+# restart hack - those are fragile and can kill Explorer mid-script;
+# this only ever calls a documented COM verb-invoke method, and the
+# whole thing is wrapped in try/catch so a throw here can never fail
+# the overall shortcut-creation script - worst case, the user is told
+# to pin it by hand once.
+# ---------------------------------------------------------------------
+Write-Step 'Attempting to pin "Rx Verify" to the taskbar...'
+$pinned = $false
+try {
+    $shellApp = New-Object -ComObject Shell.Application
+    $shortcutFolder = $shellApp.Namespace($desktopPath)
+    $shortcutItem = $shortcutFolder.ParseName((Split-Path -Path $shortcutPath -Leaf))
+    if ($null -ne $shortcutItem) {
+        $pinVerb = $null
+        foreach ($verb in $shortcutItem.Verbs()) {
+            $verbName = $verb.Name -replace '&', ''
+            if (($verbName -match '(?i)taskbar') -and ($verbName -notmatch '(?i)unpin')) {
+                $pinVerb = $verb
+                break
+            }
+        }
+        if ($null -ne $pinVerb) {
+            $pinVerb.DoIt()
+            $pinned = $true
+        }
+    }
+} catch {
+    $pinned = $false
+}
+
+if ($pinned) {
+    Write-Step 'Pinned "Rx Verify" to the taskbar.'
+} else {
+    Write-Host "Windows doesn't allow apps to pin for you on this version - right-click the desktop 'Rx Verify' shortcut and choose 'Pin to taskbar' (one time)." -ForegroundColor Yellow
+}
 
 Write-Step "Done. '$shortcutPath' now updates, builds fresh, and launches Rx Verify in one double-click."
 if (-not $NoPrompt) { Read-Host 'Press Enter to close this window' }
