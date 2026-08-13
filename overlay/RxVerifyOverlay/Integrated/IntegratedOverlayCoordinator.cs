@@ -195,10 +195,15 @@ public sealed class IntegratedOverlayCoordinator
     /// <summary>Raised when DisplayMode switched to Integrated — MainWindow.xaml.cs hides itself.</summary>
     public event EventHandler? HideSeparateWindowRequested;
 
-    /// <summary>Raised by either copy-logs button in the control box — MainWindow.xaml.cs handles this identically to its own "Copy logs" button (BuildCurrentLogBlob + clipboard + ButtonFeedback.FlashSuccessAsync on the same Button that was clicked).</summary>
-    public event EventHandler<Button>? CopyLogsRequested;
-
-    /// <summary>Same as CopyLogsRequested, redactPatient: true.</summary>
+    /// <summary>
+    /// Raised by the control box's "Copy (safe)" button — MainWindow.xaml.cs
+    /// handles this identically to its own "Copy logs (no HIPAA)" button
+    /// (BuildCurrentLogBlob(redactPatient: true) + clipboard +
+    /// ButtonFeedback.FlashSuccessAsync on the same Button that was
+    /// clicked). 2026-08-13 (RXVERIFY-TROUBLESHOOT): CopyLogsRequested
+    /// (the PHI-including "Copy" button's event) was removed along with
+    /// the button itself — this is the only copy-logs event now.
+    /// </summary>
     public event EventHandler<Button>? CopyLogsNoHipaaRequested;
 
     /// <summary>
@@ -727,7 +732,6 @@ public sealed class IntegratedOverlayCoordinator
         _controlBox = new ControlBoxWindow();
         _controlBox.MethodChangeRequested += (_, method) => MethodToggleRequested?.Invoke(this, method);
         _controlBox.DisplayModeChangeRequested += (_, mode) => SetDisplayMode(mode);
-        _controlBox.CopyLogsRequested += (_, button) => CopyLogsRequested?.Invoke(this, button);
         _controlBox.CopyLogsNoHipaaRequested += (_, button) => CopyLogsNoHipaaRequested?.Invoke(this, button);
         _controlBox.OpenSeparateWindowRequested += (_, _) => ShowSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.RefreshRequested += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);

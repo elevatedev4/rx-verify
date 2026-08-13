@@ -997,6 +997,71 @@ export const SALT_TOKENS = new Set([
 ]);
 
 /**
+ * Field report (2026-08-13, RXVERIFY-TROUBLESHOOT): source "METOPROLOL
+ * SUCCINATE (XL) 50 MG ORAL TABLET" vs entered "Metoprolol Succ Er 50 Mg
+ * Tab" went yellow unknown_drug -- entered's "Succ" isn't in SALT_TOKENS
+ * (only the spelled-out "succinate" is), so it fell into the generic
+ * ingredient-token bucket below and broke rule 1's ingredient-set
+ * equality against source's {"metoprolol"}. "Succ"/"Tart" are the two
+ * salt abbreviations PioneerRx's free-text entry actually produces for
+ * this engine's field reports and are unambiguous (no other recognized
+ * salt/ingredient/form/route word starts the same way) -- scoped to
+ * exactly these two per the owner's report rather than guessing at a
+ * longer list. A token not in this map is used as-is (falls through to
+ * the ordinary SALT_TOKENS check unchanged).
+ */
+const SALT_ABBREVIATIONS: Record<string, string> = {
+  succ: 'succinate',
+  tart: 'tartrate'
+};
+
+/**
+ * Release-RATE equivalence class for the component-wise name fallback
+ * ONLY (decomposeDrugNameComponents/compareNameComponents below) --
+ * field report (2026-08-13): Metoprolol Succinate XL and Metoprolol Succ
+ * ER are the SAME dispensed product (owner confirmed; XL is simply
+ * PioneerRx/e-script shorthand for the same once-daily extended-release
+ * succinate formulation), so this fallback must treat XL/ER/XR/SR/LA/CR
+ * as one interchangeable class rather than blocking green on rule 6.
+ *
+ * Deliberately NOT a change to RELEASE_QUALIFIER_TOKENS/RELEASE_ABBREVS
+ * or resolveConceptByName's own release-qualifier narrowing above --
+ * that earlier, pre-concept-resolution pathway deliberately keeps SR and
+ * XL apart (see RELEASE_QUALIFIER_TOKENS' own doc: Bupropion SR and XL
+ * are genuinely different, non-interchangeable products that merely
+ * share an openFDA dosage_form). This equivalence class only ever
+ * applies inside this fallback, which itself only ever runs as a last
+ * resort once concept resolution has already failed on both names --
+ * it is not a blanket "XL always equals ER" claim.
+ *
+ * DR (delayed-release) and IR (immediate-release) are intentionally left
+ * OUT of the class -- they describe a genuinely different release
+ * profile (delayed onset / no modification at all) than the once/twice-
+ * daily extended-release family XL/ER/XR/SR/LA/CR all describe, so a
+ * name stating DR or IR still only matches another name stating the
+ * exact same bare qualifier (or none at all).
+ */
+const RELEASE_EQUIVALENCE_CLASS: Record<string, string> = {
+  xl: 'extended-release',
+  er: 'extended-release',
+  xr: 'extended-release',
+  sr: 'extended-release',
+  la: 'extended-release',
+  cr: 'extended-release'
+};
+
+/**
+ * Release-qualifier tokens this fallback recognizes and strips out of the
+ * ingredient-token bucket -- a SUPERSET of RELEASE_QUALIFIER_TOKENS (adds
+ * "xr"/"la", which the earlier pre-concept-resolution pathway never
+ * needed to recognize) since this fallback computes its own `release`
+ * value locally (see decomposeDrugNameComponents) rather than reusing
+ * extractReleaseQualifier's, so it can fold XL/ER/XR/SR/LA/CR down to one
+ * equivalence class -- see RELEASE_EQUIVALENCE_CLASS' doc.
+ */
+const COMPONENT_RELEASE_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl', 'xr', 'la']);
+
+/**
  * Curated route-of-administration tokens for the component-wise
  * name-fallback comparison only. Deliberately a SEPARATE, smaller list
  * from FORM_ROUTE_QUALIFIERS above (that one feeds the pre-concept-
@@ -1084,10 +1149,25 @@ interface DrugNameComponents {
 function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   const concStrength = extractStatedConcentrationStrength(rawName);
   const strength = concStrength ?? extractStatedStrength(rawName);
-  const release = extractReleaseQualifier(rawName);
 
   const normalized = normalizeDrugNameString(rawName);
-  const tokens = normalized.split(' ').filter(Boolean);
+  // Strip stray parentheses off each token BEFORE classification -- field
+  // report (2026-08-13): source names carry a parenthesized release
+  // qualifier, e.g. "METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET".
+  // normalizeDrugNameString doesn't strip parens (other callers rely on
+  // them surviving), so without this the token stayed "(xl)", matched
+  // nothing in COMPONENT_RELEASE_TOKENS, and fell into the generic
+  // ingredient bucket as a literal "(xl)" token -- breaking rule 1's
+  // ingredient-set equality against a source/entered pair that's
+  // otherwise identical. Splitting on whitespace first (so an
+  // independent "(90.0000"-style token isn't affected elsewhere) then
+  // stripping parens per-token is safe here: this bucketing is local to
+  // this fallback only.
+  const tokens = normalized
+    .split(' ')
+    .filter(Boolean)
+    .map((tok) => tok.replace(/[()]/g, ''))
+    .filter(Boolean);
 
   const isNumeric = (tok: string): boolean => /^\d+(\.\d+)?%?$/.test(tok);
   const isUnitWord = (tok: string): boolean => /^(mcg|mg|ml|g|units?|unit)$/.test(tok);
@@ -1118,18 +1198,30 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   const salts = new Set<string>();
   const routes = new Set<string>();
   let form: string | null = null;
+  let release: string | null = null;
   const ingredientTokens = new Set<string>();
   const ratios: string[] = [];
 
   for (const tok of tokens) {
-    if (RELEASE_QUALIFIER_TOKENS.has(tok)) continue;
+    if (COMPONENT_RELEASE_TOKENS.has(tok)) {
+      // First release token wins, same "keep only one" rule as `form`
+      // below -- folded through RELEASE_EQUIVALENCE_CLASS so XL/ER/XR/
+      // SR/LA/CR all compare equal (DR/IR keep their own bare value).
+      if (release === null) release = RELEASE_EQUIVALENCE_CLASS[tok] ?? tok;
+      continue;
+    }
     if (isNumeric(tok) || isUnitWord(tok) || isSlashUnit(tok)) continue;
     if (isRatioToken(tok)) {
       ratios.push(tok);
       continue;
     }
-    if (SALT_TOKENS.has(tok)) {
-      salts.add(tok);
+    // Salt-abbreviation normalization (SALT_ABBREVIATIONS) applied before
+    // the SALT_TOKENS lookup, so "succ"/"tart" resolve to the same
+    // canonical salt as the spelled-out "succinate"/"tartrate" would --
+    // see SALT_ABBREVIATIONS' doc.
+    const saltCandidate = SALT_ABBREVIATIONS[tok] ?? tok;
+    if (SALT_TOKENS.has(saltCandidate)) {
+      salts.add(saltCandidate);
       continue;
     }
     if (COMPONENT_ROUTE_TOKENS.has(tok)) {

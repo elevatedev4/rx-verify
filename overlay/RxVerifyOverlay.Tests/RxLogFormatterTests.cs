@@ -8,10 +8,11 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for RxLogFormatter.BuildLogBlob (Diagnostics/
-/// RxLogFormatter.cs) — the pure formatter behind the "Copy logs" button
-/// (OverlayViewModel.BuildCurrentLogBlob / MainWindow.xaml.cs
-/// OnCopyLogsClick). All values below are synthetic — no real
-/// patient/prescriber data.
+/// RxLogFormatter.cs) — the pure formatter behind the "Copy logs (no
+/// HIPAA)" button (OverlayViewModel.BuildCurrentLogBlob / MainWindow.xaml.cs
+/// OnCopyLogsNoHipaaClick; the plain PHI-including "Copy logs" button was
+/// removed 2026-08-13, see RXVERIFY-TROUBLESHOOT). All values below are
+/// synthetic — no real patient/prescriber data.
 /// </summary>
 public class RxLogFormatterTests
 {

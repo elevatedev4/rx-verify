@@ -583,6 +583,68 @@ describe('component-wise name fallback (unknown_drug branch, concept resolution 
     expect(r.status).not.toBe('green');
   });
 
+  // Field report 2026-08-13 (RXVERIFY-TROUBLESHOOT): live OCR capture of
+  // "METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET" vs entered "Metoprolol
+  // Succ Er 50 Mg Tab" went yellow unknown_drug -- these are the same
+  // drug (owner-confirmed): "Succ" is a salt abbreviation for succinate,
+  // "(XL)"/"Er" are the same once-daily extended-release qualifier for
+  // this formulation, and "(XL)" carries stray parens that previously
+  // survived normalization as a literal ingredient token. See
+  // SALT_ABBREVIATIONS/RELEASE_EQUIVALENCE_CLASS docs in src/drug/index.ts.
+  describe('salt-abbreviation + release-equivalence + parenthesized-token fixes', () => {
+    it('is GREEN name_component_match: "METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET" vs "Metoprolol Succ Er 50 Mg Tab"', () => {
+      const r = compareDrugs(
+        { name: 'METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET' },
+        { name: 'Metoprolol Succ Er 50 Mg Tab' },
+        unresolvedProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    it('is GREEN in the reverse direction too: "Metoprolol Succ Er 50 Mg Tab" vs "METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET"', () => {
+      const r = compareDrugs(
+        { name: 'Metoprolol Succ Er 50 Mg Tab' },
+        { name: 'METOPROLOL SUCCINATE (XL) 50 MG ORAL TABLET' },
+        unresolvedProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    it('is NOT green (yellow, per the IRON RULE) for the abbreviated salt conflict: "Metoprolol Tart 50 Mg Tablet" vs "Metoprolol Succ Er 50 Mg Tablet" (tartrate is the immediate-release version, never interchangeable with succinate)', () => {
+      const r = compareDrugs(
+        { name: 'Metoprolol Tart 50 Mg Tablet' },
+        { name: 'Metoprolol Succ Er 50 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unknown_drug');
+      expect(r.explanation).toContain('tartrate');
+      expect(r.explanation).toContain('succinate');
+    });
+
+    it('release-equivalence class covers XR/SR/LA too, all matching a plain "ER": "Metoprolol Succinate XR 50 Mg Tablet" vs "Metoprolol Succinate ER 50 Mg Tablet"', () => {
+      const r = compareDrugs(
+        { name: 'Metoprolol Succinate XR 50 Mg Tablet' },
+        { name: 'Metoprolol Succinate ER 50 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('name_component_match');
+    });
+
+    it('does NOT fold DR (delayed-release) into the XL/ER/XR/SR/LA/CR equivalence class: "Divalproex DR 250 Mg Tablet" vs "Divalproex ER 250 Mg Tablet" stays non-green', () => {
+      const r = compareDrugs(
+        { name: 'Divalproex DR 250 Mg Tablet' },
+        { name: 'Divalproex ER 250 Mg Tablet' },
+        unresolvedProvider
+      );
+      expect(r.status).not.toBe('green');
+    });
+  });
+
   it('is GREEN for a one-sided route word: "Amoxicillin 500 Mg Oral Capsule" vs "Amoxicillin 500 Mg Capsule"', () => {
     const r = compareDrugs(
       { name: 'Amoxicillin 500 Mg Oral Capsule' },
