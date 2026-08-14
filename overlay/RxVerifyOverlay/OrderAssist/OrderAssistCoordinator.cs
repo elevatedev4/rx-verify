@@ -193,8 +193,7 @@ public sealed class OrderAssistCoordinator
         var scale = DpiScaleFor(target.Value.Handle);
 
         var redBoxesDip = new List<DipRect>();
-        DipRect? greenRowDip = null;
-        string? savingsLabel = null;
+        CatalogHighlights? catalogHighlights = null;
 
         switch (target.Value.Kind)
         {
@@ -206,16 +205,11 @@ public sealed class OrderAssistCoordinator
                 break;
 
             case OrderAssistWindowKind.CatalogSubstitution:
-                var recommendation = CatalogSubstitutionScanner.FindRecommendation(ocrResult.Words);
-                if (recommendation is not null)
-                {
-                    greenRowDip = ToDip(recommendation.Left, recommendation.Top, recommendation.Right, recommendation.Bottom, scale);
-                    savingsLabel = recommendation.SavingsDisplay;
-                }
+                catalogHighlights = ToDip(CatalogSubstitutionScanner.Analyze(ocrResult.Words), scale);
                 break;
         }
 
-        if (redBoxesDip.Count == 0 && greenRowDip is null)
+        if (redBoxesDip.Count == 0 && (catalogHighlights is null || IsEmpty(catalogHighlights)))
         {
             // Nothing to highlight this tick (e.g. no zero quantities, or
             // no substitution meets the 25% bar) — stay hidden rather
@@ -235,7 +229,7 @@ public sealed class OrderAssistCoordinator
         if (!TickGenerationGate.IsStillCurrent(tickGeneration, _generation)) return;
 
         overlay.RepositionPhysical(target.Value.Bounds.X, target.Value.Bounds.Y, target.Value.Bounds.Width, target.Value.Bounds.Height);
-        overlay.SetHighlights(redBoxesDip, greenRowDip, savingsLabel);
+        overlay.SetHighlights(redBoxesDip, catalogHighlights);
         overlay.ForceHitTestTransparent();
         overlay.Show();
 
@@ -270,6 +264,73 @@ public sealed class OrderAssistCoordinator
 
         return DpiRectConverter.ToDipRect(localPhysical, Point.Empty, scale, scale);
     }
+
+    /// <summary>
+    /// Converts every field of one CatalogSubstitutionScanner.CatalogAnnotations
+    /// (plain OCR/capture-region doubles, see RowRect's own doc) into the
+    /// DIP-space CatalogHighlights the overlay window actually draws with
+    /// — same "ToDip everything, once, right before crossing into the
+    /// rendering layer" posture as the red/green conversion above. The
+    /// sort badge's anchor is a zero-height rect (Top used for both Y
+    /// bounds) since only its own top edge and the column's horizontal
+    /// extent matter for placement — see OrderAssistOverlayWindow.AddSortBadge.
+    /// </summary>
+    private static CatalogHighlights ToDip(CatalogSubstitutionScanner.CatalogAnnotations annotations, double scale)
+    {
+        DipRect? greenRowDip = null;
+        string? savingsLabel = null;
+        if (annotations.GreenHighlight is { } green)
+        {
+            greenRowDip = ToDip(green.Left, green.Top, green.Right, green.Bottom, scale);
+            savingsLabel = green.SavingsDisplay;
+        }
+
+        DipRect? yellowRowDip = null;
+        if (annotations.YellowHighlight is { } yellow)
+        {
+            yellowRowDip = ToDip(yellow.Left, yellow.Top, yellow.Right, yellow.Bottom, scale);
+        }
+
+        DipRect? bestLargeDip = null;
+        string? bestLargeLabel = null;
+        if (annotations.BestLargePackageMarker is { } bestLarge)
+        {
+            bestLargeDip = ToDip(bestLarge.Left, bestLarge.Top, bestLarge.Right, bestLarge.Bottom, scale);
+            bestLargeLabel = bestLarge.Label;
+        }
+
+        DipRect? bestSmallDip = null;
+        string? bestSmallLabel = null;
+        if (annotations.BestSmallPackageMarker is { } bestSmall)
+        {
+            bestSmallDip = ToDip(bestSmall.Left, bestSmall.Top, bestSmall.Right, bestSmall.Bottom, scale);
+            bestSmallLabel = bestSmall.Label;
+        }
+
+        DipRect? sortBadgeAnchorDip = null;
+        string? sortBadgeText = null;
+        var sortBadgeIsSorted = false;
+        if (annotations.SortIndicatorBadge is { } badge)
+        {
+            sortBadgeAnchorDip = ToDip(badge.Left, badge.Top, badge.Right, badge.Top, scale);
+            sortBadgeText = badge.Text;
+            sortBadgeIsSorted = badge.IsSorted;
+        }
+
+        return new CatalogHighlights(
+            greenRowDip, savingsLabel,
+            yellowRowDip,
+            bestLargeDip, bestLargeLabel,
+            bestSmallDip, bestSmallLabel,
+            sortBadgeAnchorDip, sortBadgeText, sortBadgeIsSorted);
+    }
+
+    private static bool IsEmpty(CatalogHighlights catalog) =>
+        catalog.GreenRowDip is null &&
+        catalog.YellowRowDip is null &&
+        catalog.BestLargePackageDip is null &&
+        catalog.BestSmallPackageDip is null &&
+        catalog.SortBadgeAnchorDip is null;
 
     private static double DpiScaleFor(IntPtr windowHandle)
     {
