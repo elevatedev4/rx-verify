@@ -99,6 +99,22 @@ public sealed partial class IntegratedBoxesWindow : Window
     // deterministic under exotic window styles" property that already
     // made GetCursorPos's cursor-position check reliable, unlike the
     // WPF-event-dependent alternative. See PollCursorForHover.
+    //
+    // RXVERIFY-TROUBLESHOOT (2026-08, owner live-test follow-up: "hover
+    // is working now but the right click isn't"): the edge-detected
+    // press/release comparison this needs was already correct here (see
+    // HoverStateMachine, now delegating to the extracted RightClickDetector
+    // for its own tests) — what was missing was (1) a dialog-open guard
+    // so a second right-click while ReportErrorWindow is already open
+    // can't stack a second one (_reportDialogOpen/SetDialogOpen below),
+    // and (2) the report dialog itself never explicitly Activate()'d
+    // after Show() — see MainWindow.xaml.cs OpenReportErrorDialog's doc
+    // for why a process whose OWN windows are all WS_EX_NOACTIVATE can
+    // have its one real, activatable window denied real foreground focus
+    // by Windows unless nudged. The hover popup is also force-hidden the
+    // instant a right-click fires (owner ask: its info reappears inside
+    // the report dialog instead) — see HoverStateMachine.Update's
+    // override.
     // ------------------------------------------------------------------
     private const int HoverPollIntervalMs = 60;
 
@@ -129,6 +145,21 @@ public sealed partial class IntegratedBoxesWindow : Window
 
     /// <summary>OverlaySettings.RxVerifyReportKey is non-empty, captured from SetBoxes' own reportingEnabled parameter — read by PollCursorForHover when a right-click transition fires, gating whether ReportErrorRequested is actually raised (see that property's doc).</summary>
     private bool _reportingEnabled;
+
+    /// <summary>
+    /// True while MainWindow's ReportErrorWindow is currently open —
+    /// set/cleared via SetDialogOpen, called from
+    /// IntegratedOverlayCoordinator (itself called from MainWindow around
+    /// the dialog's Show/Closed) — see RightClickDetector's own doc for
+    /// why this is fed into HoverStateMachine as a plain per-tick sample
+    /// field rather than something this class or the state machine
+    /// remembers on its own: a second right-click while the dialog is
+    /// already open must not stack a second one (RXVERIFY-TROUBLESHOOT,
+    /// suspect #2 — "a guard variable left stuck"), and the caller
+    /// resetting this to false the instant the dialog closes is what
+    /// guarantees the guard can never get stuck true.
+    /// </summary>
+    private bool _reportDialogOpen;
 
     private readonly DispatcherTimer _hoverPollTimer;
 
@@ -385,6 +416,16 @@ public sealed partial class IntegratedBoxesWindow : Window
     private HoverPopupWindow EnsurePopupWindow() => _popupWindow ??= new HoverPopupWindow();
 
     /// <summary>
+    /// Call whenever MainWindow's ReportErrorWindow opens or closes — see
+    /// _reportDialogOpen's own doc. IntegratedOverlayCoordinator forwards
+    /// this straight through from MainWindow's own dialog lifetime; there
+    /// is no other bookkeeping here, deliberately, so the guard is always
+    /// exactly as current as the caller's last call (never a separate
+    /// "reset" step to forget).
+    /// </summary>
+    public void SetDialogOpen(bool open) => _reportDialogOpen = open;
+
+    /// <summary>
     /// HOVER/RIGHT-CLICK AFFORDANCE tick — see the class doc's HOVER
     /// section for the full design (both the click-through toggle and the
     /// fix/hover-popup-live redesign). Checks IsVisible FIRST via
@@ -438,7 +479,7 @@ public sealed partial class IntegratedBoxesWindow : Window
         // mouse event, is what drives right-click detection now.
         var isRightButtonDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
 
-        var sample = new HoverPollSample(isOverHotspot, hotspotIndex, isRightButtonDown, TimeSpan.FromMilliseconds(HoverPollIntervalMs));
+        var sample = new HoverPollSample(isOverHotspot, hotspotIndex, isRightButtonDown, _reportDialogOpen, TimeSpan.FromMilliseconds(HoverPollIntervalMs));
         var result = _hoverStateMachine.Update(sample);
 
         switch (result.PopupAction)

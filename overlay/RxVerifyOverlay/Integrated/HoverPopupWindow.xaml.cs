@@ -35,6 +35,57 @@ public sealed partial class HoverPopupWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    // ------------------------------------------------------------------
+    // SCREEN-BOUNDS CLAMPING (owner follow-up, RXVERIFY-TROUBLESHOOT
+    // 2026-08): ShowFor originally positioned the popup at cursor+offset
+    // with no bounds check — hovering a verdict bar near a monitor's
+    // right/bottom edge could push the popup partially or entirely
+    // off-screen. MonitorFromPoint+GetMonitorInfo (below) find whichever
+    // monitor the CURSOR is currently on (MONITOR_DEFAULTTONEAREST —
+    // always resolves to a real monitor even if the cursor point itself
+    // is technically outside every monitor's rect, which can happen for
+    // a brief instant during a fast mouse move); the actual clamp math is
+    // PopupBoundsClamp (pure, unit-tested, no Win32 dependency).
+    // ------------------------------------------------------------------
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(NativePoint pt, uint dwFlags);
+
+    // CharSet.Unicode explicit, same reason as OrderAssistWindowLocator's
+    // GetWindowText P/Invoke: user32.dll exports GetMonitorInfoA/W, not a
+    // literal "GetMonitorInfo" — .NET's own name-mangling only appends
+    // the right suffix when CharSet is explicit (Auto/Unicode both
+    // resolve to "W" on Windows; leaving it unset risks an
+    // EntryPointNotFoundException at runtime instead).
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
+
+    private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int cbSize;
+        public NativeRect rcMonitor;
+        public NativeRect rcWork;
+        public uint dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
     /// <summary>How far (in PHYSICAL pixels) the popup's top-left sits from the cursor position ShowFor was given — offset down-and-right so the popup is never directly under the cursor itself (owner's ask: "positioned near the cursor, never under it").</summary>
     private const int CursorOffsetPhysicalPx = 18;
 
@@ -93,7 +144,31 @@ public sealed partial class HoverPopupWindow : Window
         var physicalWidth = (int)Math.Ceiling(ActualWidth * dpiScaleX);
         var physicalHeight = (int)Math.Ceiling(ActualHeight * dpiScaleY);
 
-        NativeWindowPositioning.Reposition(_hwnd, physicalX, physicalY, physicalWidth, physicalHeight);
+        var proposed = new System.Drawing.Rectangle(physicalX, physicalY, physicalWidth, physicalHeight);
+        var monitorBounds = GetMonitorBoundsFor(cursorPhysical);
+        var clamped = monitorBounds is { } bounds ? PopupBoundsClamp.Clamp(proposed, bounds) : new System.Drawing.Point(physicalX, physicalY);
+
+        NativeWindowPositioning.Reposition(_hwnd, clamped.X, clamped.Y, physicalWidth, physicalHeight);
+    }
+
+    /// <summary>
+    /// The full (not just work-area) rect of whichever monitor
+    /// <paramref name="pointPhysical"/> is on/nearest to, or null on the
+    /// (never expected, but never trusted) failure of either Win32 call —
+    /// callers fall back to the UNCLAMPED position in that case, same
+    /// "never trust a failed read" posture as
+    /// IntegratedOverlayCoordinator.EnumeratePioneerTopLevelWindows'
+    /// GetWindowRect handling.
+    /// </summary>
+    private static System.Drawing.Rectangle? GetMonitorBoundsFor(System.Drawing.Point pointPhysical)
+    {
+        var monitor = MonitorFromPoint(new NativePoint { X = pointPhysical.X, Y = pointPhysical.Y }, MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero) return null;
+
+        var info = new MonitorInfo { cbSize = Marshal.SizeOf<MonitorInfo>() };
+        if (!GetMonitorInfo(monitor, ref info)) return null;
+
+        return System.Drawing.Rectangle.FromLTRB(info.rcMonitor.Left, info.rcMonitor.Top, info.rcMonitor.Right, info.rcMonitor.Bottom);
     }
 
     /// <summary>Hides the popup — safe to call even when it's already hidden (WPF's own Hide() is a no-op in that case), which is how IntegratedBoxesWindow calls this on every early-out path rather than tracking its own "is the popup currently shown" flag.</summary>

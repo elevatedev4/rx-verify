@@ -20,8 +20,8 @@ public class HoverStateMachineTests
 {
     private static readonly TimeSpan TickInterval = TimeSpan.FromMilliseconds(60); // matches IntegratedBoxesWindow.HoverPollIntervalMs
 
-    private static HoverPollSample Sample(bool isOverHotspot, int hotspotIndex, bool rightButtonDown = false, TimeSpan? elapsed = null) =>
-        new(isOverHotspot, hotspotIndex, rightButtonDown, elapsed ?? TickInterval);
+    private static HoverPollSample Sample(bool isOverHotspot, int hotspotIndex, bool rightButtonDown = false, bool dialogOpen = false, TimeSpan? elapsed = null) =>
+        new(isOverHotspot, hotspotIndex, rightButtonDown, dialogOpen, elapsed ?? TickInterval);
 
     [Fact]
     public void NoActionWhileDwellingBelowThreshold()
@@ -173,6 +173,76 @@ public class HoverStateMachineTests
         var result = machine.Update(Sample(isOverHotspot: true, hotspotIndex: 0, rightButtonDown: true)); // still held, now over a hotspot
 
         Assert.False(result.RightClickTriggered);
+    }
+
+    [Fact]
+    public void RightClickForceHidesThePopupEvenWhileItWasAlreadyShowing()
+    {
+        // Owner UX change: right-click hides the hover popup immediately
+        // — its info reappears inside the report dialog instead.
+        var machine = new HoverStateMachine();
+        DwellUntilShown(machine, hotspotIndex: 0);
+
+        var clickResult = machine.Update(Sample(true, 0, rightButtonDown: true));
+
+        Assert.Equal(HoverPopupAction.Hide, clickResult.PopupAction);
+        Assert.True(clickResult.RightClickTriggered);
+    }
+
+    [Fact]
+    public void RightClickForceHidesThePopupEvenBeforeDwellEverShowedIt()
+    {
+        // Right-click doesn't wait out the dwell delay (pre-existing
+        // guarantee) — hiding on click must also be a no-op-safe Hide
+        // even when there was never anything shown yet.
+        var machine = new HoverStateMachine();
+        machine.Update(Sample(true, 0)); // one tick, well below dwell threshold
+
+        var clickResult = machine.Update(Sample(true, 0, rightButtonDown: true));
+
+        Assert.Equal(HoverPopupAction.Hide, clickResult.PopupAction);
+        Assert.True(clickResult.RightClickTriggered);
+    }
+
+    [Fact]
+    public void DialogOpenSuppressesRightClickButDwellStillTracksNormally()
+    {
+        // The dialog-open guard only gates RightClickTriggered — it must
+        // not interfere with unrelated dwell/popup bookkeeping.
+        var machine = new HoverStateMachine();
+
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.Equal(HoverPopupAction.None, machine.Update(Sample(true, 0, dialogOpen: true)).PopupAction);
+        }
+        var showResult = machine.Update(Sample(true, 0, dialogOpen: true));
+        Assert.Equal(HoverPopupAction.Show, showResult.PopupAction);
+
+        var clickResult = machine.Update(Sample(true, 0, rightButtonDown: true, dialogOpen: true));
+        Assert.False(clickResult.RightClickTriggered);
+        // Not a right-click, so the dwell logic's own decision (None —
+        // already shown, nothing changed) stands; only an ACTUAL fired
+        // click forces Hide.
+        Assert.Equal(HoverPopupAction.None, clickResult.PopupAction);
+    }
+
+    [Fact]
+    public void StuckGuardRegression_RightClickFiresAgainOnceDialogOpenGoesFalse()
+    {
+        var machine = new HoverStateMachine();
+        DwellUntilShown(machine, hotspotIndex: 0);
+
+        // Press while a dialog is (incorrectly, in this hypothetical)
+        // still marked open — suppressed.
+        machine.Update(Sample(true, 0, rightButtonDown: true, dialogOpen: true));
+        // Release, dialog closes.
+        machine.Update(Sample(true, 0, rightButtonDown: false, dialogOpen: false));
+
+        // A genuinely fresh press now fires normally — the guard never
+        // got stuck.
+        var result = machine.Update(Sample(true, 0, rightButtonDown: true, dialogOpen: false));
+        Assert.True(result.RightClickTriggered);
+        Assert.Equal(HoverPopupAction.Hide, result.PopupAction);
     }
 
     [Fact]

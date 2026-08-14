@@ -782,6 +782,20 @@ public sealed class IntegratedOverlayCoordinator
         return _boxesWindow;
     }
 
+    /// <summary>
+    /// RXVERIFY-TROUBLESHOOT (2026-08): forwards MainWindow's
+    /// ReportErrorWindow open/close lifetime down to the boxes window's
+    /// poll — see IntegratedBoxesWindow.SetDialogOpen's own doc for why
+    /// this guards against stacking a second dialog on a second
+    /// right-click. A no-op if the boxes window was never even created
+    /// (nothing has ever been hovered/right-clicked yet, so there's
+    /// nothing to guard) — deliberately does NOT call EnsureBoxesWindow
+    /// itself; MainWindow always calls this around a dialog that only
+    /// ever got opened BECAUSE the boxes window's own poll already fired
+    /// ReportErrorRequested, so it's guaranteed to already exist by then.
+    /// </summary>
+    public void SetReportDialogOpen(bool open) => _boxesWindow?.SetDialogOpen(open);
+
     private void UpdateControlBox(IntPtr windowHandle, Rectangle bounds, bool isMaximized)
     {
         var box = EnsureControlBox();

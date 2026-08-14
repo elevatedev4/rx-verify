@@ -87,6 +87,26 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // becomes Integrated), same as _viewModel.
     private readonly IntegratedOverlayCoordinator _integratedOverlay;
 
+    /// <summary>
+    /// RXVERIFY-TROUBLESHOOT (2026-08): true while a ReportErrorWindow is
+    /// currently open — see OpenReportErrorDialog's own doc. Guards
+    /// against a second right-click stacking a second dialog (the boxes
+    /// window's own hover-poll DispatcherTimer keeps ticking even while
+    /// ShowDialog is blocking this thread — WPF's modal loop still pumps
+    /// OTHER dispatcher timers — so without this a fast second right-click
+    /// on the same or a different verdict bar could otherwise open a
+    /// second dialog on top of the first). Mirrored down to the boxes
+    /// window's poll via _integratedOverlay.SetReportDialogOpen so the
+    /// guard is checked at the source (RightClickDetector), not just
+    /// here — this field is ALSO checked directly as a belt-and-suspenders
+    /// early-out in case ReportErrorRequested somehow fires twice before
+    /// the mirrored flag is read on the boxes window's own next poll tick.
+    /// Always reset in the dialog's Closed handler (never left set after
+    /// the dialog that set it is gone) — see the "stuck guard" failure
+    /// mode this closes.
+    /// </summary>
+    private bool _reportDialogOpen;
+
     // ORDER ASSIST (overlay/RxVerifyOverlay/OrderAssist/OrderAssistCoordinator.cs)
     // — a separate, independently-toggled module (own timer, own window
     // detection, own OCR pass, own highlight window; see that class's own
@@ -662,20 +682,69 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// (0,0). ShowDialog (not Show) so the pharmacist finishes or cancels
     /// this one report before doing anything else with it — it's a short,
     /// single-purpose form, not a panel meant to stay open alongside work.
+    ///
+    /// RXVERIFY-TROUBLESHOOT (2026-08, owner: "right click isn't working"):
+    /// two fixes layered on top of the pre-existing behavior above.
+    ///
+    /// (1) DIALOG-OPEN GUARD (suspect #2 — stacking): _reportDialogOpen is
+    /// checked FIRST and is a plain no-op early return, not an exception —
+    /// a second right-click landing before this dialog closes must be
+    /// silently ignored, not surfaced as an error. Set true before Show,
+    /// mirrored down to the boxes window's poll (SetReportDialogOpen) so
+    /// RightClickDetector itself won't even raise ReportErrorRequested
+    /// again, and reset to false — both here AND on the mirrored flag — in
+    /// Closed, wrapped so a failure tearing down the mirror can never
+    /// leave this LOCAL flag stuck true (the two are intentionally
+    /// independent fail-safes).
+    ///
+    /// (2) FOREGROUND ACTIVATION (suspect #0 — opening behind PioneerRx):
+    /// every OTHER window this app owns (boxes/control-box/hover-popup) is
+    /// WS_EX_NOACTIVATE, so this process has likely never held real
+    /// Windows foreground/input focus by the time this, its one genuinely
+    /// activatable window, needs to claim it — Windows' anti-focus-stealing
+    /// heuristics can silently deny a background process's implicit
+    /// activation, leaving the dialog technically open but never actually
+    /// brought in front of Pioneer (ReportErrorWindow.xaml's Topmost="True"
+    /// keeps it in the topmost Z-band regardless, but topmost Z-order and
+    /// actual keyboard focus/foreground promotion are different things).
+    /// ContentRendered (guaranteed to fire once the window has actually
+    /// been shown, whether via Show or the ShowDialog call below) calls
+    /// Activate() and pulses Topmost off/on once more — a small,
+    /// well-documented nudge that forces Windows to re-evaluate this
+    /// window's foreground/Z-order state immediately rather than trusting
+    /// whatever WPF's own internal Show()/Activate() plumbing decided.
     /// </summary>
     private void OpenReportErrorDialog(VerdictFieldInfo field)
     {
+        if (_reportDialogOpen) return; // already open — see doc above
+
         var engineBuild = string.IsNullOrEmpty(_engineClient.EngineBuildSha) && string.IsNullOrEmpty(_engineClient.EngineBuildBuiltAt)
             ? null
             : $"{_engineClient.EngineBuildSha ?? "unknown"} {_engineClient.EngineBuildBuiltAt ?? "unknown"}";
 
+        _reportDialogOpen = true;
+        _integratedOverlay.SetReportDialogOpen(true);
+
         try
         {
             var dialog = new ReportErrorWindow(field, engineBuild, AppDiagnostics.GetCommitSha(), _settings);
+            dialog.ContentRendered += (_, _) =>
+            {
+                dialog.Activate();
+                dialog.Topmost = false;
+                dialog.Topmost = true;
+            };
+            dialog.Closed += (_, _) =>
+            {
+                _reportDialogOpen = false;
+                _integratedOverlay.SetReportDialogOpen(false);
+            };
             dialog.ShowDialog();
         }
         catch (Exception ex)
         {
+            _reportDialogOpen = false;
+            _integratedOverlay.SetReportDialogOpen(false);
             MessageBox.Show(this, $"Couldn't open the report dialog: {ex.Message}", "Rx Verify",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }

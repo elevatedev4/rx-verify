@@ -11,8 +11,9 @@ namespace RxVerifyOverlay.Integrated;
 /// <param name="IsOverHotspot">True when the cursor is currently inside ANY hotspot (CursorHitTest.FindContainingRectIndex &gt;= 0).</param>
 /// <param name="HotspotIndex">-1 when !IsOverHotspot; otherwise the index of whichever hotspot the cursor is over, into the same list IntegratedBoxesWindow keeps _hotspotFields aligned with. Used ONLY to detect "moved to a DIFFERENT hotspot without ever leaving" — see the class doc.</param>
 /// <param name="IsRightButtonDown">Live right mouse button state (GetAsyncKeyState(VK_RBUTTON)), sampled fresh every tick regardless of which window has focus/activation — this is what makes right-click detection independent of whether real mouse messages are reaching this exotic-styled window at all.</param>
+/// <param name="IsDialogOpen">True while a Report-error dialog is already open — see RightClickDetector's own doc for why this is a plain per-tick parameter (never internal state this machine or RightClickDetector remembers), so the guard against stacking a second dialog can never get stuck true after the dialog that set it closes.</param>
 /// <param name="ElapsedSinceLastSample">Wall-clock time since the previous Update call. IntegratedBoxesWindow passes the poll timer's own configured Interval rather than measuring an actual clock delta — see that class's doc for why a fixed per-tick value is deterministic and good enough for a 250ms dwell threshold.</param>
-public readonly record struct HoverPollSample(bool IsOverHotspot, int HotspotIndex, bool IsRightButtonDown, TimeSpan ElapsedSinceLastSample);
+public readonly record struct HoverPollSample(bool IsOverHotspot, int HotspotIndex, bool IsRightButtonDown, bool IsDialogOpen, TimeSpan ElapsedSinceLastSample);
 
 /// <summary>What IntegratedBoxesWindow should do to its custom popup window this tick, per HoverStateMachine.Update's return.</summary>
 public enum HoverPopupAction
@@ -55,14 +56,23 @@ public readonly record struct HoverPollResult(HoverPopupAction PopupAction, bool
 /// cursor merely passing over several bars on its way somewhere else
 /// never flashes a popup for each one it crosses.
 ///
-/// RIGHT-CLICK: a transition (button was up last sample, is down this
-/// sample) while CURRENTLY over a hotspot fires exactly once per press —
-/// never repeatedly while the button stays held, and never for a press
-/// that started or is currently sitting off every hotspot.
+/// RIGHT-CLICK: delegated entirely to RightClickDetector (extracted out
+/// of this class, RXVERIFY-TROUBLESHOOT 2026-08 — see that class's own
+/// doc for the full edge-detection/dialog-guard design). A transition
+/// (button was up last sample, is down this sample) while CURRENTLY over
+/// a hotspot AND no report dialog is already open fires exactly once per
+/// press — never repeatedly while the button stays held, never for a
+/// press that started or is currently sitting off every hotspot, and
+/// never while IsDialogOpen is true. Firing ALSO force-hides the popup on
+/// that same tick (owner ask: "hide the hover so its info shows in the
+/// report dialog instead") regardless of what the dwell logic below would
+/// otherwise have returned — see the override at the end of Update.
 ///
 /// No Win32/WPF dependency at all — directly unit-testable without any
 /// live window; see RxVerifyOverlay.Tests/HoverStateMachineTests.cs for
-/// coverage of every enter/dwell/leave/switch/right-click transition.
+/// coverage of every enter/dwell/leave/switch/right-click transition, and
+/// RxVerifyOverlay.Tests/RightClickDetectorTests.cs for the gesture
+/// itself in isolation.
 /// NOT thread-safe and not meant to be — IntegratedBoxesWindow owns
 /// exactly one instance, updated only from its own DispatcherTimer tick
 /// (always the UI thread).
@@ -74,7 +84,7 @@ public sealed class HoverStateMachine
     private int _dwellHotspotIndex = -1;
     private TimeSpan _dwellElapsed = TimeSpan.Zero;
     private bool _popupShownForCurrentDwell;
-    private bool _previousRightButtonDown;
+    private readonly RightClickDetector _rightClickDetector = new();
 
     public HoverPollResult Update(HoverPollSample sample)
     {
@@ -83,17 +93,17 @@ public sealed class HoverStateMachine
         // whether the popup happens to be showing yet (a pharmacist
         // shouldn't have to wait out the dwell delay before right-click
         // works).
-        var rightClickTriggered = sample.IsOverHotspot && sample.IsRightButtonDown && !_previousRightButtonDown;
-        _previousRightButtonDown = sample.IsRightButtonDown;
+        var rightClickTriggered = _rightClickDetector.Update(sample.IsRightButtonDown, sample.IsOverHotspot, sample.IsDialogOpen);
+
+        HoverPollResult result;
 
         if (!sample.IsOverHotspot)
         {
             var wasShowing = _popupShownForCurrentDwell;
             ResetDwell();
-            return new HoverPollResult(wasShowing ? HoverPopupAction.Hide : HoverPopupAction.None, rightClickTriggered);
+            result = new HoverPollResult(wasShowing ? HoverPopupAction.Hide : HoverPopupAction.None, rightClickTriggered);
         }
-
-        if (sample.HotspotIndex != _dwellHotspotIndex)
+        else if (sample.HotspotIndex != _dwellHotspotIndex)
         {
             // Either a fresh hover (was hovering nothing) or a direct
             // switch to a DIFFERENT hotspot without leaving in between —
@@ -105,18 +115,36 @@ public sealed class HoverStateMachine
             _dwellHotspotIndex = sample.HotspotIndex;
             _dwellElapsed = TimeSpan.Zero;
             _popupShownForCurrentDwell = false;
-            return new HoverPollResult(wasShowing ? HoverPopupAction.Hide : HoverPopupAction.None, rightClickTriggered);
+            result = new HoverPollResult(wasShowing ? HoverPopupAction.Hide : HoverPopupAction.None, rightClickTriggered);
         }
-
-        _dwellElapsed += sample.ElapsedSinceLastSample;
-
-        if (!_popupShownForCurrentDwell && _dwellElapsed >= DwellThreshold)
+        else
         {
-            _popupShownForCurrentDwell = true;
-            return new HoverPollResult(HoverPopupAction.Show, rightClickTriggered);
+            _dwellElapsed += sample.ElapsedSinceLastSample;
+
+            if (!_popupShownForCurrentDwell && _dwellElapsed >= DwellThreshold)
+            {
+                _popupShownForCurrentDwell = true;
+                result = new HoverPollResult(HoverPopupAction.Show, rightClickTriggered);
+            }
+            else
+            {
+                result = new HoverPollResult(HoverPopupAction.None, rightClickTriggered);
+            }
         }
 
-        return new HoverPollResult(HoverPopupAction.None, rightClickTriggered);
+        // OWNER UX CHANGE: a right-click always hides the popup
+        // immediately — its info is about to reappear inside the report
+        // dialog instead — regardless of whatever the dwell logic above
+        // decided for this same tick (which, in practice, is never Show:
+        // RightClickDetector can only fire while IsOverHotspot is true,
+        // and dwell needs several MORE ticks after a hotspot is entered
+        // before Show is even eligible).
+        if (rightClickTriggered)
+        {
+            result = result with { PopupAction = HoverPopupAction.Hide };
+        }
+
+        return result;
     }
 
     /// <summary>
