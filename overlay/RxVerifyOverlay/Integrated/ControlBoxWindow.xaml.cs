@@ -79,8 +79,18 @@ public sealed partial class ControlBoxWindow : Window
     private bool _suppressToggleHandlers;
     private bool _suppressHideOverlayHandler;
 
-    /// <summary>Same suppression pattern as _suppressHideOverlayHandler, for the Order Assist checkbox — see SetOrderAssistState.</summary>
+    /// <summary>Same suppression pattern as _suppressHideOverlayHandler, for the Mode dropdown — see SetOrderAssistState.</summary>
     private bool _suppressOrderAssistHandler;
+
+    /// <summary>
+    /// Mirrors OverlaySettings.OrderAssistEnabled — set by SetOrderAssistState,
+    /// read by SetMaximizedGuardState. Needed there because the
+    /// "maximize PioneerRx to use integrated view" note is sized/laid out
+    /// for the FULL Verify-mode box; showing it over the tiny Order-mode
+    /// CompactOrderPanel would visually break that small box, and Order
+    /// mode has no toggles for it to grey out anyway.
+    /// </summary>
+    private bool _isOrderModeActive;
 
     private IntPtr _hwnd = IntPtr.Zero;
 
@@ -106,9 +116,13 @@ public sealed partial class ControlBoxWindow : Window
     public event EventHandler<bool>? HideOverlayToggleRequested;
 
     /// <summary>
-    /// Raised with the NEW checked state whenever the "Order Assist"
-    /// checkbox is clicked directly by the pharmacist (never for a
+    /// Raised with the NEW mode state (true = Order, false = Verify)
+    /// whenever the pharmacist picks a DIFFERENT item in either Mode
+    /// dropdown (ModeComboBoxNormal or ModeComboBoxCompact — never for a
     /// programmatic SetOrderAssistState sync — see _suppressOrderAssistHandler).
+    /// Kept as a plain bool (not a new Mode enum) — same event name and
+    /// shape as the checkbox this replaced — so IntegratedOverlayCoordinator/
+    /// MainWindow.xaml.cs's existing wiring needs no changes:
     /// IntegratedOverlayCoordinator only relays this as a plain bool (see
     /// its own OrderAssistToggleRequested doc) — it never references any
     /// OrderAssist.* type itself, keeping this window's only coupling to
@@ -225,18 +239,46 @@ public sealed partial class ControlBoxWindow : Window
         StatusTimeText.Text = statusText;
     }
 
-    /// <summary>Reflects OverlaySettings.OrderAssistEnabled in the checkbox without re-raising OrderAssistToggleRequested — called whenever IntegratedOverlayCoordinator.SyncToggles runs, same pattern as SetToggleState above.</summary>
+    /// <summary>
+    /// Reflects OverlaySettings.OrderAssistEnabled in BOTH Mode dropdowns
+    /// without re-raising OrderAssistToggleRequested — called whenever
+    /// IntegratedOverlayCoordinator.SyncToggles runs, same pattern as
+    /// SetToggleState above. ALSO owns the owner's spec "activating Order
+    /// mode ... should change the layout of the box": swaps which panel
+    /// is the box's entire visible content — NormalPanel (full Verify-mode
+    /// layout) when disabled, CompactOrderPanel (just the Mode dropdown)
+    /// when enabled — and hides CloseButton in Order mode (no room in the
+    /// tiny compact box; switch back to Verify mode, or Pioneer's own
+    /// close, to quit). IntegratedOverlayCoordinator.UpdateControlBox is
+    /// what actually resizes/repositions the WINDOW itself to match (see
+    /// its OrderModeControlBox*Dip constants) — this method only owns the
+    /// box's OWN content.
+    /// </summary>
     public void SetOrderAssistState(bool enabled)
     {
         _suppressOrderAssistHandler = true;
         try
         {
-            OrderAssistCheckBox.IsChecked = enabled;
+            ModeComboBoxNormal.SelectedIndex = enabled ? 1 : 0;
+            ModeComboBoxCompact.SelectedIndex = enabled ? 1 : 0;
         }
         finally
         {
             _suppressOrderAssistHandler = false;
         }
+
+        _isOrderModeActive = enabled;
+        NormalPanel.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
+        CompactOrderPanel.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
+        CloseButton.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
+
+        // The maximized-guard note is sized/laid out for the FULL
+        // Verify-mode box and has nothing to grey out in Order mode
+        // anyway (CompactOrderPanel has no Method/Display toggles) — see
+        // SetMaximizedGuardState, which now also checks _isOrderModeActive
+        // directly; this call just makes sure a note left showing from
+        // BEFORE Order mode was chosen doesn't linger over the tiny box.
+        if (enabled) MaximizeNoteBorder.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -244,11 +286,13 @@ public sealed partial class ControlBoxWindow : Window
     /// maximized, show the "maximize to use integrated view" note and
     /// grey every toggle except the one that switches back to Separate —
     /// the pharmacist must always be able to escape back to the classic
-    /// window without maximizing first.
+    /// window without maximizing first. Suppressed entirely while Order
+    /// mode is active (see _isOrderModeActive's doc) — the tiny
+    /// CompactOrderPanel has no room for this note and no toggles to grey.
     /// </summary>
     public void SetMaximizedGuardState(bool isMaximized)
     {
-        MaximizeNoteBorder.Visibility = isMaximized ? Visibility.Collapsed : Visibility.Visible;
+        MaximizeNoteBorder.Visibility = (!isMaximized && !_isOrderModeActive) ? Visibility.Visible : Visibility.Collapsed;
         MethodOcrRadioButton.IsEnabled = isMaximized;
         MethodUiaRadioButton.IsEnabled = isMaximized;
         DisplayIntegratedRadioButton.IsEnabled = isMaximized;
@@ -286,10 +330,20 @@ public sealed partial class ControlBoxWindow : Window
     /// <summary>Item 8: the corner X button — see CloseApplicationRequested's doc.</summary>
     private void OnCloseClick(object sender, RoutedEventArgs e) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
 
-    /// <summary>A REAL pharmacist click on the Order Assist checkbox (not SetOrderAssistState's programmatic sync — see _suppressOrderAssistHandler).</summary>
-    private void OnOrderAssistToggled(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// A REAL pharmacist selection change on EITHER Mode dropdown (not
+    /// SetOrderAssistState's programmatic sync — see
+    /// _suppressOrderAssistHandler) — both ModeComboBoxNormal (Verify-mode
+    /// row) and ModeComboBoxCompact (Order-mode's only content) wire to
+    /// this SAME handler in XAML, since exactly one of the two is ever
+    /// visible/interactive at a time (see SetOrderAssistState's panel
+    /// swap) and both mean the same thing: index 0 = Mode: Verify, index
+    /// 1 = Mode: Order.
+    /// </summary>
+    private void OnModeComboBoxChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressOrderAssistHandler) return;
-        OrderAssistToggleRequested?.Invoke(this, OrderAssistCheckBox.IsChecked == true);
+        var isOrderMode = ((ComboBox)sender).SelectedIndex == 1;
+        OrderAssistToggleRequested?.Invoke(this, isOrderMode);
     }
 }
