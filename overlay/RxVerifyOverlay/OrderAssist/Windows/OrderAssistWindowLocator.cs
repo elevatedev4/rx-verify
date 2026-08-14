@@ -144,7 +144,7 @@ public static class OrderAssistWindowLocator
             var hasRect = GetWindowRect(hwnd, out var rect);
             var bounds = hasRect ? Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom) : Rectangle.Empty;
 
-            candidates.Add(new OrderAssistWindowSelectionRule.Candidate(hwnd, kind, IsVisible: true, isMinimized, bounds));
+            candidates.Add(new OrderAssistWindowSelectionRule.Candidate(hwnd, kind, IsVisible: true, IsMinimized: isMinimized, Bounds: bounds));
 
             return true; // keep enumerating -- need every candidate, not just the first
         }, IntPtr.Zero);

@@ -24,7 +24,7 @@ public class OrderAssistWindowSelectionRuleTests
     {
         // Common case, unchanged from the old foreground-only behavior:
         // the "Create Recommended Orders" window itself is foreground.
-        var createOrders = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, SaneBounds);
+        var createOrders = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { createOrders }, foregroundHandle: HandleA);
 
@@ -40,8 +40,8 @@ public class OrderAssistWindowSelectionRuleTests
         // is the current foreground window. Candidates are supplied in
         // EnumWindows' own Z order (topmost first) -- the dialog, being
         // on top, must win.
-        var catalogSubstitutionOnTop = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, SaneBounds);
-        var createOrdersBehindIt = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, SaneBounds);
+        var catalogSubstitutionOnTop = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
+        var createOrdersBehindIt = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { catalogSubstitutionOnTop, createOrdersBehindIt }, foregroundHandle: IntPtr.Zero);
 
@@ -56,7 +56,7 @@ public class OrderAssistWindowSelectionRuleTests
         // Pioneer's own main window, or an entirely different app) -- the
         // fast path must not block the fallback to whatever eligible
         // target IS visible.
-        var target = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, SaneBounds);
+        var target = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
         var foregroundHandleThatIsNotACandidateAtAll = new IntPtr(999);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { target }, foregroundHandleThatIsNotACandidateAtAll);
@@ -67,7 +67,7 @@ public class OrderAssistWindowSelectionRuleTests
     [Fact]
     public void NoneKindCandidatesAreNeverEligibleEvenAsForeground()
     {
-        var notATargetScreen = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.None, IsVisible: true, IsMinimized: false, SaneBounds);
+        var notATargetScreen = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.None, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { notATargetScreen }, foregroundHandle: HandleA);
 
@@ -77,8 +77,8 @@ public class OrderAssistWindowSelectionRuleTests
     [Fact]
     public void SkipsMinimizedCandidates()
     {
-        var minimized = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: true, SaneBounds);
-        var visible = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, SaneBounds);
+        var minimized = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: true, Bounds: SaneBounds);
+        var visible = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { minimized, visible }, foregroundHandle: IntPtr.Zero);
 
@@ -88,8 +88,8 @@ public class OrderAssistWindowSelectionRuleTests
     [Fact]
     public void SkipsInvisibleCandidates()
     {
-        var invisible = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: false, IsMinimized: false, SaneBounds);
-        var visible = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, SaneBounds);
+        var invisible = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: false, IsMinimized: false, Bounds: SaneBounds);
+        var visible = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { invisible, visible }, foregroundHandle: IntPtr.Zero);
 
@@ -99,8 +99,8 @@ public class OrderAssistWindowSelectionRuleTests
     [Fact]
     public void SkipsCandidatesWithADegenerateRect()
     {
-        var degenerate = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, new Rectangle(0, 0, 0, 0));
-        var normal = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, SaneBounds);
+        var degenerate = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.CreateRecommendedOrders, IsVisible: true, IsMinimized: false, Bounds: new Rectangle(0, 0, 0, 0));
+        var normal = new OrderAssistWindowSelectionRule.Candidate(HandleB, OrderAssistWindowKind.CatalogSubstitution, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { degenerate, normal }, foregroundHandle: IntPtr.Zero);
 
@@ -123,7 +123,7 @@ public class OrderAssistWindowSelectionRuleTests
         // normally never even be built for it -- OrderAssistWindowLocator
         // only builds Candidates for windows it bothered to classify --
         // but Kind.None here stands in for "classified, didn't match").
-        var mainPioneerWindow = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.None, IsVisible: true, IsMinimized: false, SaneBounds);
+        var mainPioneerWindow = new OrderAssistWindowSelectionRule.Candidate(HandleA, OrderAssistWindowKind.None, IsVisible: true, IsMinimized: false, Bounds: SaneBounds);
 
         var chosen = OrderAssistWindowSelectionRule.Choose(new[] { mainPioneerWindow }, foregroundHandle: IntPtr.Zero);
 
