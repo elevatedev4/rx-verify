@@ -7,7 +7,7 @@ namespace RxVerifyOverlay.OrderAssist.Decisions;
 /// <summary>Which package-size bucket a Catalog Item Substitution row's Shipping Size cell falls into — see PackageClassifier.Classify.</summary>
 public enum PackageClass
 {
-    /// <summary>Package quantity failed to parse (blank/OCR noise/unexpected format) — NEVER treated as either bucket, per the owner's fail-closed posture: an unreadable size can't be trusted to pick a badge.</summary>
+    /// <summary>Package quantity failed to parse (blank/OCR noise/unexpected format) OR parsed to zero/negative — NEVER treated as either bucket, per the owner's fail-closed posture: an unreadable size can't be trusted to pick a badge, and a package quantity can never actually be &lt;= 0, so a garbled reading like "-500.0000" is exactly as untrustworthy as no reading at all (REVIEW FIX, non-blocking finding #3).</summary>
     Unknown,
     Large,
     Small
@@ -32,9 +32,10 @@ public static class PackageClassifier
     /// <summary>Each pick is null when that bucket has no row with BOTH a readable package quantity and a readable cost -- includes "no row of that class exists at all" (the owner's "if all rows are one class, only that class's best shows" case falls out of this naturally).</summary>
     public sealed record PackageClassPicks(int? BestLargeRowIndex, int? BestSmallRowIndex);
 
+    /// <summary>A quantity &lt;= 0 classifies Unknown, not Small -- see the enum's own doc (REVIEW FIX, non-blocking finding #3).</summary>
     public static PackageClass Classify(decimal? packageQuantity)
     {
-        if (packageQuantity is null) return PackageClass.Unknown;
+        if (packageQuantity is null || packageQuantity.Value <= 0m) return PackageClass.Unknown;
         return packageQuantity.Value >= LargePackageThreshold ? PackageClass.Large : PackageClass.Small;
     }
 

@@ -18,7 +18,6 @@ public class PackageClassifierTests
     [InlineData(500.0001, PackageClass.Large)]
     [InlineData(30, PackageClass.Small)]
     [InlineData(1000, PackageClass.Large)]
-    [InlineData(0, PackageClass.Small)]
     public void ClassifiesAgainstTheFiveHundredThreshold(double quantity, PackageClass expected)
     {
         Assert.Equal(expected, PackageClassifier.Classify((decimal)quantity));
@@ -28,6 +27,18 @@ public class PackageClassifierTests
     public void NullQuantityClassifiesAsUnknownNeverAsEitherBucket()
     {
         Assert.Equal(PackageClass.Unknown, PackageClassifier.Classify(null));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-500)]
+    public void ZeroOrNegativeQuantityClassifiesAsUnknownNeverSmall(double quantity)
+    {
+        // A garbled OCR read like "-500.0000" must never fall through to
+        // Small just because it's < 500 -- a package quantity can never
+        // actually be <= 0.
+        Assert.Equal(PackageClass.Unknown, PackageClassifier.Classify((decimal)quantity));
     }
 
     [Fact]

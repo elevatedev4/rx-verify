@@ -22,21 +22,33 @@ public class PackageQuantityParserTests
     }
 
     [Fact]
-    public void FallsBackToTheFirstNumberWhenNoWithKeywordIsPresent()
-    {
-        // A different cell shape than the reference screenshot's "with"
-        // phrasing -- no leading package-count number to be confused with,
-        // so searching the whole string is safe here.
-        Assert.Equal(500m, PackageQuantityParser.Parse("500 EA"));
-    }
-
-    [Fact]
     public void WithKeywordPresentButNoTrailingNumberFailsClosedRatherThanPickingTheLeadingCount()
     {
         // Simulates a UI-truncated OCR capture cut off right after "with"
         // -- must NOT fall back to the leading package-count "1", which
         // would silently misclassify a large package as small.
         Assert.Null(PackageQuantityParser.Parse("1 Stock Package with"));
+    }
+
+    // REVIEW FIX (blocking): OCR mangling the word "with" itself on an
+    // otherwise normally-shaped cell must fail closed, NOT fall back to
+    // the leading package-count number -- that's an active wrong
+    // classification (a 500-count package silently read as "1", i.e.
+    // Small), worse than showing no marker at all.
+    [Theory]
+    [InlineData("1 Stock Package wlth 500.0000 EA")]
+    [InlineData("1 Stock Package w1th 500.0000 EA")]
+    public void CorruptedWithKeywordWithALeadingCountStillPresentFailsClosed(string text)
+    {
+        Assert.Null(PackageQuantityParser.Parse(text));
+    }
+
+    [Fact]
+    public void SingleNumberWithNoWithKeywordStillParses()
+    {
+        // Exactly one number in the whole cell -- nothing else it could be
+        // but the quantity, "with" or no "with".
+        Assert.Equal(500m, PackageQuantityParser.Parse("500 EA"));
     }
 
     [Theory]
