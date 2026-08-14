@@ -104,6 +104,23 @@
             <Setter Property="Padding" Value="5,2" />
             <Setter Property="Margin" Value="0,0,6,0" />
         </Style>
+        <!--
+            MODE DROPDOWN (owner spec, 2026-08-14: "make the recommended
+            order pops up in a window above the main Pioneer... make it
+            say Mode: Order with a dropdown to switch back to verify"):
+            replaces the old OrderAssistCheckBox. Two ComboBox instances
+            share this style — ModeComboBoxNormal (in the full Verify-mode
+            row below) and ModeComboBoxCompact (the ENTIRE content of
+            CompactOrderPanel, shown only in Order mode) — see
+            ControlBoxWindow.xaml.cs SetOrderAssistState for why there are
+            two instances rather than one re-parented control.
+        -->
+        <Style x:Key="ModeComboBoxStyle" TargetType="ComboBox">
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="MinHeight" Value="18" />
+            <Setter Property="Padding" Value="4,1" />
+        </Style>
     </Window.Resources>
 
     <Grid Margin="6">
@@ -159,16 +176,43 @@
                 -->
                 <CheckBox x:Name="HideOverlayCheckBox" Content="Hide (\)" VerticalAlignment="Center" Checked="OnHideOverlayToggled" Unchecked="OnHideOverlayToggled" ToolTip="Hide overlay (\)" />
                 <!--
-                    ORDER ASSIST (separate, independently-toggled module —
-                    see overlay/RxVerifyOverlay/OrderAssist/OrderAssistCoordinator.cs):
-                    minimal checkbox matching this row's existing style,
-                    deliberately no new visual treatment. Defaults
-                    unchecked (OverlaySettings.OrderAssistEnabled defaults
-                    false) — this is an opt-in "turn it on while doing the
-                    order" mode, not something that scans by default.
+                    MODE DROPDOWN (owner spec, 2026-08-14) — REPLACES the
+                    old "Order Assist" checkbox. Two items only:
+                    "Mode: Verify" (index 0, the default — OverlaySettings.
+                    OrderAssistEnabled defaults false) and "Mode: Order"
+                    (index 1). Selecting "Mode: Order" here is what
+                    triggers ControlBoxWindow.xaml.cs SetOrderAssistState
+                    to swap THIS ENTIRE PANEL out for CompactOrderPanel
+                    below (see that method's doc) — this row itself
+                    disappears the instant Order mode is chosen, since the
+                    whole point is the box no longer blocks Pioneer's
+                    popup once Order mode is active.
                 -->
-                <CheckBox x:Name="OrderAssistCheckBox" Content="Order Assist" Margin="8,0,0,0" VerticalAlignment="Center" Checked="OnOrderAssistToggled" Unchecked="OnOrderAssistToggled" ToolTip="Highlight zero order quantities and cheaper secondary substitutions on Pioneer's order screens" />
+                <ComboBox x:Name="ModeComboBoxNormal" Style="{StaticResource ModeComboBoxStyle}" Margin="8,0,0,0" Width="110" SelectionChanged="OnModeComboBoxChanged" ToolTip="Order mode highlights zero order quantities and cheaper secondary substitutions on Pioneer's order screens; Verify mode resumes normal rx-verification highlights">
+                    <ComboBoxItem Content="Mode: Verify" />
+                    <ComboBoxItem Content="Mode: Order" />
+                </ComboBox>
             </StackPanel>
+        </StackPanel>
+
+        <!--
+            COMPACT ORDER-MODE PANEL (owner spec, 2026-08-14: "should
+            change the layout of the box to make it fit where it's not
+            blocking anything, like just next to the 'Color legend' on
+            the top right, and just make it say Mode: Order with a
+            dropdown to switch back to verify"): the ENTIRE control box
+            content while Order mode is active — NormalPanel above is
+            hidden outright (see SetOrderAssistState), and
+            IntegratedOverlayCoordinator repositions/resizes the whole
+            window to its small ORDER-MODE constants whenever this is
+            showing (see that class's OrderModeControlBox*Dip docs).
+            Collapsed by default (Verify mode, the default state).
+        -->
+        <StackPanel x:Name="CompactOrderPanel" Visibility="Collapsed" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <ComboBox x:Name="ModeComboBoxCompact" Style="{StaticResource ModeComboBoxStyle}" Width="120" SelectionChanged="OnModeComboBoxChanged" ToolTip="Switch back to Verify mode to resume rx-verification highlights">
+                <ComboBoxItem Content="Mode: Verify" />
+                <ComboBoxItem Content="Mode: Order" />
+            </ComboBox>
         </StackPanel>
 
         <!--
