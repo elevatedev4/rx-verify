@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using RxVerifyOverlay.Integrated;
@@ -62,6 +63,19 @@ public sealed class OrderAssistCoordinator
     private bool _windowShown;
     private bool _tickInProgress;
 
+    /// <summary>
+    /// REVIEW FIX (blocking — race: disabling mid-tick could re-show a
+    /// stale highlight): bumped on EVERY SetEnabled call (both true and
+    /// false), so any tick already in flight when a NEW enable/disable
+    /// decision is made is provably stale the instant it tries to act on
+    /// its result — see TickGenerationGate's own doc for the exact
+    /// mechanics of the race this closes.
+    /// </summary>
+    private int _generation;
+
+    /// <summary>The in-flight tick's own cancellation source, if any — SetEnabled(false) cancels it so a real, in-progress OCR pass is asked to stop rather than only being ignored once it eventually finishes. Best-effort: WindowsMediaOcrEngine only checks this token once, mid-pipeline (see its own doc) — TickGenerationGate is the guarantee that actually matters, this is defense in depth on top of it.</summary>
+    private CancellationTokenSource? _tickCts;
+
     public OrderAssistCoordinator(OverlaySettings settings, IOcrEngine? ocrEngine = null)
     {
         _settings = settings;
@@ -82,6 +96,15 @@ public sealed class OrderAssistCoordinator
     /// </summary>
     public void SetEnabled(bool enabled)
     {
+        // REVIEW FIX (blocking): invalidate whatever tick might currently
+        // be in flight BEFORE changing _enabled/the timer — see
+        // TickGenerationGate's doc. Cancel is best-effort (the CTS from a
+        // tick that already finished and disposed its own `using` block
+        // throws ObjectDisposedException here, which just means there was
+        // nothing in flight to cancel).
+        _generation++;
+        try { _tickCts?.Cancel(); } catch (ObjectDisposedException) { /* nothing in flight -- fine */ }
+
         _enabled = enabled;
 
         if (enabled)
@@ -133,6 +156,19 @@ public sealed class OrderAssistCoordinator
     {
         if (!_enabled) return;
 
+        // REVIEW FIX (blocking): capture THIS tick's generation now, and
+        // never mutate the overlay's visible state below without
+        // re-confirming it's still current (see the final check right
+        // before RepositionPhysical/SetHighlights/Show) — see
+        // TickGenerationGate's doc for the exact race this closes. The
+        // CTS is real, best-effort cancellation on top of that (see the
+        // _tickCts field doc) — using var disposes it the moment this
+        // tick returns by any path, and SetEnabled's own Cancel() call
+        // already tolerates that being disposed by the time it runs.
+        var tickGeneration = _generation;
+        using var cts = new CancellationTokenSource();
+        _tickCts = cts;
+
         var target = OrderAssistWindowLocator.FindForegroundTarget();
         if (target is null)
         {
@@ -148,11 +184,11 @@ public sealed class OrderAssistCoordinator
         {
             overlay.HideAndClear();
             _windowShown = false;
-            await Task.Delay(CaptureSettleDelayMs);
+            await Task.Delay(CaptureSettleDelayMs, cts.Token);
         }
 
         using var bitmap = EscriptImageCapture.CaptureRegion(target.Value.Bounds);
-        var ocrResult = await _ocrEngine.RecognizeAsync(bitmap);
+        var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
 
         var scale = DpiScaleFor(target.Value.Handle);
 
@@ -186,6 +222,17 @@ public sealed class OrderAssistCoordinator
             // than show an empty overlay window.
             return;
         }
+
+        // REVIEW FIX (blocking): the actual fix — see TickAsync's own doc
+        // above and TickGenerationGate's doc. Everything above this point
+        // only computed a result; nothing touched the overlay's visible
+        // state yet, so bailing out here (rather than earlier) is always
+        // safe. If SetEnabled ran at all since this tick started
+        // (enabling OR disabling — either means this result is stale),
+        // discard it instead of showing/repositioning a highlight the
+        // pharmacist may have already turned off, with no future tick
+        // left to correct it.
+        if (!TickGenerationGate.IsStillCurrent(tickGeneration, _generation)) return;
 
         overlay.RepositionPhysical(target.Value.Bounds.X, target.Value.Bounds.Y, target.Value.Bounds.Width, target.Value.Bounds.Height);
         overlay.SetHighlights(redBoxesDip, greenRowDip, savingsLabel);

@@ -1,7 +1,10 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using RxVerifyOverlay.Uia;
 
 namespace RxVerifyOverlay.OrderAssist.Windows;
 
@@ -24,6 +27,20 @@ namespace RxVerifyOverlay.OrderAssist.Windows;
 /// caching — this only runs once per ~1s tick (see OrderAssistCoordinator),
 /// a completely different, far cheaper cost profile than the verify
 /// flow's own ~250ms tick.
+///
+/// REVIEW FIX (non-blocking — scope gap vs. the rest of the app's Win32
+/// detection): title-only matching means any window some OTHER app
+/// happens to title exactly "Create Recommended Orders" would also match
+/// — low real-world likelihood, and ColumnResolver's fail-closed design
+/// (see its own doc) means a wrong window would just find no resolvable
+/// columns and highlight nothing, but this brings window identification
+/// in line with the same PROCESS-name check
+/// Integrated/IntegratedOverlayCoordinator.cs's own IsOwnedByPioneerRx
+/// already uses. FieldMap.TargetProcessNames is a plain data constant
+/// (which process names count as "PioneerRx"), not verify-flow logic —
+/// referencing it here is the same kind of shared-low-level-fact reuse
+/// as this module already does for OverlaySettings/OcrWord, not a
+/// dependency on any verify-specific behavior.
 /// </summary>
 public static class OrderAssistWindowLocator
 {
@@ -59,12 +76,32 @@ public static class OrderAssistWindowLocator
         var kind = OrderAssistWindowClassifier.Classify(ReadWindowTitle(hwnd));
         if (kind == OrderAssistWindowKind.None) return null;
 
+        if (!IsOwnedByPioneerRxProcess(hwnd)) return null;
+
         if (!GetWindowRect(hwnd, out var rect)) return null;
 
         var bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
         if (bounds.Width <= 0 || bounds.Height <= 0) return null;
 
         return new TargetWindow(kind, hwnd, bounds);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    /// <summary>Same check/pattern as Integrated/IntegratedOverlayCoordinator.cs IsOwnedByPioneerRx — one Process lookup for the single current foreground hwnd, so an uncached call here is fine (this runs once per ~1s tick, not per top-level window). Any failure (process exited between calls, access denied, etc.) is treated as "not PioneerRx".</summary>
+    private static bool IsOwnedByPioneerRxProcess(IntPtr hwnd)
+    {
+        try
+        {
+            GetWindowThreadProcessId(hwnd, out var processId);
+            using var process = Process.GetProcessById((int)processId);
+            return FieldMap.TargetProcessNames.Any(name => string.Equals(process.ProcessName, name, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string? ReadWindowTitle(IntPtr hwnd)

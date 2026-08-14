@@ -33,7 +33,7 @@ public class CurrencyParserTests
     [InlineData("   ")]
     [InlineData("N/A")]
     [InlineData("abc")]
-    [InlineData("16714-0626-01")] // NDC-style code — must never be misread as a number
+    [InlineData("12345-6789-01")] // NDC-style code (made-up) — must never be misread as a number
     public void ReturnsNullForBlankOrNonNumericText(string? text)
     {
         Assert.Null(CurrencyParser.Parse(text));
