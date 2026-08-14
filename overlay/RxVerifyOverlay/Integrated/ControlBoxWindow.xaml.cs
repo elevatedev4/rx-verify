@@ -240,37 +240,60 @@ public sealed partial class ControlBoxWindow : Window
     }
 
     /// <summary>
-    /// Reflects OverlaySettings.OrderAssistEnabled in BOTH Mode dropdowns
-    /// without re-raising OrderAssistToggleRequested — called whenever
-    /// IntegratedOverlayCoordinator.SyncToggles runs, same pattern as
-    /// SetToggleState above. ALSO owns the owner's spec "activating Order
-    /// mode ... should change the layout of the box": swaps which panel
-    /// is the box's entire visible content — NormalPanel (full Verify-mode
-    /// layout) when disabled, CompactOrderPanel (just the Mode dropdown)
-    /// when enabled — and hides CloseButton in Order mode (no room in the
-    /// tiny compact box; switch back to Verify mode, or Pioneer's own
-    /// close, to quit). IntegratedOverlayCoordinator.UpdateControlBox is
-    /// what actually resizes/repositions the WINDOW itself to match (see
-    /// its OrderModeControlBox*Dip constants) — this method only owns the
-    /// box's OWN content.
+    /// REVIEW FIX (Will's live test, W-T75, items 2/4 — root cause):
+    /// this panel-swap logic used to live directly inside SetOrderAssistState,
+    /// which is ONLY ever called from IntegratedOverlayCoordinator.SyncToggles
+    /// (construction + DisplayMode changes) and, defensively, from
+    /// UpdateControlBox every reposition tick — but NEVER from the actual
+    /// live Mode-dropdown-toggle path: MainWindow.xaml.cs's own
+    /// OrderAssistToggleRequested handler only persists
+    /// OverlaySettings.OrderAssistEnabled and starts/stops the
+    /// OrderAssistCoordinator timer — it never calls SyncToggles()/Tick()
+    /// back into this window. Result: OverlaySettings.OrderAssistEnabled
+    /// (what UpdateControlBox reads for the window's PHYSICAL size) flipped
+    /// true the instant the pharmacist picked "Mode: Order", shrinking the
+    /// window, while NormalPanel (with its live "Waiting for a
+    /// PioneerRx..." status text — see OverlayViewModel.StatusMessage) never
+    /// actually hid, since nothing had told THIS window its own mode
+    /// changed. Exactly Will's report: "the box shrinks and hides the
+    /// content because it's still showing 'Waiting for a prescription to
+    /// pre-check'" — both the Mode dropdown and the Verify escape Button
+    /// were underneath/behind that still-visible NormalPanel content,
+    /// leaving him stuck.
+    ///
+    /// THE FIX: extracted here as the SOLE place any of this window's own
+    /// content elements' mode-dependent visibility gets applied — called
+    /// from THREE paths now, none of which can be forgotten without
+    /// breaking a build-visible contract:
+    ///   1. SetOrderAssistState (external sync — SyncToggles/UpdateControlBox)
+    ///   2. OnModeComboBoxChanged (a REAL pharmacist dropdown pick — applied
+    ///      IMMEDIATELY, before the event even leaves this window, so the
+    ///      swap can never depend on any relay/round-trip elsewhere)
+    ///   3. OnVerifyEscapeButtonClick (same immediacy, for the escape Button)
+    /// The actual which-panels-visible decision is
+    /// ControlBoxModeLayoutRule.Resolve (pure, tested) — this method is
+    /// just the WPF-applying wrapper around it.
     /// </summary>
-    public void SetOrderAssistState(bool enabled)
+    private void ApplyModeLayout(bool orderModeActive)
     {
+        var layout = ControlBoxModeLayoutRule.Resolve(orderModeActive);
+
+        _isOrderModeActive = orderModeActive;
+
         _suppressOrderAssistHandler = true;
         try
         {
-            ModeComboBoxNormal.SelectedIndex = enabled ? 1 : 0;
-            ModeComboBoxCompact.SelectedIndex = enabled ? 1 : 0;
+            ModeComboBoxNormal.SelectedIndex = layout.ModeComboBoxSelectedIndex;
+            ModeComboBoxCompact.SelectedIndex = layout.ModeComboBoxSelectedIndex;
         }
         finally
         {
             _suppressOrderAssistHandler = false;
         }
 
-        _isOrderModeActive = enabled;
-        NormalPanel.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
-        CompactOrderPanel.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
-        CloseButton.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
+        NormalPanel.Visibility = layout.ShowNormalPanel ? Visibility.Visible : Visibility.Collapsed;
+        CompactOrderPanel.Visibility = layout.ShowCompactOrderPanel ? Visibility.Visible : Visibility.Collapsed;
+        CloseButton.Visibility = layout.ShowCloseButton ? Visibility.Visible : Visibility.Collapsed;
 
         // The maximized-guard note is sized/laid out for the FULL
         // Verify-mode box and has nothing to grey out in Order mode
@@ -278,8 +301,20 @@ public sealed partial class ControlBoxWindow : Window
         // SetMaximizedGuardState, which now also checks _isOrderModeActive
         // directly; this call just makes sure a note left showing from
         // BEFORE Order mode was chosen doesn't linger over the tiny box.
-        if (enabled) MaximizeNoteBorder.Visibility = Visibility.Collapsed;
+        if (orderModeActive) MaximizeNoteBorder.Visibility = Visibility.Collapsed;
     }
+
+    /// <summary>
+    /// External sync entry point — reflects OverlaySettings.OrderAssistEnabled
+    /// via ApplyModeLayout without re-raising OrderAssistToggleRequested.
+    /// Called from IntegratedOverlayCoordinator.SyncToggles (construction +
+    /// DisplayMode changes) AND, defensively, from UpdateControlBox on
+    /// EVERY reposition tick (see that method's own doc) — so even if a
+    /// future code path somehow drifts this window's visible mode away
+    /// from the persisted setting, it self-heals within one tick. See
+    /// ApplyModeLayout's own doc for the W-T75 bug this whole design fixes.
+    /// </summary>
+    public void SetOrderAssistState(bool enabled) => ApplyModeLayout(enabled);
 
     /// <summary>
     /// MAXIMIZED-ONLY guard (item 3): when PioneerRx is attached but NOT
@@ -332,18 +367,27 @@ public sealed partial class ControlBoxWindow : Window
 
     /// <summary>
     /// A REAL pharmacist selection change on EITHER Mode dropdown (not
-    /// SetOrderAssistState's programmatic sync — see
-    /// _suppressOrderAssistHandler) — both ModeComboBoxNormal (Verify-mode
-    /// row) and ModeComboBoxCompact (Order-mode's only content) wire to
-    /// this SAME handler in XAML, since exactly one of the two is ever
-    /// visible/interactive at a time (see SetOrderAssistState's panel
-    /// swap) and both mean the same thing: index 0 = Mode: Verify, index
-    /// 1 = Mode: Order.
+    /// ApplyModeLayout's own programmatic re-sync of these SAME combo
+    /// boxes — see _suppressOrderAssistHandler) — both ModeComboBoxNormal
+    /// (Verify-mode row) and ModeComboBoxCompact (Order-mode's only
+    /// content) wire to this SAME handler in XAML, since exactly one of
+    /// the two is ever visible/interactive at a time (see ApplyModeLayout's
+    /// panel swap) and both mean the same thing: index 0 = Mode: Verify,
+    /// index 1 = Mode: Order.
+    ///
+    /// REVIEW FIX (Will's live test, W-T75 — root cause): applies
+    /// ApplyModeLayout to THIS window IMMEDIATELY, before raising
+    /// OrderAssistToggleRequested at all — see that method's own doc for
+    /// why waiting on the event to round-trip back through
+    /// IntegratedOverlayCoordinator/MainWindow.xaml.cs (which never
+    /// actually synced it back here) left the pharmacist stuck looking at
+    /// a shrunk box still showing full Verify-mode content.
     /// </summary>
     private void OnModeComboBoxChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressOrderAssistHandler) return;
         var isOrderMode = ((ComboBox)sender).SelectedIndex == 1;
+        ApplyModeLayout(isOrderMode);
         OrderAssistToggleRequested?.Invoke(this, isOrderMode);
     }
 
@@ -356,6 +400,17 @@ public sealed partial class ControlBoxWindow : Window
     /// This is a plain Button (the control type already proven reliable
     /// on this WS_EX_NOACTIVATE window), so it works regardless of
     /// whether the ComboBox's own dropdown popup does.
+    ///
+    /// REVIEW FIX (Will's live test, W-T75 — items 3/4, defensive): also
+    /// applies ApplyModeLayout to THIS window IMMEDIATELY, same as
+    /// OnModeComboBoxChanged above and for the same reason — this Button
+    /// exists specifically to be Will's escape hatch if the ComboBox
+    /// itself ever misbehaves, so it must not depend on any relay
+    /// round-trip to actually restore this window's own content either.
     /// </summary>
-    private void OnVerifyEscapeButtonClick(object sender, RoutedEventArgs e) => OrderAssistToggleRequested?.Invoke(this, false);
+    private void OnVerifyEscapeButtonClick(object sender, RoutedEventArgs e)
+    {
+        ApplyModeLayout(orderModeActive: false);
+        OrderAssistToggleRequested?.Invoke(this, false);
+    }
 }
