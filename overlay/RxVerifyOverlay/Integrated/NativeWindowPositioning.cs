@@ -27,6 +27,20 @@ internal static class NativeWindowPositioning
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 
+    /// <summary>
+    /// Per-monitor DPI for a specific HWND (Windows 10 1607+ — see
+    /// app.manifest's PerMonitorV2 declaration, which is what makes this
+    /// return the ACTUAL DPI of whichever monitor the window is currently
+    /// on, not just the system/primary-monitor DPI). Shared here rather
+    /// than each caller (IntegratedOverlayCoordinator.DpiScaleFor already
+    /// has its own private copy for Pioneer's own hwnd) re-declaring the
+    /// same P/Invoke — MainWindow's ReportErrorWindow positioning
+    /// (RXVERIFY-TROUBLESHOOT, 2026-08) is what pulled this out to be
+    /// reusable.
+    /// </summary>
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
     /// <summary>Moves/resizes without disturbing z-order or stealing activation — safe to call every refresh tick. A no-op if the window's HWND doesn't exist yet (e.g. called before the first Show()).</summary>
     public static void Reposition(IntPtr hwnd, int x, int y, int width, int height)
     {
@@ -39,5 +53,13 @@ internal static class NativeWindowPositioning
     {
         if (hwnd == IntPtr.Zero) return;
         SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+    }
+
+    /// <summary>1.0 (96 DPI, "no scaling") on a Zero hwnd or a failed GetDpiForWindow call — same "never trust a failed read, degrade to the safe default" posture as every other native-call wrapper in this class.</summary>
+    public static double DpiScaleFor(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return 1.0;
+        var dpi = GetDpiForWindow(hwnd);
+        return dpi > 0 ? dpi / 96.0 : 1.0;
     }
 }

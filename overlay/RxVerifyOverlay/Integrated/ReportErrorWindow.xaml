@@ -6,7 +6,7 @@
         MinWidth="360"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
-        ShowInTaskbar="False"
+        ShowInTaskbar="True"
         Topmost="True">
     <!--
         "Report error…" dialog (verdict-tooltips-reports branch) — opened
@@ -31,6 +31,21 @@
         WPF ContextMenu) — so there is nothing to redact on screen here);
         Reporting/RxReportBuilder.cs still redacts defensively before
         anything is ever sent, belt-and-suspenders.
+
+        RXVERIFY-TROUBLESHOOT ROUND 2 (2026-08, owner: "Alt+Tab shows NO
+        Report error window anywhere — the dialog NEVER opens"):
+        ShowInTaskbar was previously "False". WPF's ShowInTaskbar="False"
+        sets WS_EX_TOOLWINDOW under the hood, and Windows excludes an
+        UN-OWNED WS_EX_TOOLWINDOW window from Alt-Tab — so Will's own
+        diagnostic (Alt+Tab) could never have told "the dialog never
+        opened" apart from "the dialog opened but is invisible to
+        Alt-Tab by its own styling", which would make the round-1
+        Activate()/Topmost fix in MainWindow.xaml.cs look like it failed
+        even if it actually worked. Flipped to "True" so this dialog is
+        always genuinely findable (taskbar AND Alt-Tab) regardless of
+        where the real bug turns out to be — see MainWindow.xaml.cs
+        OpenReportErrorDialog's own doc for the rest of round 2's
+        instrumentation.
     -->
     <Grid Margin="14">
         <Grid.RowDefinitions>

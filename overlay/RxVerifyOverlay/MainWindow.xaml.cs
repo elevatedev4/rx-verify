@@ -262,7 +262,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // coordinator to here, the one place that knows how to build a
         // ReportErrorWindow (engine build/commit context — see that
         // constructor's params).
-        _integratedOverlay.ReportErrorRequested += (_, field) => OpenReportErrorDialog(field);
+        _integratedOverlay.ReportErrorRequested += (_, info) => OpenReportErrorDialog(info);
 
         // ORDER ASSIST — see the field doc above. Constructed here
         // (cheap), then immediately synced to whatever OrderAssistEnabled
@@ -713,10 +713,49 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// well-documented nudge that forces Windows to re-evaluate this
     /// window's foreground/Z-order state immediately rather than trusting
     /// whatever WPF's own internal Show()/Activate() plumbing decided.
+    ///
+    /// RXVERIFY-TROUBLESHOOT ROUND 2 (2026-08, owner: "Alt+Tab shows NO
+    /// Report error window anywhere — the dialog NEVER opens"): this
+    /// report means round 1's Activate()/Topmost fix above was aimed at
+    /// the WRONG layer — it only ever runs once this method is entered at
+    /// all, and Will's own diagnostic can't actually distinguish "never
+    /// opened" from "opened but excluded from Alt-Tab", because
+    /// ReportErrorWindow.xaml's ShowInTaskbar="False" sets WS_EX_TOOLWINDOW,
+    /// which Windows excludes from Alt-Tab for an un-owned window exactly
+    /// like this one — see that XAML's own updated doc. Flipped to
+    /// ShowInTaskbar="True" so this can never happen again regardless of
+    /// where the real bug turns out to be.
+    ///
+    /// Every step below now logs to OcrLogger (bool/index/field-KEY only —
+    /// no PHI) so a single right-click produces an unambiguous trail: if
+    /// this method is never entered at all despite IntegratedBoxesWindow's
+    /// own log showing "raising ReportErrorRequested", that PROVES a
+    /// wiring break between the two (this session's own wiring audit
+    /// found the subscription solid — see the class-level notes in this
+    /// file's git history for round 2 — so seeing that combination live
+    /// would mean something changed since); if this method IS entered but
+    /// no further lines follow, the break is in construction/ShowDialog
+    /// itself, caught below.
+    ///
+    /// POSITIONING (owner: 2-monitor workstation): <paramref name="info"/>
+    /// now carries the physical click point (ReportErrorRequestInfo) —
+    /// PositionDialogNearClick moves the dialog there, clamped to that
+    /// monitor's WORK AREA (PopupBoundsClamp, reused from the hover
+    /// popup's own screen-bounds clamp), instead of relying on
+    /// WindowStartupLocation="CenterScreen" picking whichever monitor
+    /// happens to contain the virtual desktop's center point — on a
+    /// 2-monitor setup that's not necessarily the monitor Will is even
+    /// looking at.
     /// </summary>
-    private void OpenReportErrorDialog(VerdictFieldInfo field)
+    private void OpenReportErrorDialog(ReportErrorRequestInfo info)
     {
-        if (_reportDialogOpen) return; // already open — see doc above
+        if (_reportDialogOpen)
+        {
+            OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: dialog-open guard already true — ignoring this ReportErrorRequested (see suspect #2)");
+            return;
+        }
+
+        OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] MainWindow: handler entered fieldKey={info.Field.FieldKey}");
 
         var engineBuild = string.IsNullOrEmpty(_engineClient.EngineBuildSha) && string.IsNullOrEmpty(_engineClient.EngineBuildBuiltAt)
             ? null
@@ -727,27 +766,77 @@ public partial class MainWindow : Window, IOverlayVisibilityController
 
         try
         {
-            var dialog = new ReportErrorWindow(field, engineBuild, AppDiagnostics.GetCommitSha(), _settings);
+            var dialog = new ReportErrorWindow(info.Field, engineBuild, AppDiagnostics.GetCommitSha(), _settings);
+            OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: ReportErrorWindow constructed");
+
             dialog.ContentRendered += (_, _) =>
             {
+                OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: ContentRendered — Activate()/Topmost-pulse + positioning");
                 dialog.Activate();
                 dialog.Topmost = false;
                 dialog.Topmost = true;
+                PositionDialogNearClick(dialog, info.ClickPointPhysical);
             };
+            // See PositionDialogNearClick's own doc: a move across
+            // differently-scaled monitors (PerMonitorV2, app.manifest)
+            // changes this window's DPI AFTER ContentRendered already
+            // positioned it using the OLD scale — re-running once DPI
+            // actually settles corrects the physical size/position for
+            // the monitor it landed on.
+            dialog.DpiChanged += (_, _) => PositionDialogNearClick(dialog, info.ClickPointPhysical);
             dialog.Closed += (_, _) =>
             {
+                OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: dialog Closed — guard reset");
                 _reportDialogOpen = false;
                 _integratedOverlay.SetReportDialogOpen(false);
             };
+
+            OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: calling ShowDialog()");
             dialog.ShowDialog();
+            OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: ShowDialog() returned normally");
         }
         catch (Exception ex)
         {
+            OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] MainWindow: EXCEPTION constructing/showing dialog: {ex}");
             _reportDialogOpen = false;
             _integratedOverlay.SetReportDialogOpen(false);
             MessageBox.Show(this, $"Couldn't open the report dialog: {ex.Message}", "Rx Verify",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    /// <summary>
+    /// Moves/resizes <paramref name="dialog"/> (via the same raw
+    /// physical-pixel Win32 SetWindowPos this app already uses for the
+    /// overlay windows — NativeWindowPositioning — rather than WPF's own
+    /// Left/Top, sidestepping any DPI-context ambiguity) so it opens near
+    /// <paramref name="clickPointPhysical"/>, clamped to that point's
+    /// monitor WORK AREA (MonitorGeometry.GetWorkArea — excludes the
+    /// taskbar, unlike HoverPopupWindow's own use of the FULL monitor
+    /// rect, since this dialog has real buttons a taskbar could cover).
+    /// Best-effort: a Zero hwnd (called before SourceInitialized — should
+    /// never happen from ContentRendered/DpiChanged) or a failed monitor
+    /// lookup just leaves the dialog wherever WPF's own
+    /// WindowStartupLocation="CenterScreen" (XAML) already put it.
+    /// </summary>
+    private static void PositionDialogNearClick(Window dialog, System.Drawing.Point clickPointPhysical)
+    {
+        var hwnd = new WindowInteropHelper(dialog).Handle;
+        if (hwnd == IntPtr.Zero) return;
+
+        var scale = NativeWindowPositioning.DpiScaleFor(hwnd);
+        var physicalWidth = (int)Math.Ceiling(dialog.ActualWidth * scale);
+        var physicalHeight = (int)Math.Ceiling(dialog.ActualHeight * scale);
+        if (physicalWidth <= 0 || physicalHeight <= 0) return; // not laid out yet — nothing sane to clamp/position
+
+        const int offsetPhysicalPx = 24; // same spirit as HoverPopupWindow.CursorOffsetPhysicalPx — never dead-center under the cursor
+        var proposed = new System.Drawing.Rectangle(
+            clickPointPhysical.X + offsetPhysicalPx, clickPointPhysical.Y + offsetPhysicalPx, physicalWidth, physicalHeight);
+
+        var workArea = MonitorGeometry.GetWorkArea(clickPointPhysical);
+        var position = workArea is { } area ? PopupBoundsClamp.Clamp(proposed, area) : new System.Drawing.Point(proposed.X, proposed.Y);
+
+        NativeWindowPositioning.Reposition(hwnd, position.X, position.Y, physicalWidth, physicalHeight);
     }
 
     private void OnDumpTreeClick(object sender, RoutedEventArgs e)
