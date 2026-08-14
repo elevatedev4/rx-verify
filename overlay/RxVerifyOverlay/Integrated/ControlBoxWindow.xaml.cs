@@ -233,9 +233,25 @@ public sealed partial class ControlBoxWindow : Window
     /// (IntegratedOverlayCoordinator.BuildStatusSummary, now removed) —
     /// that element and parameter are both gone; this method now only
     /// ever sets the status/timing message.
+    ///
+    /// REVIEW FIX (Will's live test, W-T75, item 1 — make the pipeline
+    /// itself mode-aware, not just NormalPanel's Visibility): the verify
+    /// status text this sets (OverlayViewModel.StatusMessage, e.g.
+    /// "Waiting for a PioneerRx Pre-Check/Edit/New Rx window...") is fed
+    /// here EVERY tick regardless of mode by
+    /// IntegratedOverlayCoordinator.UpdateControlBox. StatusTimeText lives
+    /// inside NormalPanel, which ApplyModeLayout already collapses
+    /// outright in Order mode — so this guard is belt-and-suspenders, not
+    /// the only thing standing between this text and the compact box: even
+    /// if some future change ever left StatusTimeText outside NormalPanel,
+    /// or a caller invoked this before ApplyModeLayout ran, the verify
+    /// status pipeline itself now refuses to write into the compact box's
+    /// content at the SINK, not just rely on the SOURCE remembering to
+    /// skip the call.
     /// </summary>
     public void SetStatusMessage(string statusText)
     {
+        if (_isOrderModeActive) return;
         StatusTimeText.Text = statusText;
     }
 
