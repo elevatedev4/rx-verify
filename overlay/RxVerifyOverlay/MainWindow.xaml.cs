@@ -783,7 +783,26 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             // positioned it using the OLD scale — re-running once DPI
             // actually settles corrects the physical size/position for
             // the monitor it landed on.
-            dialog.DpiChanged += (_, _) => PositionDialogNearClick(dialog, info.ClickPointPhysical);
+            //
+            // REVIEW FIX: self-removing handler, not a _hasSettled field —
+            // unsubscribes itself from DpiChanged on the very FIRST firing,
+            // so a LATER DpiChanged (e.g. Will manually dragging the
+            // already-open dialog across a DPI boundary to the second
+            // monitor himself) never re-runs PositionDialogNearClick and
+            // snaps the window back toward the ORIGINAL right-click
+            // location — the exact "snap-back on drag" regression this
+            // closes. RunOnce is a pure, unit-tested belt-and-suspenders
+            // second guarantee of the same "at most once" property (see
+            // its own doc) — the unsubscribe above is what actually does
+            // the work.
+            var repositionOnce = new RunOnce(() => PositionDialogNearClick(dialog, info.ClickPointPhysical));
+            DpiChangedEventHandler onDialogDpiChanged = null!;
+            onDialogDpiChanged = (_, _) =>
+            {
+                dialog.DpiChanged -= onDialogDpiChanged;
+                repositionOnce.Fire();
+            };
+            dialog.DpiChanged += onDialogDpiChanged;
             dialog.Closed += (_, _) =>
             {
                 OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: dialog Closed — guard reset");
