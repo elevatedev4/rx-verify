@@ -865,6 +865,23 @@ public sealed class IntegratedOverlayCoordinator
         var physicalWidth = (int)Math.Round(widthDip * scale);
         var physicalHeight = (int)Math.Round(heightDip * scale);
 
+        // REVIEW FIX (Will's live test, W-T75 — defensive, item 3):
+        // reconciles the box's own visible content (NormalPanel vs.
+        // CompactOrderPanel — see ControlBoxWindow.ApplyModeLayout) with
+        // the authoritative persisted setting on EVERY reposition tick,
+        // not just when a real click drives it (ControlBoxWindow's own
+        // OnModeComboBoxChanged/OnVerifyEscapeButtonClick already apply
+        // this immediately — see those methods' docs for the actual
+        // W-T75 root cause). Idempotent and cheap (a handful of
+        // Visibility/SelectedIndex sets, all no-ops if already correct)
+        // — this is the self-healing layer: if the box's own content
+        // EVER drifts out of sync with orderModeActive again for any
+        // reason, the very next tick (this window is repositioned every
+        // tick regardless of mode) corrects it within ~250ms, and the
+        // Verify escape Button is guaranteed part of whatever gets
+        // reconciled back in.
+        box.SetOrderAssistState(orderModeActive);
+
         box.SetMaximizedGuardState(isMaximized);
         // Owner request (2026-08-13): "Remove the counter showing the
         // accurate/errors. that is not needed on the top right box." —
