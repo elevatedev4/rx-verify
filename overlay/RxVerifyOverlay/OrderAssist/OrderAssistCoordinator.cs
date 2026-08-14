@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,6 +9,7 @@ using System.Windows.Threading;
 using RxVerifyOverlay.Integrated;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
+using RxVerifyOverlay.OrderAssist.Geometry;
 using RxVerifyOverlay.OrderAssist.Scanning;
 using RxVerifyOverlay.OrderAssist.Windows;
 
@@ -75,6 +77,27 @@ public sealed class OrderAssistCoordinator
 
     /// <summary>The in-flight tick's own cancellation source, if any — SetEnabled(false) cancels it so a real, in-progress OCR pass is asked to stop rather than only being ignored once it eventually finishes. Best-effort: WindowsMediaOcrEngine only checks this token once, mid-pipeline (see its own doc) — TickGenerationGate is the guarantee that actually matters, this is defense in depth on top of it.</summary>
     private CancellationTokenSource? _tickCts;
+
+    /// <summary>
+    /// REMOTE-DEBUGGING INFRASTRUCTURE (owner's live pharmacy report,
+    /// 2026-08-14: "make sure that the logic will work with the popup
+    /// window because right now nothing works" — branch brief: "next
+    /// failure report must be diagnosable from his logs"): the last
+    /// "no target window matched" diagnostic signature actually LOGGED
+    /// (a delimited join of every visible PioneerRx window title seen
+    /// that tick) — see LogNoMatchDiagnosticsIfNeeded. Null until the
+    /// first no-match tick logs something. Compared against the CURRENT
+    /// tick's own signature so the same still-unresolved title set never
+    /// re-logs every ~1s tick it persists for — only a CHANGE (a
+    /// different window opened/closed, or Pioneer closed entirely) logs
+    /// again. Never reset elsewhere; a stale value surviving a
+    /// SetEnabled(false)/(true) cycle just means one possible duplicate
+    /// skip, not a correctness issue for a best-effort diagnostic log.
+    /// </summary>
+    private string? _lastLoggedNoMatchTitlesSignature;
+
+    /// <summary>Same de-dup pattern as _lastLoggedNoMatchTitlesSignature, for LogColumnDiagnosticsIfNeeded's "matched a target window but couldn't resolve its expected column(s)" case — keyed on the resolved header band labels actually seen that tick.</summary>
+    private string? _lastLoggedColumnFailureSignature;
 
     public OrderAssistCoordinator(OverlaySettings settings, IOcrEngine? ocrEngine = null)
     {
@@ -169,12 +192,15 @@ public sealed class OrderAssistCoordinator
         using var cts = new CancellationTokenSource();
         _tickCts = cts;
 
-        var target = OrderAssistWindowLocator.FindForegroundTarget();
-        if (target is null)
+        var scan = OrderAssistWindowLocator.Scan();
+        if (scan.Target is null)
         {
+            LogNoMatchDiagnosticsIfNeeded(scan.VisiblePioneerWindowTitles);
             HideOverlayIfShown();
             return;
         }
+
+        var target = scan.Target;
 
         var overlay = EnsureOverlayWindow();
 
@@ -213,7 +239,12 @@ public sealed class OrderAssistCoordinator
         {
             // Nothing to highlight this tick (e.g. no zero quantities, or
             // no substitution meets the 25% bar) — stay hidden rather
-            // than show an empty overlay window.
+            // than show an empty overlay window. Could ALSO mean column
+            // resolution itself failed (a bad/partial OCR capture, or the
+            // window's actual header text doesn't match what this app
+            // expects) — see LogColumnDiagnosticsIfNeeded, which tells
+            // the two apart and only logs the latter.
+            LogColumnDiagnosticsIfNeeded(target.Value.Kind, ocrResult.Words);
             return;
         }
 
@@ -346,4 +377,106 @@ public sealed class OrderAssistCoordinator
         _overlayWindow?.HideAndClear();
         _windowShown = false;
     }
+
+    /// <summary>
+    /// REMOTE-DEBUGGING INFRASTRUCTURE — see _lastLoggedNoMatchTitlesSignature's
+    /// doc. Logs (throttled to once per DISTINCT title set, not every
+    /// ~1s tick) every visible PioneerRx-owned top-level window's title
+    /// on a tick where Order Assist is enabled but OrderAssistWindowLocator.Scan
+    /// matched neither target screen — this is exactly the data Will
+    /// needs to tell "Pioneer isn't open at all" apart from "Pioneer's
+    /// windows are open but none of their titles are what this app
+    /// expects" (e.g. a Pioneer version/locale that titles the screen
+    /// differently) without reproducing the failure live in front of
+    /// anyone. Uses the SAME %TEMP%\VerifyOCR log file as the verify
+    /// flow's own OcrLogger — see OrderAssistWindowLocator.ScanResult's
+    /// own "PHI CAVEAT" doc for why an arbitrary Pioneer window title
+    /// (e.g. a Pre-Check/Edit Rx screen with a patient name in its own
+    /// title bar) can land in this same local, never-transmitted file.
+    /// </summary>
+    private void LogNoMatchDiagnosticsIfNeeded(IReadOnlyList<string> visiblePioneerWindowTitles)
+    {
+        try
+        {
+            var signature = string.Join("|", visiblePioneerWindowTitles);
+            if (signature == _lastLoggedNoMatchTitlesSignature) return;
+            _lastLoggedNoMatchTitlesSignature = signature;
+
+            var titlesDisplay = visiblePioneerWindowTitles.Count > 0
+                ? string.Join(" | ", visiblePioneerWindowTitles)
+                : "(none -- no visible PioneerRx-owned top-level window found at all)";
+
+            OcrLogger.LogTiming($"OrderAssist: no target window matched this tick. Visible PioneerRx window titles: [{titlesDisplay}]");
+        }
+        catch
+        {
+            // Best-effort diagnostic only — see OcrLogger's own posture;
+            // a logging hiccup must never affect the actual scan.
+        }
+    }
+
+    /// <summary>
+    /// REMOTE-DEBUGGING INFRASTRUCTURE — companion to
+    /// LogNoMatchDiagnosticsIfNeeded for the OTHER silent-failure shape:
+    /// a target window WAS matched (redBoxesDip/catalogHighlights came
+    /// back empty for this tick regardless), but is that because there
+    /// was genuinely nothing to flag (a legitimate empty result — no
+    /// zero-quantity rows, or no substitution clearing the 25% bar) or
+    /// because ColumnResolver couldn't find the header column(s) this
+    /// window's scanner needs at all (a bad/partial OCR capture, or a
+    /// Pioneer build/locale whose header text doesn't match this app's
+    /// expectations)? Re-runs ONLY the row-grouping/header/column-band
+    /// steps (not the full scanner pipeline — this never duplicates or
+    /// second-guesses CreateRecommendedOrdersScanner/CatalogSubstitutionScanner's
+    /// own already-computed, already-fail-safe result) purely to answer
+    /// that question for logging. Throttled the same way as
+    /// LogNoMatchDiagnosticsIfNeeded — see _lastLoggedColumnFailureSignature's
+    /// doc — keyed on the resolved header band labels themselves, so a
+    /// still-unresolved capture doesn't re-log every tick, but a
+    /// DIFFERENT bad capture (different bands) does.
+    /// </summary>
+    private void LogColumnDiagnosticsIfNeeded(OrderAssistWindowKind kind, IReadOnlyList<OcrWord> words)
+    {
+        try
+        {
+            var rows = TableRowGrouper.GroupIntoRows(words);
+            var headerRowCount = HeaderBandLocator.CountHeaderRows(rows);
+            if (headerRowCount == 0 || headerRowCount >= rows.Count)
+            {
+                LogColumnFailureOnce("(no header row detected)", Array.Empty<string>());
+                return;
+            }
+
+            var headerRows = rows.Take(headerRowCount).ToList();
+            var bands = ColumnResolver.BuildPartitionedColumnBands(headerRows);
+            var labels = bands.Select(b => b.Label).ToList();
+
+            var expectedLabels = kind == OrderAssistWindowKind.CreateRecommendedOrders
+                ? new[] { CreateRecommendedOrdersScanner.OrderQuantityHeaderLabel }
+                : new[] { CatalogSubstitutionScanner.SupplierHeaderLabel, CatalogSubstitutionScanner.RebateCostPerUnitHeaderLabel };
+
+            var missing = expectedLabels.Where(expected => !labels.Any(label => NormalizeForComparison(label) == NormalizeForComparison(expected))).ToList();
+            if (missing.Count == 0) return; // resolution actually succeeded -- an empty highlight result this tick is a legitimate "nothing to flag", not a failure worth logging
+
+            LogColumnFailureOnce(string.Join(", ", missing), labels);
+        }
+        catch
+        {
+            // Best-effort diagnostic only — see LogNoMatchDiagnosticsIfNeeded's posture.
+        }
+
+        void LogColumnFailureOnce(string missingDescription, IReadOnlyList<string> resolvedLabels)
+        {
+            var signature = $"{kind}:{string.Join("|", resolvedLabels)}";
+            if (signature == _lastLoggedColumnFailureSignature) return;
+            _lastLoggedColumnFailureSignature = signature;
+
+            var bandsDisplay = resolvedLabels.Count > 0 ? string.Join(" | ", resolvedLabels) : "(none)";
+            OcrLogger.LogTiming($"OrderAssist[{kind}]: column resolution failed for {missingDescription}. Resolved header bands this tick: [{bandsDisplay}]");
+        }
+    }
+
+    /// <summary>Mirrors ColumnResolver's own (private) NormalizeLabel — whitespace-collapsed, case-insensitive — for this diagnostic's own label comparison only; never used to influence the actual resolution ColumnResolver.ResolveExact performs.</summary>
+    private static string NormalizeForComparison(string label) =>
+        string.Join(" ", label.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
 }
