@@ -247,8 +247,8 @@ public sealed class IntegratedOverlayCoordinator
     /// </summary>
     public event EventHandler? ToggleStateChanged;
 
-    /// <summary>Raised when the poll-driven right-click detection (IntegratedBoxesWindow.PollCursorForHover — see HoverStateMachine, fix/hover-popup-live branch) fires over a verdict bar's hotspot — MainWindow.xaml.cs handles this by opening Integrated/ReportErrorWindow prefilled with the field's current verdict data. Wired once, in EnsureBoxesWindow, at construction.</summary>
-    public event EventHandler<VerdictFieldInfo>? ReportErrorRequested;
+    /// <summary>Raised when the poll-driven right-click detection (IntegratedBoxesWindow.PollCursorForHover — see HoverStateMachine, fix/hover-popup-live branch) fires over a verdict bar's hotspot — MainWindow.xaml.cs handles this by opening Integrated/ReportErrorWindow prefilled with the field's current verdict data. Wired once, in EnsureBoxesWindow, at construction. Payload extended (RXVERIFY-TROUBLESHOOT, 2026-08 round 2) with the physical click point — see ReportErrorRequestInfo's own doc — so the dialog can be positioned on the correct monitor of a multi-monitor workstation.</summary>
+    public event EventHandler<ReportErrorRequestInfo>? ReportErrorRequested;
 
     /// <summary>
     /// Raised with the NEW checked state whenever the control box's
@@ -827,7 +827,7 @@ public sealed class IntegratedOverlayCoordinator
         if (_boxesWindow is not null) return _boxesWindow;
 
         _boxesWindow = new IntegratedBoxesWindow();
-        _boxesWindow.ReportErrorRequested += (_, field) => ReportErrorRequested?.Invoke(this, field);
+        _boxesWindow.ReportErrorRequested += (_, info) => ReportErrorRequested?.Invoke(this, info);
         return _boxesWindow;
     }
 

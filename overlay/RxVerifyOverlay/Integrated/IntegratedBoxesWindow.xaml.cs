@@ -7,6 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
+using RxVerifyOverlay.Ocr;
 
 namespace RxVerifyOverlay.Integrated;
 
@@ -173,8 +174,32 @@ public sealed partial class IntegratedBoxesWindow : Window
     private double _lastDpiScaleX = 1.0;
     private double _lastDpiScaleY = 1.0;
 
+    // ------------------------------------------------------------------
+    // RIGHT-CLICK DIAGNOSTICS (RXVERIFY-TROUBLESHOOT, 2026-08 round 2 —
+    // owner: "Alt+Tab shows NO Report error window anywhere, the dialog
+    // NEVER opens"): the previous round's Activate()/Topmost fix targets
+    // MainWindow's dialog, which only ever runs if the chain gets that
+    // far — these three fields make every step of the chain (raw button
+    // state -> hotspot hit-test -> detector fire -> event raise) visible
+    // in OcrLogger's plain-text log (%TEMP%\VerifyOCR\ocr-*.log) with NO
+    // PHI (button/bool/index state only), so the NEXT right-click
+    // produces an unambiguous trail instead of another "nothing happened"
+    // report. See PollCursorForHover for where each is read/logged.
+    // ------------------------------------------------------------------
+
+    /// <summary>Edge-tracks the RAW VK_RBUTTON state independent of hotspot/dialog gating, purely so the first few presses of a session get logged REGARDLESS of whether the cursor happens to be over a hotspot — proves (or disproves) that GetAsyncKeyState sees the physical button at all on this machine, which the gated/hotspot-scoped RightClickDetector alone can never show.</summary>
+    private bool _diagRawButtonPrevDown;
+
+    /// <summary>Caps the raw-transition diagnostic to the first few presses per session (see _diagRawButtonPrevDown) — once GetAsyncKeyState is proven to see the button, logging every subsequent press forever adds nothing and just grows the log.</summary>
+    private int _diagRawButtonLogCount;
+
+    private const int DiagRawButtonLogLimit = 3;
+
+    /// <summary>Null until the first poll tick with hotspots to test against — lets the hotspot ENTER/LEAVE transition log (poll-level state, logged only on change per the troubleshooting brief) distinguish "never checked yet" from "checked and currently false".</summary>
+    private bool? _diagLastOverHotspot;
+
     /// <summary>Raised when the poll detects a right-click press (GetAsyncKeyState transition) while the cursor is over a hotspot — IntegratedOverlayCoordinator forwards this up to MainWindow.xaml.cs, which opens Integrated/ReportErrorWindow prefilled with the field's current verdict data. Never raised for a patient field (VerdictFieldInfo.IsPatientField) or when reporting is disabled (SetBoxes' reportingEnabled parameter) — see PollCursorForHover, which checks both before invoking this.</summary>
-    public event EventHandler<VerdictFieldInfo>? ReportErrorRequested;
+    public event EventHandler<ReportErrorRequestInfo>? ReportErrorRequested;
 
     // Round 4 item 4 ("boxes are colored border + fully transparent
     // middle"): no fill brushes at all anymore (see GreenBrush/RedBrush
@@ -472,12 +497,39 @@ public sealed partial class IntegratedBoxesWindow : Window
         var hotspotIndex = CursorHitTest.FindContainingRectIndex(dip.X, dip.Y, _hotspots);
         var isOverHotspot = hotspotIndex >= 0;
 
+        // DIAG: poll-level state, logged ONLY on the enter/leave
+        // transition (never every ~60ms tick) — proves the SAME hotspot
+        // test that drives the (confirmed-working) hover popup is also
+        // seeing the cursor correctly at the moment of a right-click
+        // attempt.
+        if (_diagLastOverHotspot != isOverHotspot)
+        {
+            _diagLastOverHotspot = isOverHotspot;
+            OcrLogger.LogTiming(isOverHotspot
+                ? $"[RIGHTCLICK-DIAG] hotspot ENTER index={hotspotIndex} fieldKey={_hotspotFields[hotspotIndex].FieldKey}"
+                : "[RIGHTCLICK-DIAG] hotspot LEAVE");
+        }
+
         SetHitTestTransparent(!isOverHotspot);
 
         // High-order bit of GetAsyncKeyState's return means "currently
         // down" — see that P/Invoke's own doc for why this, not a WPF
         // mouse event, is what drives right-click detection now.
         var isRightButtonDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+
+        // DIAG: RAW button edge, independent of hotspot/detector/dialog
+        // gating and capped to the first few presses per session — this
+        // is the ONE log line that answers "does GetAsyncKeyState see the
+        // physical right-click AT ALL on this machine", regardless of
+        // where the cursor happened to be. If this never appears in the
+        // log after Will right-clicks, the problem is upstream of
+        // everything else in this file (driver/remote-session/hardware).
+        if (isRightButtonDown && !_diagRawButtonPrevDown && _diagRawButtonLogCount < DiagRawButtonLogLimit)
+        {
+            _diagRawButtonLogCount++;
+            OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] raw VK_RBUTTON down-transition #{_diagRawButtonLogCount} isOverHotspot={isOverHotspot} hotspotIndex={hotspotIndex}");
+        }
+        _diagRawButtonPrevDown = isRightButtonDown;
 
         var sample = new HoverPollSample(isOverHotspot, hotspotIndex, isRightButtonDown, _reportDialogOpen, TimeSpan.FromMilliseconds(HoverPollIntervalMs));
         var result = _hoverStateMachine.Update(sample);
@@ -492,12 +544,36 @@ public sealed partial class IntegratedBoxesWindow : Window
                 break;
         }
 
-        if (result.RightClickTriggered && _reportingEnabled)
+        if (result.RightClickTriggered)
         {
             var field = _hotspotFields[hotspotIndex];
-            if (!field.IsPatientField)
+
+            // DIAG: the detector fired — everything logged from here on
+            // is rare (one right-click, not one per ~60ms tick), so each
+            // gate is worth its own line rather than throttling.
+            OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] detector FIRED hotspotIndex={hotspotIndex} fieldKey={field.FieldKey} reportingEnabled={_reportingEnabled} dialogOpen={_reportDialogOpen} isPatientField={field.IsPatientField}");
+
+            switch (RightClickOutcomeClassifier.Classify(_reportingEnabled, field.IsPatientField))
             {
-                ReportErrorRequested?.Invoke(this, field);
+                case RightClickOutcome.SuppressedReportingDisabled:
+                    // THE LIKELY ROOT CAUSE (RXVERIFY-TROUBLESHOOT round
+                    // 2): OverlaySettings.RxVerifyReportKey defaults to ""
+                    // and has no in-app setting UI anywhere — see that
+                    // property's own doc. If Will's workstation has never
+                    // had it set in settings.json directly, EVERY
+                    // right-click reaches here and is silently swallowed,
+                    // by design, indistinguishable from "right-click is
+                    // broken" — this line is what proves (or rules out)
+                    // that exact scenario the next time he tries.
+                    OcrLogger.LogTiming("[RIGHTCLICK-DIAG] suppressed: reportingEnabled=false (OverlaySettings.RxVerifyReportKey is unset — see its own doc; no in-app UI sets this today)");
+                    break;
+                case RightClickOutcome.SuppressedPatientField:
+                    OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] suppressed: isPatientField=true fieldKey={field.FieldKey} (by design — see VerdictFieldInfo.IsPatientField's doc)");
+                    break;
+                case RightClickOutcome.Raised:
+                    OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] raising ReportErrorRequested fieldKey={field.FieldKey}");
+                    ReportErrorRequested?.Invoke(this, new ReportErrorRequestInfo(field, cursorPhysical));
+                    break;
             }
         }
     }
@@ -522,6 +598,11 @@ public sealed partial class IntegratedBoxesWindow : Window
         _hoverStateMachine.Reset();
         _popupWindow?.HidePopup();
         SetHitTestTransparent(true);
+        // DIAG: forget the last-logged hotspot state too, so the poll's
+        // enter/leave transition log doesn't stay silent after a later
+        // Show() just because it happens to land on the same true/false
+        // value this hide cycle last saw (see _diagLastOverHotspot's doc).
+        _diagLastOverHotspot = null;
         Hide();
     }
 
