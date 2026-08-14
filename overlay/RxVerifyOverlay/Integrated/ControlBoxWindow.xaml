@@ -158,6 +158,16 @@
                     never inherit a hidden overlay from a previous shift.
                 -->
                 <CheckBox x:Name="HideOverlayCheckBox" Content="Hide (\)" VerticalAlignment="Center" Checked="OnHideOverlayToggled" Unchecked="OnHideOverlayToggled" ToolTip="Hide overlay (\)" />
+                <!--
+                    ORDER ASSIST (separate, independently-toggled module —
+                    see overlay/RxVerifyOverlay/OrderAssist/OrderAssistCoordinator.cs):
+                    minimal checkbox matching this row's existing style,
+                    deliberately no new visual treatment. Defaults
+                    unchecked (OverlaySettings.OrderAssistEnabled defaults
+                    false) — this is an opt-in "turn it on while doing the
+                    order" mode, not something that scans by default.
+                -->
+                <CheckBox x:Name="OrderAssistCheckBox" Content="Order Assist" Margin="8,0,0,0" VerticalAlignment="Center" Checked="OnOrderAssistToggled" Unchecked="OnOrderAssistToggled" ToolTip="Highlight zero order quantities and cheaper secondary substitutions on Pioneer's order screens" />
             </StackPanel>
         </StackPanel>
 

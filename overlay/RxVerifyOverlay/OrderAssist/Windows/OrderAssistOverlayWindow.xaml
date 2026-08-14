@@ -1,0 +1,23 @@
+<Window x:Class="RxVerifyOverlay.OrderAssist.Windows.OrderAssistOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Order Assist Overlay"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        WindowStartupLocation="Manual"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowActivated="False">
+    <!--
+        Order Assist's own click-through highlight layer — see the
+        code-behind's class doc. Deliberately a SEPARATE window/XAML file
+        from Integrated/IntegratedBoxesWindow.xaml: same rendering pattern
+        (a transparent Canvas holding Border rects, positioned in physical
+        pixels via the code-behind), but zero shared markup/resources, so
+        this module stays trivially easy to delete/disable/split off
+        without touching the verify flow's own overlay window at all.
+    -->
+    <Canvas x:Name="HighlightCanvas" Background="Transparent" />
+</Window>

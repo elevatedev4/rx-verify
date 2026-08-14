@@ -87,6 +87,19 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // becomes Integrated), same as _viewModel.
     private readonly IntegratedOverlayCoordinator _integratedOverlay;
 
+    // ORDER ASSIST (overlay/RxVerifyOverlay/OrderAssist/OrderAssistCoordinator.cs)
+    // — a separate, independently-toggled module (own timer, own window
+    // detection, own OCR pass, own highlight window; see that class's own
+    // doc). This window is the ONLY place outside the OrderAssist folder
+    // that references an OrderAssist.* type at all — _integratedOverlay
+    // above (the verify flow's own composition class) only ever forwards
+    // a plain bool via OrderAssistToggleRequested, never anything
+    // OrderAssist-typed, so the two modules stay fully decoupled. Cheap
+    // to construct unconditionally (no timer/OCR/window work happens
+    // until SetEnabled(true) runs) — same non-nullable, always-constructed
+    // posture as _integratedOverlay.
+    private readonly OrderAssist.OrderAssistCoordinator _orderAssistCoordinator;
+
     /// <summary>
     /// INTEGRATED DISPLAY MODE: whether this window should start hidden.
     /// Read by App.xaml.cs right after construction — a window that starts
@@ -231,6 +244,22 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // constructor's params).
         _integratedOverlay.ReportErrorRequested += (_, field) => OpenReportErrorDialog(field);
 
+        // ORDER ASSIST — see the field doc above. Constructed here
+        // (cheap), then immediately synced to whatever OrderAssistEnabled
+        // was last persisted as (so a pharmacist who left it ON in a
+        // previous session doesn't have to re-toggle it after a relaunch
+        // — same "persisted, resumes on launch" posture as Method/
+        // DisplayMode above), and wired to the control box's toggle via
+        // _integratedOverlay's plain-bool passthrough event.
+        _orderAssistCoordinator = new OrderAssist.OrderAssistCoordinator(_settings);
+        _integratedOverlay.OrderAssistToggleRequested += (_, enabled) =>
+        {
+            _settings.OrderAssistEnabled = enabled;
+            _settings.Save();
+            _orderAssistCoordinator.SetEnabled(enabled);
+        };
+        _orderAssistCoordinator.SetEnabled(_settings.OrderAssistEnabled);
+
         // VerifyOCR capture-region override — see Models/OverlaySettings.cs
         // and MainWindow.xaml's "OCR capture region" section.
         UseExplicitCaptureRegionCheckBox.IsChecked = _settings.UseExplicitCaptureRegion;
@@ -339,6 +368,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             _engineClient.Dispose();
             _titleChangeWatcher.Dispose();
             _integratedOverlay.Shutdown();
+            _orderAssistCoordinator.Shutdown();
 
             // App.xaml sets ShutdownMode="OnExplicitShutdown" (needed
             // because this window can now start never-shown in Integrated
