@@ -43,6 +43,26 @@ public sealed class IntegratedOverlayCoordinator
     private const double ControlBoxWidthDip = 420;      // must match ControlBoxWindow.xaml's Width — round 9: narrowed from 480 to 420 as part of the "minimal layout" redesign (2-row layout, icon-ish action buttons, no redundant "Source:"/"View:" labels) needing less horizontal room
     private const double ControlBoxHeightDip = 76;      // must match ControlBoxWindow.xaml's Height — round 9: shortened from 92 to 76 when the redesign collapsed the box from 3 rows to 2
 
+    // ORDER MODE control-box anchor (owner's live pharmacy report,
+    // 2026-08-14: "the recommended order pops up in a window above the
+    // main Pioneer ... activating 'Order mode' ... should change the
+    // layout of the box to make it fit where it's not blocking anything,
+    // like just next to the 'Color legend' on the top right"). Distinct
+    // from the Verify-mode constants above (which are UNCHANGED — "Verify
+    // mode keeps the current layout/position" per spec): Pioneer's
+    // "Color Legend" link hugs its own window's top-right corner just
+    // below the Actions/Tools/Search/Reports/Analysis menu row (see
+    // order-assist-Screenshot 2026-08-13 175418.png) — a much smaller,
+    // higher band than where the Verify-mode box sits. NEEDS LIVE
+    // CONFIRMATION on Will's real workstation (picked from the reference
+    // screenshot's proportions against the SAME 1928-wide-window
+    // assumption the Verify-mode constants above already use, not yet
+    // verified against a live Pioneer window in Order mode).
+    private const double OrderModeControlBoxRightInsetDip = 300; // box's LEFT edge this far in from the window's RIGHT edge — keeps clear of "Color Legend," which sits flush against the right edge itself
+    private const double OrderModeControlBoxTopOffsetDip = 34;   // level with the menu's second row (Color Legend's own row), just under Actions/Tools/Search/Reports/Analysis
+    private const double OrderModeControlBoxWidthDip = 260;      // must match ControlBoxWindow.xaml's CompactOrderPanel sizing — small enough to sit beside Color Legend, not over it
+    private const double OrderModeControlBoxHeightDip = 34;      // a single compact row — just the Mode dropdown, no toggles/buttons (see ControlBoxWindow.SetOrderAssistState)
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
@@ -446,6 +466,25 @@ public sealed class IntegratedOverlayCoordinator
             UpdateControlBox(controlBoxHandle, controlBoxBounds, isControlBoxMaximized);
         }
 
+        // MODE EXCLUSIVITY (owner's live pharmacy report, 2026-08-14:
+        // "activating 'Order mode' instead of Verify mode ... make sure
+        // that the logic will work"): while Order Assist is enabled, the
+        // verify boxes/hover layer is suppressed entirely — see
+        // VerifyModeGate's own doc. The narrow Rx-screen `window` attach
+        // above is still paid for regardless of mode (it already feeds
+        // pioneerExists/the fallback-separate-window trap, unconditionally,
+        // before this point), but every ADDITIONAL per-field UIA/tab-gate
+        // read below (CommonTabGate, RxIdentityGate, field-rect
+        // resolution) is real, avoidable cost while in Order mode, whose
+        // result could never be shown anyway. Switching back to Verify
+        // mode needs no separate "resume" step — this just stops
+        // short-circuiting on the very next tick.
+        if (VerifyModeGate.ShouldSuppressVerifyBoxes(_settings.OrderAssistEnabled))
+        {
+            HideBoxesIfShown();
+            return;
+        }
+
         // BOXES: still requires the NARROW Rx-screen attach, that specific
         // window being foreground, maximized, and verified content. A
         // pharmacist parked on PioneerRx's queue/search screen
@@ -801,10 +840,20 @@ public sealed class IntegratedOverlayCoordinator
         var box = EnsureControlBox();
         var scale = DpiScaleFor(windowHandle);
 
-        var physicalX = bounds.Right - (int)Math.Round(ControlBoxRightInsetDip * scale);
-        var physicalY = bounds.Top + (int)Math.Round(ControlBoxTopOffsetDip * scale);
-        var physicalWidth = (int)Math.Round(ControlBoxWidthDip * scale);
-        var physicalHeight = (int)Math.Round(ControlBoxHeightDip * scale);
+        // ORDER MODE LAYOUT (owner spec, 2026-08-14) — see the
+        // OrderModeControlBox*Dip constants' own doc. A plain bool read
+        // straight from settings, same as everywhere else this class
+        // touches OrderAssistEnabled (see OrderAssistToggleRequested's doc).
+        var orderModeActive = _settings.OrderAssistEnabled;
+        var rightInsetDip = orderModeActive ? OrderModeControlBoxRightInsetDip : ControlBoxRightInsetDip;
+        var topOffsetDip = orderModeActive ? OrderModeControlBoxTopOffsetDip : ControlBoxTopOffsetDip;
+        var widthDip = orderModeActive ? OrderModeControlBoxWidthDip : ControlBoxWidthDip;
+        var heightDip = orderModeActive ? OrderModeControlBoxHeightDip : ControlBoxHeightDip;
+
+        var physicalX = bounds.Right - (int)Math.Round(rightInsetDip * scale);
+        var physicalY = bounds.Top + (int)Math.Round(topOffsetDip * scale);
+        var physicalWidth = (int)Math.Round(widthDip * scale);
+        var physicalHeight = (int)Math.Round(heightDip * scale);
 
         box.SetMaximizedGuardState(isMaximized);
         // Owner request (2026-08-13): "Remove the counter showing the
