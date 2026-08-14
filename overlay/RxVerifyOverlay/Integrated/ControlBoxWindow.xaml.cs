@@ -346,4 +346,16 @@ public sealed partial class ControlBoxWindow : Window
         var isOrderMode = ((ComboBox)sender).SelectedIndex == 1;
         OrderAssistToggleRequested?.Invoke(this, isOrderMode);
     }
+
+    /// <summary>
+    /// REVIEW FIX (pre-merge, 2026-08-14 — escape-hatch hardening): see
+    /// VerifyEscapeButton's own XAML doc. Raises the EXACT SAME event
+    /// with the EXACT SAME value (false = Verify) as picking "Mode:
+    /// Verify" in ModeComboBoxCompact — IntegratedOverlayCoordinator/
+    /// MainWindow.xaml.cs can't tell the two apart, and don't need to.
+    /// This is a plain Button (the control type already proven reliable
+    /// on this WS_EX_NOACTIVATE window), so it works regardless of
+    /// whether the ComboBox's own dropdown popup does.
+    /// </summary>
+    private void OnVerifyEscapeButtonClick(object sender, RoutedEventArgs e) => OrderAssistToggleRequested?.Invoke(this, false);
 }

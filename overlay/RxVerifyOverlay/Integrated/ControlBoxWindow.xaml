@@ -207,12 +207,28 @@
             window to its small ORDER-MODE constants whenever this is
             showing (see that class's OrderModeControlBox*Dip docs).
             Collapsed by default (Verify mode, the default state).
+
+            REVIEW FIX (pre-merge, 2026-08-14 — escape-hatch hardening):
+            ModeComboBoxCompact is the FIRST ComboBox ever placed on this
+            WS_EX_NOACTIVATE window — plain Buttons (RefreshButton,
+            CloseButton, etc.) are proven to work here, but a ComboBox's
+            dropdown POPUP is a separate, unproven top-level window of its
+            own on a non-activating parent. If that popup ever failed to
+            open on a real workstation, the pharmacist would be stuck in
+            Order mode with no way out (CloseButton is hidden in this
+            panel — see SetOrderAssistState). VerifyEscapeButton is a
+            tiny, quiet, PLAIN Button (the one control type already
+            proven reliable here) that goes straight back to Verify mode
+            — same code path as picking "Mode: Verify" in the dropdown,
+            see OnVerifyEscapeButtonClick — regardless of whether the
+            ComboBox popup itself works.
         -->
         <StackPanel x:Name="CompactOrderPanel" Visibility="Collapsed" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
             <ComboBox x:Name="ModeComboBoxCompact" Style="{StaticResource ModeComboBoxStyle}" Width="120" SelectionChanged="OnModeComboBoxChanged" ToolTip="Switch back to Verify mode to resume rx-verification highlights">
                 <ComboBoxItem Content="Mode: Verify" />
                 <ComboBoxItem Content="Mode: Order" />
             </ComboBox>
+            <Button x:Name="VerifyEscapeButton" Content="Verify" Margin="4,0,0,0" Padding="4,1" FontSize="9" MinHeight="18" MinWidth="0" Click="OnVerifyEscapeButtonClick" ToolTip="Switch straight back to Verify mode" />
         </StackPanel>
 
         <!--
