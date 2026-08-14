@@ -58,8 +58,18 @@ public sealed class IntegratedOverlayCoordinator
     // screenshot's proportions against the SAME 1928-wide-window
     // assumption the Verify-mode constants above already use, not yet
     // verified against a live Pioneer window in Order mode).
+    //
+    // REVIEW FIX (pre-merge, 2026-08-14 — reviewer re-measured the
+    // reference screenshot directly): order-assist-Screenshot
+    // 2026-08-13 175418.png is 1917px wide; the Actions/Tools/Search/
+    // Reports/Analysis menu row sits at roughly y≈33, and "Color Legend"
+    // sits DISTINCTLY BELOW it at roughly y≈60 — the original
+    // OrderModeControlBoxTopOffsetDip=34 landed the box on the menu row
+    // itself, covering Pioneer's own menu, precisely what the owner asked
+    // to avoid. Corrected to 60 (Color Legend's own row). Re-measured and
+    // confirmed independently against the same screenshot before this fix.
     private const double OrderModeControlBoxRightInsetDip = 300; // box's LEFT edge this far in from the window's RIGHT edge — keeps clear of "Color Legend," which sits flush against the right edge itself
-    private const double OrderModeControlBoxTopOffsetDip = 34;   // level with the menu's second row (Color Legend's own row), just under Actions/Tools/Search/Reports/Analysis
+    private const double OrderModeControlBoxTopOffsetDip = 60;   // level with "Color Legend" itself, NOT the Actions/Tools/Search/Reports/Analysis menu row above it (see REVIEW FIX above) — NEEDS LIVE CONFIRMATION, see this constant group's own doc
     private const double OrderModeControlBoxWidthDip = 260;      // must match ControlBoxWindow.xaml's CompactOrderPanel sizing — small enough to sit beside Color Legend, not over it
     private const double OrderModeControlBoxHeightDip = 34;      // a single compact row — just the Mode dropdown, no toggles/buttons (see ControlBoxWindow.SetOrderAssistState)
 
