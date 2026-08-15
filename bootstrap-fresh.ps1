@@ -4,27 +4,53 @@
     .NET 8 SDK via winget if missing, clones the repo, then hands off to
     update-and-run.ps1.
 
+.PARAMETER ReportKey
+    Optional. HQ's dedicated /api/rxverify-reports bearer key to seed on
+    THIS workstation (see Models/OverlaySettings.cs RxVerifyReportKey) -
+    forwarded straight through to update-and-run.ps1's own -ReportKey
+    parameter in step 7 below, which does the actual settings.json
+    read/merge/write (see that script's Set-ReportKeyIfProvided). Omitted
+    (the default, '') means "don't seed one" - the fresh PC ends up
+    exactly as it did before this parameter existed: reporting simply
+    stays disabled until a key is provided some other way. Passing a real
+    key here is what fixes the root cause this branch exists for - every
+    pharmacy PC except the one the owner hand-edited has never had this
+    field set at all, so right-click error-reporting has been silently
+    dead everywhere else (see RightClickOutcomeClassifier.cs).
+
 .DESCRIPTION
     Meant to be run from an interactive PowerShell console by pasting the
-    one-liner from README.md, which pipes this script straight into
-    Invoke-Expression:
+    one-liner from README.md. Because -ReportKey is a real parameter, this
+    is invoked as a downloaded SCRIPTBLOCK, not piped into `iex`:
 
-        [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1 | iex
+        [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1))) -ReportKey '<REPORTKEY>'
 
-    Because it runs via `iex` inside Will's own already-open PowerShell
-    console - not launched as its own process the way update-and-run.ps1
+    `irm ... | iex` has no way to pass arguments to the script it runs -
+    that's exactly why vaccine-assist's own bootstrap-fresh.ps1
+    (~/claude/vaccine-assist) already made this same switch for its
+    -Email/-Password/-ServerUrl parameters; this mirrors that mechanism.
+    -ReportKey MUST be single-quoted in that one-liner, not double-quoted:
+    Windows PowerShell expands `$` inside a double-quoted string, so a key
+    containing `$` would silently truncate with zero diagnostic signal.
+    The one-liner still works with -ReportKey omitted entirely (useful on
+    a machine that doesn't need one seeded, or already has one) - every
+    step below that depends on it treats a missing/empty value as "leave
+    it alone", never as an error.
+
+    Because it runs via a downloaded scriptblock rather than a script file
+    on disk - not launched as its own process the way update-and-run.ps1
     and install-shortcut.ps1 are (via `powershell -File ...`) - two things
     that are safe in those scripts are NOT safe here:
 
-      - $PSScriptRoot is empty/unavailable under `iex` (there is no script
-        file on disk to locate). Every path below is built explicitly from
-        $env:USERPROFILE instead.
+      - $PSScriptRoot is empty/unavailable when invoked this way (there is
+        no script file on disk to locate). Every path below is built
+        explicitly from $env:USERPROFILE instead.
       - `exit` would close Will's actual PowerShell window, not just this
-        script, since `iex` runs in his current session rather than a
-        child process. Every failure path below uses `throw` instead,
-        caught by the try/catch at the bottom, so a failure prints a clear
-        message and hands control back to Will's prompt - the window stays
-        open either way.
+        script, since the scriptblock runs in his current session rather
+        than a child process. Every failure path below uses `throw`
+        instead, caught by the try/catch at the bottom, so a failure
+        prints a clear message and hands control back to Will's prompt -
+        the window stays open either way.
 
     Steps:
 
@@ -68,13 +94,15 @@
          install-shortcut.ps1 can always be re-run by hand later.
       6. Hands off to update-and-run.ps1 (pull + build + launch) via
          `powershell -ExecutionPolicy Bypass -File ...`, the same command
-         the "every run after" workflow in README.md uses. Since fresh PCs
-         default to a Restricted execution policy, -ExecutionPolicy Bypass
-         is required for that handoff to run at all. update-and-run.ps1
-         now also verifies Git/Node/dotnet are present on its own before
-         doing anything else, so this handoff is safe even if step 1-4's
-         install/PATH-refresh dance above somehow left something not
-         resolving yet in this console.
+         the "every run after" workflow in README.md uses - passing
+         -ReportKey straight through (see that parameter's own doc above
+         and update-and-run.ps1's -ReportKey doc for what it actually does
+         with it). Since fresh PCs default to a Restricted execution
+         policy, -ExecutionPolicy Bypass is required for that handoff to
+         run at all. update-and-run.ps1 now also verifies Git/Node/dotnet
+         are present on its own before doing anything else, so this
+         handoff is safe even if step 1-4's install/PATH-refresh dance
+         above somehow left something not resolving yet in this console.
 
     Windows PowerShell 5.1 compatible on purpose (Windows' default) - no
     PS7-only syntax (ternary, ??, &&/||, Join-Path -AdditionalChildPath,
@@ -83,8 +111,16 @@
 .NOTES
     SYNTHETIC DATA ONLY applies to this repo as a whole (see README.md) -
     this script itself never touches patient/prescriber data, only
-    installs tooling and clones/builds source code.
+    installs tooling and clones/builds source code. -ReportKey is a
+    low-privilege, report-intake-only bearer secret (see
+    OverlaySettings.RxVerifyReportKey's own doc for why it's deliberately
+    NOT the broader Manager HQ secret) - still not something to hardcode
+    or echo back in this script's own output, just not PHI.
 #>
+
+param(
+    [string]$ReportKey = ''
+)
 
 function Write-Step {
     param([string]$Message)
@@ -97,9 +133,11 @@ function Write-Detail {
 }
 
 function Invoke-RxVerifyBootstrap {
+    param([string]$ReportKey)
+
     # Scoped to THIS function only (PowerShell preference variables are
     # function-scoped) so it never bleeds into Will's interactive session
-    # after this script finishes running via `iex`.
+    # after this script finishes running.
     $ErrorActionPreference = 'Stop'
 
     $RepoUrl = 'https://github.com/elevatedev4/rx-verify.git'
@@ -277,11 +315,16 @@ function Invoke-RxVerifyBootstrap {
     # is the last thing this script does either way.
     # -------------------------------------------------------------
     Write-Step 'Handing off to update-and-run.ps1 (pull + build + launch)...'
-    powershell -ExecutionPolicy Bypass -File "$LauncherScriptPath"
+    # -ReportKey "$ReportKey" (quoted, even though it may be empty) -
+    # PowerShell 5.1 can silently DROP an unquoted empty-string argument
+    # when building a native command line, which would leave -ReportKey
+    # looking like it has no value at all and throw a parameter-binding
+    # error in the child process instead of just passing ''.
+    powershell -ExecutionPolicy Bypass -File "$LauncherScriptPath" -ReportKey "$ReportKey"
 }
 
 try {
-    Invoke-RxVerifyBootstrap
+    Invoke-RxVerifyBootstrap -ReportKey $ReportKey
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red
     Write-Host 'Copy the text above (including any error output) and send it to Will/dev. Nothing destructive has happened - any tools already installed are kept, so pasting the same bootstrap command again later will pick up where it left off. If the error above was about a partial repo copy, run the exact command it gave you first, then paste the bootstrap command again.' -ForegroundColor Red

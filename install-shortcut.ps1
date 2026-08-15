@@ -105,6 +105,12 @@ $powershellExePath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powe
 $wshShell = New-Object -ComObject WScript.Shell
 $shortcut = $wshShell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $powershellExePath
+# Deliberately NO -ReportKey here (feat/report-key-delivery) - the
+# shortcut is a fixed .lnk with no way to carry a secret through it, and
+# re-running update-and-run.ps1 with -ReportKey omitted defaults it to ''
+# there, which Set-ReportKeyIfProvided treats as "leave settings.json
+# alone". A double-click of this shortcut can therefore never blank out a
+# RxVerifyReportKey a previous bootstrap-fresh.ps1 run already seeded.
 $shortcut.Arguments = '-ExecutionPolicy Bypass -File "' + $LauncherScriptPath + '"'
 $shortcut.WorkingDirectory = $RepoPath
 $shortcut.IconLocation = $powershellExePath + ',0'

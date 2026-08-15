@@ -2,6 +2,18 @@
 .SYNOPSIS
     One-click update + build + launch for the Rx Verify overlay.
 
+.PARAMETER ReportKey
+    Optional. HQ's dedicated /api/rxverify-reports bearer key for THIS
+    workstation (see Models/OverlaySettings.cs RxVerifyReportKey /
+    Reporting/RxReportSubmitter.cs). When passed and different from what
+    %AppData%\RxVerifyOverlay\settings.json already has (or that field is
+    missing entirely), it's written/merged into settings.json WITHOUT
+    touching any other setting already there - see Set-ReportKeyIfProvided
+    below. Omitted (the default, '') means "don't touch it" - this is
+    what makes it safe for the Desktop shortcut (install-shortcut.ps1) to
+    always call this script with no -ReportKey at all and never blank out
+    a key a previous bootstrap-fresh.ps1 run already seeded.
+
 .DESCRIPTION
     Designed to be started from the "Rx Verify" Desktop shortcut created
     by install-shortcut.ps1, or run directly from wherever this repo is
@@ -20,6 +32,11 @@
          that (rare - some installers need a genuinely fresh console),
          the script stops and says to close/reopen the window and
          re-run - installs already done are kept.
+      1a. If -ReportKey was passed, seeds/updates RxVerifyReportKey in
+         %AppData%\RxVerifyOverlay\settings.json - see
+         Set-ReportKeyIfProvided and the -ReportKey parameter doc above.
+         Independent of every other step (pure local file I/O, no repo/
+         network/build dependency), so it runs early and unconditionally.
       2. Self-locates the repo from the folder this script lives in
          ($PSScriptRoot) - no hardcoded path. Works identically whether
          the repo is at \claude\rx-verify, \rx-verify, or anywhere else,
@@ -76,8 +93,16 @@
 .NOTES
     SYNTHETIC DATA ONLY applies to this repo as a whole (see README.md)
     - this script itself never touches patient/prescriber data, only
-    source code and build artifacts.
+    source code and build artifacts. -ReportKey is a low-privilege,
+    report-intake-only bearer secret (see OverlaySettings.RxVerifyReportKey's
+    own doc for why it's deliberately NOT the broader Manager HQ secret) -
+    still not something to hardcode or echo back in this script's own
+    output, just not PHI.
 #>
+
+param(
+    [string]$ReportKey = ''
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -128,6 +153,103 @@ function Get-CachedValue {
 function Set-CachedValue {
     param([string]$Path, [string]$Value)
     Set-Content -Path $Path -Value $Value -NoNewline
+}
+
+# ---------------------------------------------------------------------
+# RxVerifyReportKey delivery (feat/report-key-delivery): the owner
+# hand-edited %AppData%\RxVerifyOverlay\settings.json on ONE workstation
+# to set this field - every other pharmacy PC has never had it set, so
+# right-click error-reporting is silently dead everywhere else (see
+# Integrated/RightClickOutcomeClassifier.cs SuppressedReportingDisabled).
+# This is the permanent fix: deliver the key through the install/update
+# flow instead, same pattern as vaccine-assist's bootstrap-fresh.ps1
+# seeding %AppData%\VaccineAssist\settings.json.
+#
+# The DECISION this function implements (skip when no key was passed;
+# skip when the stored value already matches; otherwise write, backing up
+# first if the existing file is corrupt) is mirrored in plain TypeScript
+# at scripts/report-key-settings-merge.ts::decideReportKeyMerge and
+# covered by vitest there (tests/report-key-settings-merge.test.ts) -
+# there is no PowerShell available to unit-test THIS copy directly, so
+# that mirror is the closest thing to automated coverage this logic has.
+# Keep the two in sync if this ever changes.
+# ---------------------------------------------------------------------
+function Set-ReportKeyIfProvided {
+    param([string]$ReportKey)
+
+    if ([string]::IsNullOrWhiteSpace($ReportKey)) {
+        Write-Detail 'No -ReportKey passed - leaving any existing RxVerifyReportKey in settings.json untouched.'
+        return
+    }
+
+    $settingsDir = Join-Path $env:APPDATA 'RxVerifyOverlay'
+    $settingsPath = Join-Path $settingsDir 'settings.json'
+    if (-not (Test-Path $settingsDir)) {
+        New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+    }
+
+    # Read + parse the existing file, if any. A missing file is NOT an
+    # error (fresh install - fresh workstations get a minimal settings.json
+    # with just this one field, and OverlaySettings.Load()/the app itself
+    # fills in every other default on first launch). A file that exists
+    # but fails to parse (hand-edited and broken, truncated by a crash
+    # mid-write, etc.) is backed up alongside itself - NEVER silently
+    # discarded - and a fresh object is written in its place, same
+    # "never destroy without a trace, always explain" covenant every other
+    # script in this repo follows.
+    $settingsObj = $null
+    if (Test-Path $settingsPath) {
+        try {
+            $raw = Get-Content -Path $settingsPath -Raw -ErrorAction Stop
+            $settingsObj = $raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $backupPath = $settingsPath + '.corrupt-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.bak'
+            try {
+                Copy-Item -Path $settingsPath -Destination $backupPath -Force -ErrorAction Stop
+                Write-Host "settings.json was corrupt/unreadable - backed it up to $backupPath and will write a fresh one with just RxVerifyReportKey set (the app fills in every other default itself on next launch)." -ForegroundColor Yellow
+            } catch {
+                Write-Host "settings.json was corrupt/unreadable and could not be backed up (see error above) - writing a fresh one with just RxVerifyReportKey anyway." -ForegroundColor Yellow
+            }
+            $settingsObj = $null
+        }
+    }
+
+    if ($null -eq $settingsObj) {
+        $settingsObj = [PSCustomObject]@{}
+    }
+
+    # ConvertFrom-Json can hand back something other than an object for
+    # pathological input (e.g. settings.json containing just `"5"` or
+    # `[1,2,3]` - valid JSON, not a JSON OBJECT). PSObject.Properties still
+    # exists on every PSCustomObject/primitive PowerShell wraps, but
+    # Add-Member on some of those shapes throws - treat anything that
+    # isn't a real object the same as "corrupt", rather than letting that
+    # throw crash the whole update-and-run flow over one bad field.
+    if ($settingsObj -isnot [System.Management.Automation.PSCustomObject]) {
+        Write-Host "settings.json did not contain a JSON object (found: $($settingsObj.GetType().Name)) - treating it the same as corrupt and starting fresh with just RxVerifyReportKey set." -ForegroundColor Yellow
+        $settingsObj = [PSCustomObject]@{}
+    }
+
+    $existingProp = $settingsObj.PSObject.Properties['RxVerifyReportKey']
+    $existingValue = $null
+    if ($null -ne $existingProp) { $existingValue = $existingProp.Value }
+
+    # -ceq: RxVerifyReportKey is a secret token - compare it exactly,
+    # never case-insensitively, so "already matches" can't false-positive
+    # on two keys that only differ by case.
+    if (($null -ne $existingProp) -and ($existingValue -ceq $ReportKey)) {
+        Write-Detail 'RxVerifyReportKey in settings.json already matches - skipping.'
+        return
+    }
+
+    if ($null -ne $existingProp) {
+        $settingsObj.RxVerifyReportKey = $ReportKey
+    } else {
+        $settingsObj | Add-Member -NotePropertyName 'RxVerifyReportKey' -NotePropertyValue $ReportKey -Force
+    }
+
+    ($settingsObj | ConvertTo-Json -Depth 10) | Set-Content -Path $settingsPath -Encoding UTF8
+    Write-Detail 'RxVerifyReportKey written to settings.json.'
 }
 
 # Prerequisite checks shared by the "everything present" fast path and
@@ -271,6 +393,16 @@ if ($gitOk -and $nodeOk -and $dotnetOk) {
     }
     Write-Detail 'git, node, and dotnet all resolve now.'
 }
+
+# ---------------------------------------------------------------------
+# Step 1a: seed/update RxVerifyReportKey if -ReportKey was passed - see
+# the -ReportKey parameter doc at the top of this file and
+# Set-ReportKeyIfProvided's own doc above. Pure local file I/O, no repo/
+# network/build dependency, so it runs here unconditionally rather than
+# depending on anything below succeeding first.
+# ---------------------------------------------------------------------
+Write-Step 'Checking RxVerifyReportKey (%AppData%\RxVerifyOverlay\settings.json)...'
+Set-ReportKeyIfProvided -ReportKey $ReportKey
 
 # ---------------------------------------------------------------------
 # Step 1: sync to origin/main. Rather than `git pull --ff-only` (which
