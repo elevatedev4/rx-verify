@@ -322,8 +322,12 @@ PC with no Git/Node/.NET yet, and is also safe to re-run on a machine
 that already has all of it):
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1))) -ReportKey '<REPORTKEY>'
 ```
+
+(`-ReportKey` is optional — see below. Omit the whole `-ReportKey '...'`
+part, or run the older `irm ... | iex` form, and this works exactly the
+same, just without seeding a report key.)
 
 This checks for `winget` (Windows' built-in package manager, present on
 any current Windows 10/11 box — if missing, it says so and points you
@@ -331,14 +335,22 @@ at the "App Installer" Store listing, then stops); installs Git,
 Node.js LTS (needs major version 20+), and the .NET 8 SDK via `winget`
 — skipping whichever are already present/new enough; clones the repo
 to `%USERPROFILE%\claude\rx-verify` if it isn't there yet; creates the
-**"Rx Verify"** Desktop shortcut; then hands off to `update-and-run.ps1`
-for a fresh build + launch. Windows may show a few Yes/No install
-prompts along the way — click Yes. Safe to re-run any time:
-already-installed tools, an already-cloned repo, and an
-already-created shortcut are all detected and skipped/refreshed rather
-than duplicated — if a fresh install needs a new console before it's
-picked up on PATH, the script says so; just close PowerShell, reopen
-it, and paste the same line again.
+**"Rx Verify"** Desktop shortcut; seeds/updates
+`RxVerifyReportKey` in `%AppData%\RxVerifyOverlay\settings.json` if
+`-ReportKey` was passed (this is what turns on the right-click "Report
+error…" affordance — see "Error reporting" below); then hands off to
+`update-and-run.ps1` for a fresh build + launch. Windows may show a few
+Yes/No install prompts along the way — click Yes. Safe to re-run any
+time: already-installed tools, an already-cloned repo, an
+already-created shortcut, and an already-matching report key are all
+detected and skipped/refreshed rather than duplicated — if a fresh
+install needs a new console before it's picked up on PATH, the script
+says so; just close PowerShell, reopen it, and paste the same line
+again.
+
+`-ReportKey` MUST be single-quoted, not double-quoted: Windows
+PowerShell expands `$` inside a double-quoted string, so a key
+containing `$` would silently truncate with zero diagnostic signal.
 
 **2. Re-create shortcut** — only needed if the Desktop shortcut is ever
 deleted or stops working; step 1 already creates it, so most machines
@@ -370,10 +382,17 @@ What each script does:
   existing inside it, not just the folder existing, so an interrupted
   clone is never silently retried over — it tells you the exact command
   to remove the broken copy first), creates/refreshes the Desktop
-  shortcut (non-fatal if that one step fails), then hands off to
-  `update-and-run.ps1`.
+  shortcut (non-fatal if that one step fails), forwards `-ReportKey`
+  straight through to `update-and-run.ps1`, then hands off to it.
 - **`update-and-run.ps1`** — what the Desktop shortcut always runs, and
-  the workhorse behind every launch. Verifies Git/Node 20+/.NET 8 SDK
+  the workhorse behind every launch. Accepts its own optional
+  `-ReportKey` (seeds/updates `RxVerifyReportKey` in
+  `%AppData%\RxVerifyOverlay\settings.json` without touching any other
+  setting already there — see "Error reporting" below; a corrupt
+  settings.json is backed up alongside itself, never silently discarded;
+  omitted, the default, means "leave it alone", which is what makes it
+  safe for the Desktop shortcut to always call this with no `-ReportKey`
+  at all). Verifies Git/Node 20+/.NET 8 SDK
   first (installing anything missing, as above), force-syncs the local
   checkout to exactly match `origin/main` (`git fetch` + `git checkout
   -f -B main origin/main` — GitHub is the source of truth on these
@@ -400,6 +419,21 @@ What each script does:
   Windows 11 is stricter still), so on most current PCs you'll instead
   see a one-line prompt to right-click the Desktop shortcut and choose
   "Pin to taskbar" yourself, once.
+
+### Error reporting
+
+Right-clicking a verdict bar in Integrated mode opens a "Report error…"
+dialog — but only on a workstation that has `RxVerifyReportKey` set in
+`%AppData%\RxVerifyOverlay\settings.json`. There is no in-app UI to set
+this yet; it's delivered entirely through the install/update flow above
+(`-ReportKey` on `bootstrap-fresh.ps1` or `update-and-run.ps1`). A
+workstation with no key set still gets a clear on-screen message on
+right-click ("Error reporting isn't set up on this PC — run the pinned
+setup line from Manager HQ.") instead of doing nothing — see
+`overlay/RxVerifyOverlay/Integrated/IntegratedBoxesWindow.xaml.cs`
+`ShowReportingDisabledNotice`. Re-running the Desktop shortcut (which
+always omits `-ReportKey`) never blanks out a key a previous
+`bootstrap-fresh.ps1`/`update-and-run.ps1` run already seeded.
 
 If the sync in `update-and-run.ps1` ever fails (no network, a
 GitHub-side issue), the script stops immediately and tells you to copy
