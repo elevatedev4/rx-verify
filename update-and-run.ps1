@@ -192,41 +192,47 @@ function Set-ReportKeyIfProvided {
     # error (fresh install - fresh workstations get a minimal settings.json
     # with just this one field, and OverlaySettings.Load()/the app itself
     # fills in every other default on first launch). A file that exists
-    # but fails to parse (hand-edited and broken, truncated by a crash
-    # mid-write, etc.) is backed up alongside itself - NEVER silently
-    # discarded - and a fresh object is written in its place, same
-    # "never destroy without a trace, always explain" covenant every other
-    # script in this repo follows.
+    # but is unusable - fails to parse (hand-edited and broken, truncated
+    # by a crash mid-write, etc.), parses to literal `null`, or parses to
+    # valid JSON that isn't an OBJECT (e.g. just `"5"` or `[1,2,3]` -
+    # PSObject.Properties still exists on every PSCustomObject/primitive
+    # PowerShell wraps, but Add-Member on some of those shapes throws) -
+    # is treated identically: backed up alongside itself - NEVER silently
+    # discarded - and a fresh object is written in its place, same "never
+    # destroy without a trace, always explain" covenant every other script
+    # in this repo follows. REVIEW FIX: originally only the parse-failure
+    # branch backed the file up; the non-object case reset straight to an
+    # empty object with no backup. Both routes now go through the SAME
+    # backup step below.
     $settingsObj = $null
+    $settingsCorrupt = $false
     if (Test-Path $settingsPath) {
         try {
             $raw = Get-Content -Path $settingsPath -Raw -ErrorAction Stop
-            $settingsObj = $raw | ConvertFrom-Json -ErrorAction Stop
+            $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
         } catch {
-            $backupPath = $settingsPath + '.corrupt-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.bak'
-            try {
-                Copy-Item -Path $settingsPath -Destination $backupPath -Force -ErrorAction Stop
-                Write-Host "settings.json was corrupt/unreadable - backed it up to $backupPath and will write a fresh one with just RxVerifyReportKey set (the app fills in every other default itself on next launch)." -ForegroundColor Yellow
-            } catch {
-                Write-Host "settings.json was corrupt/unreadable and could not be backed up (see error above) - writing a fresh one with just RxVerifyReportKey anyway." -ForegroundColor Yellow
-            }
-            $settingsObj = $null
+            $parsed = $null
+            $settingsCorrupt = $true
+        }
+
+        if (($null -eq $parsed) -or ($parsed -isnot [System.Management.Automation.PSCustomObject])) {
+            $settingsCorrupt = $true
+        } else {
+            $settingsObj = $parsed
+        }
+    }
+
+    if ($settingsCorrupt) {
+        $backupPath = $settingsPath + '.corrupt-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.bak'
+        try {
+            Copy-Item -Path $settingsPath -Destination $backupPath -Force -ErrorAction Stop
+            Write-Host "settings.json was corrupt, unreadable, or did not contain a JSON object - backed it up to $backupPath and will write a fresh one with just RxVerifyReportKey set (the app fills in every other default itself on next launch)." -ForegroundColor Yellow
+        } catch {
+            Write-Host "settings.json was corrupt, unreadable, or did not contain a JSON object, and could not be backed up (see error above) - writing a fresh one with just RxVerifyReportKey anyway." -ForegroundColor Yellow
         }
     }
 
     if ($null -eq $settingsObj) {
-        $settingsObj = [PSCustomObject]@{}
-    }
-
-    # ConvertFrom-Json can hand back something other than an object for
-    # pathological input (e.g. settings.json containing just `"5"` or
-    # `[1,2,3]` - valid JSON, not a JSON OBJECT). PSObject.Properties still
-    # exists on every PSCustomObject/primitive PowerShell wraps, but
-    # Add-Member on some of those shapes throws - treat anything that
-    # isn't a real object the same as "corrupt", rather than letting that
-    # throw crash the whole update-and-run flow over one bad field.
-    if ($settingsObj -isnot [System.Management.Automation.PSCustomObject]) {
-        Write-Host "settings.json did not contain a JSON object (found: $($settingsObj.GetType().Name)) - treating it the same as corrupt and starting fresh with just RxVerifyReportKey set." -ForegroundColor Yellow
         $settingsObj = [PSCustomObject]@{}
     }
 

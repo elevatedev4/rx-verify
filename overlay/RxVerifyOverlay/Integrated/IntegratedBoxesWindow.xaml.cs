@@ -600,15 +600,32 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// [RIGHTCLICK-DIAG] log line just above, and nobody but Will/dev
     /// ever reads that log. That's indistinguishable from "right-click is
     /// just broken", which is the exact confusion this branch exists to
-    /// close. MessageBox.Show (rather than a new custom window, or
-    /// bolting a disabled-state banner onto ReportErrorWindow) is the
-    /// least-code way to surface this — see the branch brief's own
-    /// "keep it minimal" call. No Owner is set: this window
-    /// (IntegratedBoxesWindow) is WS_EX_NOACTIVATE/click-through and can
-    /// be hidden entirely depending on what's on screen, so an owned
-    /// MessageBox could inherit either of those in undefined ways —
-    /// same reasoning MainWindow.xaml.cs OpenReportErrorDialog already
-    /// documents for NOT setting Owner on ReportErrorWindow.
+    /// close.
+    ///
+    /// REVIEW FIX: this fires from an even weaker foreground context than
+    /// ReportErrorWindow ever did — a GetAsyncKeyState poll on a
+    /// DispatcherTimer tick, with the physical right-click having landed
+    /// on Pioneer's own window, not one of ours. MainWindow.xaml.cs
+    /// OpenReportErrorDialog needed TWO rounds (Topmost=True +
+    /// ContentRendered's Activate()/Topmost-pulse + ShowInTaskbar=True) to
+    /// stop a plain Show()/ShowDialog() from opening invisibly BEHIND
+    /// Pioneer, because every window this process owns is
+    /// WS_EX_NOACTIVATE and so the process itself never holds real
+    /// Windows foreground — Windows' anti-focus-stealing heuristics deny
+    /// an implicit activation from a background process. A bare
+    /// MessageBox.Show call here would be exactly as vulnerable, and a
+    /// notice that pops invisibly is worse than no notice at all — the
+    /// pharmacist would conclude right-click is broken again, the exact
+    /// failure this branch exists to close. MessageBoxOptions.
+    /// DefaultDesktopOnly sidesteps the whole problem rather than
+    /// re-deriving ReportErrorWindow's two-round fix for a one-line
+    /// message: it's a genuine system-modal dialog on the default
+    /// desktop, guaranteed topmost/foreground regardless of which
+    /// process/window requested it or what activation state that process
+    /// is in — no Owner, no Activate(), no Topmost-pulse needed. Showing
+    /// on the default desktop (not this app's own, since this app has
+    /// none of its own) and stealing no window state back is exactly
+    /// right for a rare, one-shot, read-and-dismiss notice like this one.
     /// </summary>
     private void ShowReportingDisabledNotice()
     {
@@ -621,7 +638,9 @@ public sealed partial class IntegratedBoxesWindow : Window
                 "Error reporting isn't set up on this PC — run the pinned setup line from Manager HQ.",
                 "Rx Verify — reporting not configured",
                 MessageBoxButton.OK,
-                MessageBoxImage.Information);
+                MessageBoxImage.Information,
+                MessageBoxResult.OK,
+                MessageBoxOptions.DefaultDesktopOnly);
         }
         finally
         {
