@@ -162,6 +162,20 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// </summary>
     private bool _reportDialogOpen;
 
+    /// <summary>
+    /// True while ShowReportingDisabledNotice's MessageBox is currently up
+    /// — feat/report-key-delivery. MessageBox.Show pumps its own nested
+    /// message loop (same mechanic as ReportErrorWindow's ShowDialog
+    /// above), which means THIS window's own _hoverPollTimer can still
+    /// tick while it's open — without this guard a pharmacist repeatedly
+    /// right-clicking the same hotspot while the notice is already
+    /// showing could stack a second (and third...) copy of it. Set/
+    /// cleared entirely within ShowReportingDisabledNotice itself (the
+    /// call is synchronous), unlike _reportDialogOpen above, which is
+    /// mirrored from MainWindow around an async dialog lifetime.
+    /// </summary>
+    private bool _reportingDisabledNoticeShowing;
+
     private readonly DispatcherTimer _hoverPollTimer;
 
     /// <summary>Pure dwell/right-click detection — see HoverStateMachine's own class doc for the full design. Reset (not replaced) on every "nothing to hover" early-out, see PollCursorForHover/HideAndResetHover.</summary>
@@ -566,6 +580,7 @@ public sealed partial class IntegratedBoxesWindow : Window
                     // broken" — this line is what proves (or rules out)
                     // that exact scenario the next time he tries.
                     OcrLogger.LogTiming("[RIGHTCLICK-DIAG] suppressed: reportingEnabled=false (OverlaySettings.RxVerifyReportKey is unset — see its own doc; no in-app UI sets this today)");
+                    ShowReportingDisabledNotice();
                     break;
                 case RightClickOutcome.SuppressedPatientField:
                     OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] suppressed: isPatientField=true fieldKey={field.FieldKey} (by design — see VerdictFieldInfo.IsPatientField's doc)");
@@ -575,6 +590,42 @@ public sealed partial class IntegratedBoxesWindow : Window
                     ReportErrorRequested?.Invoke(this, new ReportErrorRequestInfo(field, cursorPhysical));
                     break;
             }
+        }
+    }
+
+    /// <summary>
+    /// feat/report-key-delivery: a right-click on a workstation with no
+    /// RxVerifyReportKey configured used to be entirely silent from the
+    /// pharmacist's point of view — the only trace was the
+    /// [RIGHTCLICK-DIAG] log line just above, and nobody but Will/dev
+    /// ever reads that log. That's indistinguishable from "right-click is
+    /// just broken", which is the exact confusion this branch exists to
+    /// close. MessageBox.Show (rather than a new custom window, or
+    /// bolting a disabled-state banner onto ReportErrorWindow) is the
+    /// least-code way to surface this — see the branch brief's own
+    /// "keep it minimal" call. No Owner is set: this window
+    /// (IntegratedBoxesWindow) is WS_EX_NOACTIVATE/click-through and can
+    /// be hidden entirely depending on what's on screen, so an owned
+    /// MessageBox could inherit either of those in undefined ways —
+    /// same reasoning MainWindow.xaml.cs OpenReportErrorDialog already
+    /// documents for NOT setting Owner on ReportErrorWindow.
+    /// </summary>
+    private void ShowReportingDisabledNotice()
+    {
+        if (_reportingDisabledNoticeShowing) return;
+
+        _reportingDisabledNoticeShowing = true;
+        try
+        {
+            MessageBox.Show(
+                "Error reporting isn't set up on this PC — run the pinned setup line from Manager HQ.",
+                "Rx Verify — reporting not configured",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        finally
+        {
+            _reportingDisabledNoticeShowing = false;
         }
     }
 
