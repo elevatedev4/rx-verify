@@ -66,36 +66,36 @@ public sealed partial class ReportErrorWindow : Window
     /// Fire-and-forget: runs after the window above is already closed, so
     /// it must never touch a UI control on this window — payload (already
     /// captured) and _submitter (settings only) are the only things it
-    /// touches. SubmitOrQueueAsync itself never throws for the ordinary
-    /// "HQ unreachable" case — it falls back to the local queue and that's
-    /// silent by design (see its doc's FAIL SOFT section; it retries
-    /// later). The only thing worth an error popup is the rarer case where
-    /// it couldn't even queue the report (e.g. disk I/O writing
-    /// pending-reports.jsonl) — that's a genuine "this correction is gone"
-    /// failure, so it gets a real popup via Application.Current.Dispatcher
-    /// (this window is already closed by the time this runs, so nothing
-    /// on it is a safe UI-thread handle to marshal onto) using
-    /// MessageBoxOptions.DefaultDesktopOnly, same no-owner/no-activation
-    /// pattern IntegratedBoxesWindow.ShowReportingDisabledNotice already
-    /// uses to guarantee it lands in front of Pioneer without an Owner
-    /// window to anchor to.
+    /// touches. SubmitOrQueueAsync never throws (review round 2: it used to
+    /// be checked via try/catch here, but nothing on the path it wraps —
+    /// RxReportSubmitter's own catch, PendingReportsQueue.Enqueue's own
+    /// catch — could ever actually throw into it, making that catch dead
+    /// code); the ordinary "HQ unreachable" case falls back to the local
+    /// queue and returns Queued, silent by design (see its doc's FAIL SOFT
+    /// section; it retries later). The only outcome worth an error popup is
+    /// ReportSubmitOutcome.Failed — it couldn't even queue the report
+    /// locally (e.g. disk I/O writing pending-reports.jsonl) — a genuine
+    /// "this correction is gone" case, so it gets a real popup via
+    /// Application.Current.Dispatcher (this window is already closed by
+    /// the time this runs, so nothing on it is a safe UI-thread handle to
+    /// marshal onto) using MessageBoxOptions.DefaultDesktopOnly, same
+    /// no-owner/no-activation pattern
+    /// IntegratedBoxesWindow.ShowReportingDisabledNotice already uses to
+    /// guarantee it lands in front of Pioneer without an Owner window to
+    /// anchor to.
     /// </summary>
     private async System.Threading.Tasks.Task SubmitInBackgroundAsync(RxReportPayload payload)
     {
-        try
-        {
-            await _submitter.SubmitOrQueueAsync(payload);
-        }
-        catch (Exception ex)
-        {
-            Application.Current.Dispatcher.Invoke(() =>
-                MessageBox.Show(
-                    $"This report couldn't be sent OR saved locally, so it's lost: {ex.Message}",
-                    "Rx Verify — report failed",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning,
-                    MessageBoxResult.OK,
-                    MessageBoxOptions.DefaultDesktopOnly));
-        }
+        var outcome = await _submitter.SubmitOrQueueAsync(payload);
+        if (outcome != ReportSubmitOutcome.Failed) return;
+
+        Application.Current.Dispatcher.Invoke(() =>
+            MessageBox.Show(
+                "This report couldn't be sent or saved locally, so it's lost.",
+                "Rx Verify — report failed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning,
+                MessageBoxResult.OK,
+                MessageBoxOptions.DefaultDesktopOnly));
     }
 }

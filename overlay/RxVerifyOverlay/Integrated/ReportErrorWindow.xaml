@@ -54,7 +54,6 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TextBlock x:Name="FieldNameText" Grid.Row="0" Text="Field" FontSize="16" FontWeight="Bold" Margin="0,0,0,8" />
@@ -72,9 +71,7 @@
         <TextBox x:Name="CorrectionTextBox" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap"
                  Height="80" VerticalScrollBarVisibility="Auto" Margin="0,0,0,10" />
 
-        <TextBlock x:Name="SubmitStatusText" Grid.Row="4" Text="" Foreground="#FF2E7D32" Margin="0,0,0,8" HorizontalAlignment="Left" />
-
-        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="CancelButton" Content="Cancel" Padding="12,4" Margin="0,0,8,0" Click="OnCancelClick" IsCancel="True" />
             <Button x:Name="SubmitButton" Content="Submit" Padding="12,4" Click="OnSubmitClick" IsDefault="True" />
         </StackPanel>
