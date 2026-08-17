@@ -566,7 +566,47 @@ public sealed class UiaTreeWalker
             }
         }
 
+        // ROUND 3 FIX (Will's 2026-08-17 live false-yellow, gap (2b) — see
+        // Parsing/EscriptTreeParser.cs ParseRefills's doc): a renewal
+        // response's "Total Fills: N (...)" summary line is documented
+        // UNCONFIRMED as to whether it nests inside MedicationPrescribed
+        // (already covered — MedicationPrescribed's whole subtree is
+        // fully recursed above, no pruning below that level) or sits as
+        // its OWN direct sibling of MedicationPrescribed under a name
+        // other than the three RelevantNewRxChildNames this loop prunes
+        // down to. Without this, that second shape would be silently
+        // dropped here — before EscriptTreeParser.ParseRefills's own
+        // newRx.Children fallback ever gets a chance to see it — no
+        // matter how that parser searches. Narrow and cheap by
+        // construction (Name check only, never recurses into whatever
+        // this leaf's own children might be) so it can't reintroduce the
+        // W-T11 perf regression this method exists to avoid.
+        CollectTotalFillsSiblingIfPresent(newRxElement, newRxNode);
+
         return messageNode;
+    }
+
+    /// <summary>See BuildPrunedMessageNode's ROUND 3 FIX call-site comment.</summary>
+    private static void CollectTotalFillsSiblingIfPresent(AutomationElement newRxElement, EscriptNode newRxNode)
+    {
+        AutomationElement[] children;
+        try { children = newRxElement.FindAllChildren(); }
+        catch { return; }
+
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; }
+            catch { continue; }
+            if (controlType != ControlType.TreeItem) continue;
+
+            var name = SafeName(child);
+            if (FieldMap.TotalFillsKeyPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+            {
+                newRxNode.Children.Add(new EscriptNode(name));
+                return;
+            }
+        }
     }
 
     /// <summary>

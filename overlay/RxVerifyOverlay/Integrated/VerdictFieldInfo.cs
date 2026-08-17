@@ -28,7 +28,21 @@ public sealed record VerdictFieldInfo(
     string SourceValue,
     string EnteredValue,
     string Explanation,
-    string ReasonCode)
+    string ReasonCode,
+    // Trailing OPTIONAL diagnostics (2026-08-17 fix round, item 2) — never
+    // required at any existing call site (all default to "not applicable"),
+    // only ever meaningfully populated for FieldKey == "refills" by
+    // Integrated/IntegratedOverlayCoordinator.cs UpdateBoxes, from
+    // Uia/FieldReader.cs's RefillsTotalFillsLabelSeen/Prefix (see that
+    // class's doc). Threaded through to Reporting/RxReportBuilder.cs so
+    // the NEXT refills error report self-diagnoses whether the C# UIA
+    // extraction path (Parsing/EscriptTreeParser.cs ParseRefills) even
+    // SAW a Total-fills-shaped label, independent of whether it could use
+    // it — see EscriptTreeParser.DetectTotalFillsLabel's doc. Label text
+    // only (the matched FieldMap.TotalFillsKeyPrefixes constant) — never
+    // the refill count/value itself.
+    bool? RefillsTotalFillsLabelSeen = null,
+    string? RefillsTotalFillsLabelPrefix = null)
 {
     /// <summary>
     /// True for the 3 patient-identity fields (RxLogFormatter.IsPatientField)

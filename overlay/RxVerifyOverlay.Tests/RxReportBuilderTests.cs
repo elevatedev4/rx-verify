@@ -99,4 +99,57 @@ public class RxReportBuilderTests
 
         Assert.Equal("", payload.Correction);
     }
+
+    [Fact]
+    public void SourceInputModeDefaultsToNullWhenNotPassed()
+    {
+        // 2026-08-17 fix round, item 2: existing call sites/tests that
+        // don't care about this diagnostic shouldn't need updating.
+        var field = new VerdictFieldInfo("refills", "Refills", VerdictStatus.Red, "2", "3", "", "");
+
+        var payload = RxReportBuilder.Build(field, "some correction", null, null, CreatedAt);
+
+        Assert.Null(payload.SourceInputMode);
+    }
+
+    [Fact]
+    public void SourceInputModePassesThroughVerbatim()
+    {
+        var field = new VerdictFieldInfo("refills", "Refills", VerdictStatus.Red, "2", "3", "", "");
+
+        var payload = RxReportBuilder.Build(field, "some correction", null, null, CreatedAt, sourceInputMode: "uia");
+
+        Assert.Equal("uia", payload.SourceInputMode);
+    }
+
+    [Fact]
+    public void RefillsTotalFillsDiagnosticsPassThroughFromTheField()
+    {
+        // The diagnostic lives on VerdictFieldInfo (populated by
+        // Integrated/IntegratedOverlayCoordinator.cs UpdateBoxes only for
+        // the refills row — see that class's doc) and Build just carries
+        // it straight into the payload, unredacted (label text only,
+        // never a value — see RxReportPayload.RefillsTotalFillsLabelPrefix
+        // doc).
+        var field = new VerdictFieldInfo(
+            "refills", "Refills", VerdictStatus.Yellow, "(not provided)", "2", "not provided", "not_provided",
+            RefillsTotalFillsLabelSeen: true,
+            RefillsTotalFillsLabelPrefix: "Total fills: ");
+
+        var payload = RxReportBuilder.Build(field, "should be 2, source shows Total Fills 3", null, null, CreatedAt, sourceInputMode: "uia");
+
+        Assert.True(payload.RefillsTotalFillsLabelSeen);
+        Assert.Equal("Total fills: ", payload.RefillsTotalFillsLabelPrefix);
+    }
+
+    [Fact]
+    public void RefillsTotalFillsDiagnosticsDefaultToNullForOtherFields()
+    {
+        var field = new VerdictFieldInfo("quantity", "Quantity", VerdictStatus.Red, "60", "90", "Quantity mismatch", "qty_mismatch");
+
+        var payload = RxReportBuilder.Build(field, "correction", null, null, CreatedAt, sourceInputMode: "uia");
+
+        Assert.Null(payload.RefillsTotalFillsLabelSeen);
+        Assert.Null(payload.RefillsTotalFillsLabelPrefix);
+    }
 }

@@ -100,6 +100,8 @@ public sealed class FieldReader
     private static string? _cachedRxNumber;
     private static PrescriptionRecord? _cachedSource;
     private static IReadOnlyList<string> _cachedNotes = Array.Empty<string>();
+    private static bool _cachedTotalFillsLabelSeen;
+    private static string? _cachedTotalFillsLabelPrefix;
 
     public FieldReader(PioneerRxWindow window)
     {
@@ -139,6 +141,22 @@ public sealed class FieldReader
     /// the cached source.
     /// </summary>
     public IReadOnlyList<string> SourceNotes { get; private set; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Diagnostic-only (2026-08-17 fix round, item 2 — Reporting/
+    /// RxReportBuilder.cs): whether EscriptTreeParser.DetectTotalFillsLabel
+    /// found a Total-fills-shaped leaf ANYWHERE on the most recent
+    /// ReadSource() call's parsed message, independent of whether
+    /// ParseRefills actually used it as Refills — see that method's doc.
+    /// False (never null) when no structured source was read at all this
+    /// call, same "never surfaces a half-state" posture as SourceNotes.
+    /// Set alongside the per-Rx source cache (see ReadSource) so a cache
+    /// hit doesn't lose the diagnostic that came with the cached source.
+    /// </summary>
+    public bool RefillsTotalFillsLabelSeen { get; private set; }
+
+    /// <summary>Which FieldMap.TotalFillsKeyPrefixes entry matched, if RefillsTotalFillsLabelSeen — label text only, NEVER the refill count/value itself. Null when RefillsTotalFillsLabelSeen is false.</summary>
+    public string? RefillsTotalFillsLabelPrefix { get; private set; }
 
     /// <summary>
     /// What the technician entered (LEFT RxDetailsPanel), read by
@@ -313,6 +331,8 @@ public sealed class FieldReader
                     _escriptTreeFound = true;
                     SourceUnavailableReason = null;
                     SourceNotes = _cachedNotes;
+                    RefillsTotalFillsLabelSeen = _cachedTotalFillsLabelSeen;
+                    RefillsTotalFillsLabelPrefix = _cachedTotalFillsLabelPrefix;
                     return _cachedSource;
                 }
             }
@@ -340,12 +360,18 @@ public sealed class FieldReader
                 SourceUnavailableReason = switchedTab
                     ? "Escript tab opened, but no e-script tree was found under it."
                     : "No e-script source found for this Rx — it may not be an e-script, or the Escript tab couldn't be selected.";
+                RefillsTotalFillsLabelSeen = false;
+                RefillsTotalFillsLabelPrefix = null;
                 return new PrescriptionRecord();
             }
 
             var record = EscriptTreeParser.Parse(messageNode);
             var notes = EscriptTreeParser.ParseNotes(messageNode);
             SourceNotes = notes;
+
+            var (totalFillsSeen, totalFillsPrefix) = EscriptTreeParser.DetectTotalFillsLabel(messageNode);
+            RefillsTotalFillsLabelSeen = totalFillsSeen;
+            RefillsTotalFillsLabelPrefix = totalFillsPrefix;
 
             SourceUnavailableReason =
                 string.IsNullOrWhiteSpace(record.PatientName) && string.IsNullOrWhiteSpace(record.Drug?.Name)
@@ -359,6 +385,8 @@ public sealed class FieldReader
                     _cachedRxNumber = _rxNumber;
                     _cachedSource = record;
                     _cachedNotes = notes;
+                    _cachedTotalFillsLabelSeen = totalFillsSeen;
+                    _cachedTotalFillsLabelPrefix = totalFillsPrefix;
                 }
             }
 

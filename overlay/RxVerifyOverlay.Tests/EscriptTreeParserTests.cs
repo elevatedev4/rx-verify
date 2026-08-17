@@ -529,6 +529,140 @@ public class EscriptTreeParserTests
     }
 
     [Fact]
+    public void Parse_TotalFillsTrailingParenthetical_StripsAnnotationFromTheValue()
+    {
+        // ROUND 3 FIX regression test — Will's LITERAL 2026-08-17 live
+        // false-yellow report: PioneerRx's real renewal-response label is
+        // "Total Fills: 3 (including this fill)" (parenthetical AFTER the
+        // value, capital "Fills"), not the leading-parenthetical-in-the-KEY
+        // shape Parse_TotalFillsParentheticalStyle... covers. Before this
+        // fix, SplitOnLastColonSpace returned "3 (including this fill)" as
+        // the "value" (only one ": " in the whole string), which the
+        // engine's Number()-based parse can't read as a count — refills
+        // came back as effectively unparseable/lost. Must now read "3".
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Total Fills: 3 (including this fill)")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("3", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsPlainNoParenthetical_IsUnaffectedByTheTrailingStrip()
+    {
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Total fills: 4")))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("4", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsNestedDeeperInsideMedicationPrescribed_IsStillFound()
+    {
+        // ROUND 3 FIX, gap (2a): previously only MedicationPrescribed's
+        // DIRECT children were searched. A vendor that nests this summary
+        // one level deeper (e.g. under some sub-container instead of being
+        // a bare leaf) must still be found — FindTotalFillsLeaf now walks
+        // the whole MedicationPrescribed subtree.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        EscriptNode.Container("ResponseDetail",
+                            new EscriptNode("Total fills: 6"))))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("6", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void Parse_TotalFillsAsSiblingOfMedicationPrescribed_IsStillFound()
+    {
+        // ROUND 3 FIX, gap (2b): a vendor could ALSO place this line as
+        // its own direct child of the response container instead of
+        // nesting it inside MedicationPrescribed at all — ParseRefills
+        // must fall back to newRx.Children when MedicationPrescribed's
+        // subtree doesn't have it. (Uia/UiaTreeWalker.cs's matching
+        // BuildPrunedMessageNode widening is what keeps this reachable
+        // off a LIVE UIA tree — not exercised by this synthetic-tree
+        // unit test, see that file's own doc.)
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet")),
+                    new EscriptNode("Total fills: 7"))));
+
+        var record = EscriptTreeParser.Parse(message);
+
+        Assert.Equal("7", record.Refills);
+        Assert.True(record.RefillsFromTotalFills);
+    }
+
+    [Fact]
+    public void DetectTotalFillsLabel_NoTotalFillsLeafAnywhere_ReturnsNotSeen()
+    {
+        var (seen, prefix) = EscriptTreeParser.DetectTotalFillsLabel(BuildFullSyntheticMessage());
+
+        Assert.False(seen);
+        Assert.Null(prefix);
+    }
+
+    [Fact]
+    public void DetectTotalFillsLabel_LeafPresentAndUsed_ReturnsSeenWithMatchedPrefix()
+    {
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("RxRenewalResponse",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Total fills: 4")))));
+
+        var (seen, prefix) = EscriptTreeParser.DetectTotalFillsLabel(message);
+
+        Assert.True(seen);
+        Assert.Equal("Total fills: ", prefix);
+    }
+
+    [Fact]
+    public void DetectTotalFillsLabel_LeafPresentButRefillsKeyWins_StillReportsSeen()
+    {
+        // Diagnostic-only method: must answer "was a Total-fills label
+        // present at all", independent of ParseRefills's own "Refills ("
+        // wins when both are present" precedence rule — see
+        // Parse_BothRefillsAndTotalFillsKeysPresent_RefillsKeyWins, which
+        // covers record.Refills/RefillsFromTotalFills for this same shape.
+        var message = EscriptNode.Container("Message",
+            EscriptNode.Container("Body",
+                EscriptNode.Container("NewRx",
+                    EscriptNode.Container("MedicationPrescribed",
+                        EscriptNode.Leaf("DrugDescription", "Placebo 10 MG Tablet"),
+                        new EscriptNode("Refills (NewRx: One dispense, plus (Quantity) refills): 3"),
+                        new EscriptNode("Total fills: 4")))));
+
+        var (seen, prefix) = EscriptTreeParser.DetectTotalFillsLabel(message);
+
+        Assert.True(seen);
+        Assert.Equal("Total fills: ", prefix);
+    }
+
+    [Fact]
     public void Parse_PrescriberNpiNestedUnderIdentification_NotADirectLeaf()
     {
         var message = EscriptNode.Container("Message",
