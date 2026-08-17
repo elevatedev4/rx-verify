@@ -44,31 +44,58 @@ public sealed partial class ReportErrorWindow : Window
     private void OnCancelClick(object sender, RoutedEventArgs e) => Close();
 
     /// <summary>
-    /// Builds the payload (Reporting/RxReportBuilder — the one place the
-    /// "NO patient fields in the payload" redaction rule is enforced) and
-    /// hands it to RxReportSubmitter, which itself never throws / never
-    /// surfaces a failure (fail-soft: queues locally instead — see that
-    /// class's doc). Both possible outcomes (SentToHq/Queued) are
-    /// success-shaped from the pharmacist's point of view, so this never
-    /// shows an error state — only which of the two happy paths it took,
-    /// then auto-closes.
+    /// Owner's request (2026-08-17): the window must go away the instant
+    /// Submit is clicked, not linger for the send/queue round trip — so
+    /// this builds the payload (Reporting/RxReportBuilder — the one place
+    /// the "NO patient fields in the payload" redaction rule is enforced)
+    /// from the form controls FIRST, then closes immediately, then kicks
+    /// the actual send off as a detached background task. The payload is a
+    /// plain captured value and _submitter only holds settings (no UI
+    /// refs), so nothing the background task touches is disposed by the
+    /// Close() above it.
     /// </summary>
-    private async void OnSubmitClick(object sender, RoutedEventArgs e)
+    private void OnSubmitClick(object sender, RoutedEventArgs e)
     {
-        SubmitButton.IsEnabled = false;
-        CancelButton.IsEnabled = false;
-        SubmitStatusText.Text = "Submitting…";
-        SubmitStatusText.Foreground = System.Windows.Media.Brushes.Gray;
-
         var payload = RxReportBuilder.Build(_field, CorrectionTextBox.Text, _engineBuild, _commit, DateTime.UtcNow);
-        var outcome = await _submitter.SubmitOrQueueAsync(payload);
-
-        SubmitStatusText.Foreground = System.Windows.Media.Brushes.Green;
-        SubmitStatusText.Text = outcome == ReportSubmitOutcome.SentToHq
-            ? "Sent."
-            : "Saved — will send once connected.";
-
-        await System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(1.1));
         Close();
+
+        _ = SubmitInBackgroundAsync(payload);
+    }
+
+    /// <summary>
+    /// Fire-and-forget: runs after the window above is already closed, so
+    /// it must never touch a UI control on this window — payload (already
+    /// captured) and _submitter (settings only) are the only things it
+    /// touches. SubmitOrQueueAsync itself never throws for the ordinary
+    /// "HQ unreachable" case — it falls back to the local queue and that's
+    /// silent by design (see its doc's FAIL SOFT section; it retries
+    /// later). The only thing worth an error popup is the rarer case where
+    /// it couldn't even queue the report (e.g. disk I/O writing
+    /// pending-reports.jsonl) — that's a genuine "this correction is gone"
+    /// failure, so it gets a real popup via Application.Current.Dispatcher
+    /// (this window is already closed by the time this runs, so nothing
+    /// on it is a safe UI-thread handle to marshal onto) using
+    /// MessageBoxOptions.DefaultDesktopOnly, same no-owner/no-activation
+    /// pattern IntegratedBoxesWindow.ShowReportingDisabledNotice already
+    /// uses to guarantee it lands in front of Pioneer without an Owner
+    /// window to anchor to.
+    /// </summary>
+    private async System.Threading.Tasks.Task SubmitInBackgroundAsync(RxReportPayload payload)
+    {
+        try
+        {
+            await _submitter.SubmitOrQueueAsync(payload);
+        }
+        catch (Exception ex)
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+                MessageBox.Show(
+                    $"This report couldn't be sent OR saved locally, so it's lost: {ex.Message}",
+                    "Rx Verify — report failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning,
+                    MessageBoxResult.OK,
+                    MessageBoxOptions.DefaultDesktopOnly));
+        }
     }
 }
