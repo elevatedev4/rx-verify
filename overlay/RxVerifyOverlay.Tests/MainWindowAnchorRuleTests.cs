@@ -196,6 +196,78 @@ public class MainWindowAnchorRuleTests
         Assert.Null(anchor);
     }
 
+    // ------------------------------------------------------------------
+    // Resolve — ROUND 8 focus-follow (multi-instance PioneerRx)
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void ResolveReAnchorsToADifferentMaximizedPioneerWindowThatTookForeground()
+    {
+        // Two PioneerRx instances, both maximized. The overlay is anchored
+        // to A; the pharmacist alt-tabs to B. Resolve must switch to B
+        // immediately, without waiting for A to become ineligible.
+        var currentAnchor = new MainWindowAnchorRule.Candidate(HandleA, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(0, 0, 1920, 1040));
+        var newlyForegrounded = new MainWindowAnchorRule.Candidate(HandleB, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(1920, 0, 1920, 1040));
+
+        var anchor = MainWindowAnchorRule.Resolve(HandleA, new[] { currentAnchor, newlyForegrounded }, foregroundHandle: HandleB);
+
+        Assert.Equal(HandleB, anchor!.Value.Handle);
+        Assert.Equal(newlyForegrounded.Bounds, anchor.Value.Bounds);
+    }
+
+    [Fact]
+    public void ResolveIgnoresAForegroundedPopupEvenThoughItIsAPioneerOwnedTopLevelWindow()
+    {
+        // Same round-7 scenario as ResolveKeepsAnchoringToTheCachedWindowEvenWhenAPopupIsNowLargerOrMaximized,
+        // but now the popup is ALSO the current foreground window — it
+        // must still lose to the cached main window, because it's never
+        // maximized.
+        var mainWindow = new MainWindowAnchorRule.Candidate(HandleA, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(0, 0, 1920, 1040));
+        var foregroundedPopup = new MainWindowAnchorRule.Candidate(HandleB, IsVisible: true, IsMinimized: false, IsMaximized: false, new Rectangle(500, 500, 300, 200));
+
+        var anchor = MainWindowAnchorRule.Resolve(HandleA, new[] { foregroundedPopup, mainWindow }, foregroundHandle: HandleB);
+
+        Assert.Equal(HandleA, anchor!.Value.Handle);
+    }
+
+    [Fact]
+    public void ResolveKeepsCachedAnchorWhenForegroundIsNotAPioneerCandidateAtAll()
+    {
+        // A non-PioneerRx window (or nothing) took focus briefly — since
+        // it's not even in the candidate list, the sticky cached anchor
+        // must be unaffected (no flicker on a brief focus loss).
+        var mainWindow = new MainWindowAnchorRule.Candidate(HandleA, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(0, 0, 1920, 1040));
+        var otherPioneerInstance = new MainWindowAnchorRule.Candidate(HandleB, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(1920, 0, 1920, 1040));
+        var someUnrelatedForegroundWindow = new IntPtr(999);
+
+        var anchor = MainWindowAnchorRule.Resolve(HandleA, new[] { mainWindow, otherPioneerInstance }, foregroundHandle: someUnrelatedForegroundWindow);
+
+        Assert.Equal(HandleA, anchor!.Value.Handle);
+    }
+
+    [Fact]
+    public void ResolveWithForegroundEqualToCachedHandleBehavesAsPlainSticky()
+    {
+        var mainWindow = new MainWindowAnchorRule.Candidate(HandleA, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(0, 0, 1920, 1040));
+
+        var anchor = MainWindowAnchorRule.Resolve(HandleA, new[] { mainWindow }, foregroundHandle: HandleA);
+
+        Assert.Equal(HandleA, anchor!.Value.Handle);
+    }
+
+    [Fact]
+    public void ResolveDefaultForegroundHandleReproducesRound7OnlyBehavior()
+    {
+        // Omitting foregroundHandle entirely (IntPtr.Zero default) must be
+        // indistinguishable from every pre-round-8 Resolve call above.
+        var mainWindow = new MainWindowAnchorRule.Candidate(HandleA, IsVisible: true, IsMinimized: false, IsMaximized: true, new Rectangle(0, 0, 1920, 1040));
+        var popup = new MainWindowAnchorRule.Candidate(HandleB, IsVisible: true, IsMinimized: false, IsMaximized: false, new Rectangle(500, 500, 300, 200));
+
+        var anchor = MainWindowAnchorRule.Resolve(HandleA, new[] { popup, mainWindow });
+
+        Assert.Equal(HandleA, anchor!.Value.Handle);
+    }
+
     [Theory]
     [InlineData(0, 10)]
     [InlineData(10, 0)]

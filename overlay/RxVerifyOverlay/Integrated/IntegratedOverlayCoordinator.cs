@@ -189,8 +189,9 @@ public sealed class IntegratedOverlayCoordinator
     /// anchoring to the SAME window even while a same-process popup or an
     /// entirely different app is foreground. Deliberately never reset
     /// except by Resolve itself finding the cached window no longer
-    /// eligible; a brief gap in Pioneer being foreground must NOT clear
-    /// this (that would defeat the whole point of stickiness).
+    /// eligible, OR (ROUND 8) finding a DIFFERENT maximized PioneerRx
+    /// window now in the foreground — see Resolve's own doc for why a
+    /// brief gap in Pioneer being foreground still must NOT clear this.
     /// </summary>
     private IntPtr _cachedMainWindowHandle = IntPtr.Zero;
 
@@ -682,11 +683,22 @@ public sealed class IntegratedOverlayCoordinator
     /// anchor STICKY across ticks. Updates _cachedMainWindowHandle to
     /// whatever Resolve returns (IntPtr.Zero if nothing was eligible) so
     /// the NEXT tick's Resolve call has the right memory.
+    ///
+    /// ROUND 8: also passes the CURRENT foreground hwnd (a fresh
+    /// GetForegroundWindow() call — this method is only reached once
+    /// TickCore already knows SOME PioneerRx window is foreground, but not
+    /// which one) so Resolve can re-anchor within one ~250ms tick when the
+    /// pharmacist switches focus to their other maximized PioneerRx
+    /// instance — see Resolve's own doc for the full multi-instance
+    /// design. No WinEventHook needed: this poll tick already runs every
+    /// ~250ms regardless, so having Resolve simply prefer a newly-
+    /// foregrounded main window achieves the same result as a hook-driven
+    /// re-anchor with a smaller, safer diff.
     /// </summary>
     private (IntPtr Handle, Rectangle Bounds)? ResolveMainPioneerWindowAnchor()
     {
         var candidates = EnumeratePioneerTopLevelWindows();
-        var anchor = MainWindowAnchorRule.Resolve(_cachedMainWindowHandle, candidates);
+        var anchor = MainWindowAnchorRule.Resolve(_cachedMainWindowHandle, candidates, GetForegroundWindow());
         _cachedMainWindowHandle = anchor?.Handle ?? IntPtr.Zero;
         return anchor is { } a ? (a.Handle, a.Bounds) : null;
     }
