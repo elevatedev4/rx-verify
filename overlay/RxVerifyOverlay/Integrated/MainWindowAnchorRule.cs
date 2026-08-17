@@ -38,10 +38,31 @@ namespace RxVerifyOverlay.Integrated;
 /// restore shouldn't cause a re-pick mid-gesture). Only a closed, hidden,
 /// or minimized cached window forces a fresh <see cref="Choose"/>.
 ///
+/// ROUND 8 (owner, live pharmacy testing: "We always have 2 pioneer
+/// instances open. If I change my focus to another pioneer window, I need
+/// the app overlay to integrate on that window"): the stickiness above
+/// means switching focus between two maximized PioneerRx instances used to
+/// do nothing — the anchor stayed on whichever one was chosen first, even
+/// after the pharmacist alt-tabbed to the other one and started working
+/// there. <see cref="Resolve"/> now takes the CURRENT foreground hwnd
+/// (already read every tick by IntegratedOverlayCoordinator for its own
+/// broader "is Pioneer in front" check — no new hook needed, this just
+/// reuses it one tick later): when that foreground hwnd is a DIFFERENT,
+/// MAXIMIZED PioneerRx top-level window than the cached anchor, it wins
+/// immediately, without waiting for the cached one to become ineligible.
+/// The IsMaximized requirement is what keeps this from reintroducing the
+/// round-7 bug: PioneerRx's own popups (e.g. "add comment") are top-level
+/// windows owned by the same process and so ARE candidates here too, but
+/// they're never maximized, so a popup taking foreground still can't steal
+/// the anchor — only genuinely switching to the OTHER main window can.
+/// Passing IntPtr.Zero (the default) reproduces the original round-7-only
+/// behavior exactly, which is what every pre-round-8 test below still
+/// does.
+///
 /// IntegratedOverlayCoordinator supplies the Win32 data (EnumWindows +
 /// GetWindowThreadProcessId filtered to FieldMap.TargetProcessNames,
-/// IsWindowVisible, IsIconic, IsZoomed, GetWindowRect) — this class never
-/// touches Win32 itself, so it's testable on Mac.
+/// IsWindowVisible, IsIconic, IsZoomed, GetWindowRect, GetForegroundWindow)
+/// — this class never touches Win32 itself, so it's testable on Mac.
 /// </summary>
 public static class MainWindowAnchorRule
 {
@@ -55,14 +76,33 @@ public static class MainWindowAnchorRule
     /// STICKY entry point — call this every tick. <paramref name="cachedHandle"/>
     /// is whatever <see cref="Anchor.Handle"/> the PREVIOUS call returned
     /// (IntPtr.Zero if there wasn't one yet, e.g. the very first tick or
-    /// after a run where nothing was found). If that handle is still
-    /// present among <paramref name="candidates"/> and still eligible
-    /// (visible, not minimized, sane rect — see <see cref="IsEligible"/>),
-    /// its current rect is returned and nothing else is re-evaluated;
-    /// otherwise falls through to a fresh <see cref="Choose"/>.
+    /// after a run where nothing was found).
+    ///
+    /// ROUND 8 focus-follow (see class doc): if <paramref name="foregroundHandle"/>
+    /// is a DIFFERENT, currently-maximized candidate than
+    /// <paramref name="cachedHandle"/>, it wins immediately — the
+    /// pharmacist just switched to PioneerRx's other main window. Pass
+    /// IntPtr.Zero (the default) to skip this check entirely.
+    ///
+    /// Otherwise: if the cached handle is still present among
+    /// <paramref name="candidates"/> and still eligible (visible, not
+    /// minimized, sane rect — see <see cref="IsEligible"/>), its current
+    /// rect is returned and nothing else is re-evaluated; otherwise falls
+    /// through to a fresh <see cref="Choose"/>.
     /// </summary>
-    public static Anchor? Resolve(IntPtr cachedHandle, IReadOnlyList<Candidate> candidates)
+    public static Anchor? Resolve(IntPtr cachedHandle, IReadOnlyList<Candidate> candidates, IntPtr foregroundHandle = default)
     {
+        if (foregroundHandle != IntPtr.Zero && foregroundHandle != cachedHandle)
+        {
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Handle == foregroundHandle && candidate.IsMaximized && IsEligible(candidate))
+                {
+                    return new Anchor(candidate.Handle, candidate.Bounds);
+                }
+            }
+        }
+
         if (cachedHandle != IntPtr.Zero)
         {
             foreach (var candidate in candidates)
