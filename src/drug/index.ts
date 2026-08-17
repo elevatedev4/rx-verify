@@ -279,14 +279,10 @@ const MAX_NAME_KEY_TOKENS = 4;
  * distinguishes: SR/XL/ER/IR/CR/DR. Same abbreviation vocabulary as
  * RELEASE_ABBREVS/RELEASE_PHRASE_FOLDS further down this file (which
  * FOLD a spelled-out phrase down to its abbreviation for the
- * name-identity fast path), plus XL — which this codebase deliberately
- * does NOT fold to/from ER anywhere (see RELEASE_PHRASE_FOLDS' own doc:
- * "the codebase does not treat XL/XR as equivalent to ER anywhere
- * else... this is a NEW equivalence class this branch is not authorized
- * to introduce"). This set is used to DETECT, never to fold/equate:
- * openFDA's `dosage_form` field does not distinguish SR from XL (both
- * normalize to the same "tablet, extended release"-style text), so
- * ingredient+strength+doseForm equality alone is NOT enough evidence
+ * name-identity fast path). This set is used to DETECT, never to
+ * fold/equate: openFDA's `dosage_form` field does not distinguish SR from
+ * XL (both normalize to the same "tablet, extended release"-style text),
+ * so ingredient+strength+doseForm equality alone is NOT enough evidence
  * that two name-resolved concepts are really the same product — see
  * resolveConceptByName and compareDrugs' qualifierConflict guard below,
  * both added after a confirmed live false GREEN: "Bupropion SR 300 MG"
@@ -294,6 +290,22 @@ const MAX_NAME_KEY_TOKENS = 4;
  * the bare "bupropion" nameIndex key (reached when no "bupropion sr"/
  * "bupropion xl" key exists) carries no qualifier text at all, and SR
  * vs XL 300mg tablets share an identical openFDA dosage_form.
+ *
+ * UPDATED 2026-08-17: RELEASE_PHRASE_FOLDS now folds bare "xl"/"xr" to
+ * "er" (owner-confirmed live report — "Extended release 24 hour tablet
+ * and XL are the same thing... Not to be confused with Sustained Release
+ * or SR which is different"), so normalizeDrugNameString (which
+ * extractReleaseQualifier runs every name through before scanning for a
+ * member of this set) can no longer produce a literal "xl" token — the
+ * 'xl' entry below is therefore vestigial/unreachable through the normal
+ * path. It's deliberately left in the set rather than removed: it costs
+ * nothing, and it's a defense-in-depth backstop that keeps this SAFETY
+ * check correct on its own terms if the new fold is ever reverted or
+ * scoped differently later, without anyone having to remember to add it
+ * back. SR is NOT folded anywhere, by design — this set's whole job (and
+ * qualifierConflict's) is telling SR apart from ER/XL/XR, which the new
+ * fold leaves fully intact: an SR-stated name and an XL-stated name still
+ * always normalize to different qualifiers ("sr" vs "er").
  */
 const RELEASE_QUALIFIER_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl']);
 
@@ -920,6 +932,25 @@ function foldTrailingDuplicateStrength(spaced: string): string {
  * numbers. Runs on `spaced` (after the digit+unit spacing pass above), so
  * it matches regardless of whether the source states "5mg-325mg" or
  * "5 mg-325 mg".
+ *
+ * CONSIDERED AND ACCEPTED (review round): this regex has no gate on the
+ * name actually stating TWO ingredients — a single-ingredient name that
+ * happens to state two SAME-unit doses hyphenated for an unrelated reason
+ * (e.g. a steroid taper, "Prednisone 10 mg-20 mg Taper") would also fold
+ * to a bare "10/20", which isn't really a combo-strength shorthand. Left
+ * ungated on purpose: the blast radius is bounded on two sides. First,
+ * this only feeds the exact-STRING identity fast path in
+ * normalizeDrugNameString — every other comparison layer (the raw-text
+ * stated-strength cross-check, concept resolution, the component-wise
+ * fallback) reads src.name/ent.name directly, unaffected by this fold, so
+ * a genuine taper-dose mismatch is still caught there even if this fold
+ * fires. Second, this engine's name inputs are always structured
+ * ingredient+strength+form drug-name fields (never arbitrary free text),
+ * so a false fold here can only ever produce a false GREEN if the
+ * ENTERED side independently states that exact same coincidental
+ * "N/M"-shaped hyphenated dose pair too — the kind of narrow, structured-
+ * input residual risk this file already accepts elsewhere (see e.g.
+ * streetTokensMatch's sibling writeup in src/normalize/address.ts).
  */
 function foldComboStrengthNotation(spaced: string): string {
   return spaced.replace(
@@ -1215,6 +1246,14 @@ const RELEASE_EQUIVALENCE_CLASS: Record<string, string> = {
  * value locally (see decomposeDrugNameComponents) rather than reusing
  * extractReleaseQualifier's, so it can fold XL/ER/XR/SR/LA/CR down to one
  * equivalence class -- see RELEASE_EQUIVALENCE_CLASS' doc.
+ *
+ * UPDATED 2026-08-17: same vestigial-token note as RELEASE_QUALIFIER_
+ * TOKENS above -- RELEASE_PHRASE_FOLDS now folds bare "xl"/"xr" to "er"
+ * before normalizeDrugNameString's output ever reaches this fallback
+ * (decomposeDrugNameComponents runs on already-normalized tokens), so the
+ * "xl"/"xr" entries here are likewise now unreachable through the normal
+ * path. Left in place on purpose as the same kind of defense-in-depth
+ * backstop, not removed.
  */
 const COMPONENT_RELEASE_TOKENS = new Set(['er', 'sr', 'cr', 'dr', 'ir', 'xl', 'xr', 'la']);
 
