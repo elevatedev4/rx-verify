@@ -38,7 +38,7 @@ public static class EscriptTreeParser
             return new PrescriptionRecord();
         }
 
-        var (refills, refillsFromTotalFills) = ParseRefills(newRx);
+        var (refills, refillsFromTotalFills, _) = ParseRefills(newRx);
 
         return new PrescriptionRecord
         {
@@ -383,17 +383,20 @@ public static class EscriptTreeParser
     }
 
     /// <summary>
-    /// Returns the raw refill-count text plus whether it came from a
-    /// Total-fills-style key rather than an ordinary Refills key. Both
-    /// keys have the same "colon inside a parenthetical" hazard, e.g.
-    /// "Refills (NewRx: One dispense, plus (Quantity) refills): 1" — find
-    /// each directly (by prefix) rather than via Leaf()'s normal
-    /// exact-key lookup, since Leaf()/SplitKeyValue always does the
-    /// FIRST-": " split — that would land right after "NewRx" here and
-    /// misparse this one specifically. Split on the LAST ": " instead,
-    /// which lands right after the closing paren (or immediately, for a
-    /// plain "Total fills: 4" with no parenthetical) and before the
-    /// integer count.
+    /// Returns the raw refill-count text, whether it came from a
+    /// Total-fills-style key rather than an ordinary Refills key, and
+    /// (diagnostic-only, report-payload plumbing — see FieldReader.ReadSource
+    /// and Reporting/RxReportBuilder.cs) which TotalFillsKeyPrefixes entry
+    /// was seen ANYWHERE relevant, even on the branch where the ordinary
+    /// Refills key ends up winning. Both keys have the same "colon inside
+    /// a parenthetical" hazard, e.g. "Refills (NewRx: One dispense, plus
+    /// (Quantity) refills): 1" — find each directly (by prefix) rather
+    /// than via Leaf()'s normal exact-key lookup, since Leaf()/
+    /// SplitKeyValue always does the FIRST-": " split — that would land
+    /// right after "NewRx" here and misparse this one specifically. Split
+    /// on the LAST ": " instead, which lands right after the closing
+    /// paren (or immediately, for a plain "Total fills: 4" with no
+    /// parenthetical) and before the integer count.
     ///
     /// "Refills (" wins when BOTH keys are somehow present on the same
     /// MedicationPrescribed node — mirrors the OCR path's documented
@@ -402,26 +405,121 @@ public static class EscriptTreeParser
     /// (rx-verify src/quantity/index.ts compareRefills) is the single
     /// source of truth for subtracting 1 off a Total-fills count; this
     /// parser never does that math itself.
+    ///
+    /// ROUND 3 FIX (Will's 2026-08-17 live false-yellow — a "Refill
+    /// ApprovedWithChanges" renewal response read refills as "not
+    /// provided" even though PioneerRx showed "Total Fills: 3 (including
+    /// this fill)"): TWO compounding gaps, both defensible without a live
+    /// dump to confirm the exact real nesting shape (this whole Total-fills
+    /// path is still documented UNCONFIRMED — see FieldMap.
+    /// TotalFillsKeyPrefixes doc):
+    ///
+    /// (1) VALUE EXTRACTION: the ONLY real-dump-confirmed shape this split
+    /// logic was ever tested against embeds its parenthetical INSIDE the
+    /// key, before the final ": " (e.g. "Total fills (renewal: total incl.
+    /// initial fill): 4" — see Parse_TotalFillsParentheticalStyle...Test).
+    /// Will's literal reported string has the parenthetical AFTER the
+    /// value instead ("...: 3 (including this fill)") — there is only ONE
+    /// ": " in that string, so SplitOnLastColonSpace returned "3
+    /// (including this fill)" as the "value", which the engine's
+    /// Number()-based parse can't read as a count at all.
+    /// TrimTrailingParenthetical strips that suffix so this shape parses
+    /// down to a clean "3", without touching the confirmed-correct
+    /// leading-parenthetical shape (nothing trailing to strip there).
+    ///
+    /// (2) LOCATION: previously only med.Children (MedicationPrescribed's
+    /// DIRECT children) was searched. FindTotalFillsLeaf now searches
+    /// MedicationPrescribed's FULL subtree (a real vendor could nest this
+    /// summary line one level deeper than the confirmed "Refills (" shape
+    /// does), and if still not found there, newRx's own direct children
+    /// are checked too (in case the line is a SIBLING of MedicationPrescribed
+    /// under the response container rather than nested inside it — see
+    /// Uia/UiaTreeWalker.cs BuildPrunedMessageNode's matching widening,
+    /// needed so a sibling leaf isn't pruned out of the live tree before
+    /// this parser ever runs). Purely additive: the confirmed NewRx-message
+    /// "Refills (" behavior and every existing Total-fills-inside-
+    /// MedicationPrescribed test are unaffected.
+    ///
+    /// Neither widening is confirmed against a real renewal-response UIA
+    /// dump — flagged here same as FieldMap.cs/UiaTreeWalker.cs already
+    /// flag the rest of this path; a live spot-check remains the way to
+    /// close this out for certain. See item 2 of this same fix round:
+    /// RxReportBuilder.Build now also plumbs TotalFillsLabelSeen/Prefix
+    /// onto the NEXT error report so a real occurrence self-diagnoses
+    /// instead of needing another guess.
     /// </summary>
-    private static (string? Value, bool FromTotalFills) ParseRefills(EscriptNode newRx)
+    private static (string? Value, bool FromTotalFills, string? TotalFillsPrefixSeen) ParseRefills(EscriptNode newRx)
     {
         var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
-        if (med is null) return (null, false);
+        if (med is null) return (null, false, null);
 
         var refillsLeaf = med.Children.FirstOrDefault(c => c.Name.StartsWith(FieldMap.RefillsKeyPrefix, StringComparison.Ordinal));
+
+        var totalFillsLeaf = FindTotalFillsLeaf(med) ?? newRx.Children.FirstOrDefault(IsTotalFillsLeaf);
+        var totalFillsPrefixSeen = totalFillsLeaf is null ? null : MatchedTotalFillsPrefix(totalFillsLeaf.Name);
+
         if (refillsLeaf is not null)
         {
-            return (NullIfEmpty(SplitOnLastColonSpace(refillsLeaf.Name)), false);
+            return (NullIfEmpty(SplitOnLastColonSpace(refillsLeaf.Name)), false, totalFillsPrefixSeen);
         }
 
-        var totalFillsLeaf = med.Children.FirstOrDefault(c =>
-            FieldMap.TotalFillsKeyPrefixes.Any(prefix => c.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)));
         if (totalFillsLeaf is not null)
         {
-            return (NullIfEmpty(SplitOnLastColonSpace(totalFillsLeaf.Name)), true);
+            var rawValue = SplitOnLastColonSpace(totalFillsLeaf.Name);
+            return (NullIfEmpty(TrimTrailingParenthetical(rawValue)), true, totalFillsPrefixSeen);
         }
 
-        return (null, false);
+        return (null, false, null);
+    }
+
+    /// <summary>True when <paramref name="node"/>'s Name starts with one of FieldMap.TotalFillsKeyPrefixes (case-insensitive — see that field's doc).</summary>
+    private static bool IsTotalFillsLeaf(EscriptNode node) =>
+        FieldMap.TotalFillsKeyPrefixes.Any(prefix => node.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Which TotalFillsKeyPrefixes entry matched — for diagnostics (RxReportBuilder) as well as ParseRefills itself. Returns null if none match (should only be called on a node IsTotalFillsLeaf already confirmed true for).</summary>
+    private static string? MatchedTotalFillsPrefix(string leafName) =>
+        FieldMap.TotalFillsKeyPrefixes.FirstOrDefault(prefix => leafName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Depth-first search of <paramref name="node"/>'s ENTIRE subtree (not
+    /// just direct children) for the first Total-fills-shaped leaf — see
+    /// ParseRefills's ROUND 3 FIX doc, gap (2). Small tree (MedicationPrescribed
+    /// typically has well under 20 descendants total), so a full walk here
+    /// costs nothing measurable.
+    /// </summary>
+    private static EscriptNode? FindTotalFillsLeaf(EscriptNode node)
+    {
+        foreach (var child in node.Children)
+        {
+            if (IsTotalFillsLeaf(child)) return child;
+            var nested = FindTotalFillsLeaf(child);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Diagnostic-only (Reporting/RxReportBuilder.cs, item 2 of the
+    /// 2026-08-17 fix round): independent of whether ParseRefills actually
+    /// USED a Total-fills value as Refills (it may have lost to an
+    /// ordinary "Refills (" key, or not have been found by either search),
+    /// this answers "was ANY Total-fills-shaped label seen on this
+    /// message's prescription container at all, and which prefix matched"
+    /// — so the report payload can tell "the label genuinely wasn't there"
+    /// apart from "it was there but something else in the pipeline dropped
+    /// it," without ever including the label's VALUE (only the constant
+    /// prefix string, e.g. "Total fills: " — never PHI, never the refill
+    /// count itself).
+    /// </summary>
+    public static (bool Seen, string? Prefix) DetectTotalFillsLabel(EscriptNode message)
+    {
+        var body = Child(message, FieldMap.NodeBody);
+        var newRx = body is null ? null : FindPrescriptionContainer(body);
+        if (newRx is null) return (false, null);
+
+        var med = Child(newRx, FieldMap.NodeMedicationPrescribed);
+        var leaf = (med is null ? null : FindTotalFillsLeaf(med)) ?? newRx.Children.FirstOrDefault(IsTotalFillsLeaf);
+        return leaf is null ? (false, null) : (true, MatchedTotalFillsPrefix(leaf.Name));
     }
 
     /// <summary>
@@ -435,6 +533,22 @@ public static class EscriptTreeParser
     {
         var splitIndex = text.LastIndexOf(": ", StringComparison.Ordinal);
         return splitIndex < 0 ? "" : text[(splitIndex + 2)..];
+    }
+
+    /// <summary>
+    /// Strips a trailing " (...)" annotation off a Total-fills VALUE, e.g.
+    /// "3 (including this fill)" -&gt; "3" — see ParseRefills's ROUND 3 FIX
+    /// doc, gap (1). Only strips a SUFFIX that starts with " (": a bare
+    /// "4" (no parenthetical at all, or the already-clean value left by
+    /// the confirmed leading-parenthetical-in-the-KEY shape, e.g. "Total
+    /// fills (renewal: ...): 4") passes through unchanged, since neither
+    /// has anything to strip. Never applied to the ordinary RefillsKeyPrefix
+    /// branch — that shape is real-dump-confirmed to never need this.
+    /// </summary>
+    private static string TrimTrailingParenthetical(string value)
+    {
+        var parenIndex = value.IndexOf(" (", StringComparison.Ordinal);
+        return parenIndex < 0 ? value : value[..parenIndex].TrimEnd();
     }
 
     // ------------------------------------------------------------------
