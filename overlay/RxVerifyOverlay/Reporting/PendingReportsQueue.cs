@@ -38,8 +38,16 @@ public static class PendingReportsQueue
     public static string DefaultQueueFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "pending-reports.jsonl");
 
-    /// <summary>Best-effort append — a write failure (disk full, locked file) means this one report is lost rather than crashing the pharmacist's submit click; there is nothing more useful to do from a background queue write.</summary>
-    public static void Enqueue(RxReportPayload payload, string? filePath = null)
+    /// <summary>
+    /// Best-effort append — never throws, but returns false on a write
+    /// failure (disk full, locked file, permissions) instead of silently
+    /// swallowing it, so RxReportSubmitter.SubmitOrQueueAsync can tell
+    /// "queued" apart from "lost" and Integrated/ReportErrorWindow.xaml.cs
+    /// can pop an error for the pharmacist on the genuine-loss case
+    /// (branch fix/report-submit-instant-close review round 2 — a queue
+    /// write failure used to be indistinguishable from success).
+    /// </summary>
+    public static bool Enqueue(RxReportPayload payload, string? filePath = null)
     {
         var path = filePath ?? DefaultQueueFilePath;
         try
@@ -49,10 +57,13 @@ public static class PendingReportsQueue
 
             var line = JsonSerializer.Serialize(payload, JsonOptions);
             File.AppendAllText(path, line + Environment.NewLine);
+            return true;
         }
         catch
         {
-            // Best-effort only — see class doc.
+            // Never throws — see class doc — but the caller still needs to
+            // know this one report is now lost rather than queued.
+            return false;
         }
     }
 

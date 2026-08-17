@@ -141,4 +141,55 @@ public class PendingReportsQueueTests
             if (File.Exists(path)) File.Delete(path);
         }
     }
+
+    /// <summary>
+    /// Review round 2 regression test (fix/report-submit-instant-close):
+    /// Enqueue used to return void and swallow a write failure entirely,
+    /// which made RxReportSubmitter/ReportErrorWindow's "couldn't send OR
+    /// queue" error popup unreachable dead code. This pins the success
+    /// side of the new bool return.
+    /// </summary>
+    [Fact]
+    public void EnqueueReturnsTrueOnSuccess()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var result = PendingReportsQueue.Enqueue(MakePayload(), path);
+
+            Assert.True(result);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// Review round 2 regression test — the failure side. Forces a genuine,
+    /// deterministic, cross-machine write failure without relying on any
+    /// platform-specific invalid path characters: point the queue file at
+    /// a path whose PARENT already exists as a plain FILE, not a
+    /// directory, so Enqueue's own Directory.CreateDirectory(dir) call can
+    /// never succeed there (throws IOException on both Windows and
+    /// Unix-likes) and the write never happens.
+    /// </summary>
+    [Fact]
+    public void EnqueueReturnsFalseWhenTheParentPathIsAFileNotADirectory()
+    {
+        var blockingFile = TempQueuePath();
+        File.WriteAllText(blockingFile, "not a directory");
+        var path = Path.Combine(blockingFile, "pending-reports.jsonl");
+
+        try
+        {
+            var result = PendingReportsQueue.Enqueue(MakePayload(), path);
+
+            Assert.False(result);
+        }
+        finally
+        {
+            if (File.Exists(blockingFile)) File.Delete(blockingFile);
+        }
+    }
 }

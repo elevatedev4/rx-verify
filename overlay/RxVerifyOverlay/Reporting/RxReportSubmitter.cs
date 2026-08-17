@@ -8,11 +8,14 @@ using RxVerifyOverlay.Models;
 
 namespace RxVerifyOverlay.Reporting;
 
-/// <summary>Which path a submit attempt actually took — Integrated/ReportErrorWindow.xaml.cs uses this to tell the pharmacist "sent" vs. "saved, will send later" without exposing transport detail.</summary>
+/// <summary>Which path a submit attempt actually took — Integrated/ReportErrorWindow.xaml.cs uses this to tell the pharmacist "sent" vs. "saved, will send later" without exposing transport detail, and to pop an error only on the genuine-loss case (Failed).</summary>
 public enum ReportSubmitOutcome
 {
     SentToHq,
-    Queued
+    Queued,
+
+    /// <summary>Could neither send (or no key configured) NOR queue locally — PendingReportsQueue.Enqueue itself failed (disk full, locked file, permissions). The one outcome that's actually worth interrupting the pharmacist for, since the correction is genuinely gone.</summary>
+    Failed
 }
 
 /// <summary>
@@ -27,11 +30,15 @@ public enum ReportSubmitOutcome
 /// FAIL SOFT (branch brief, hard requirement): a missing key, unreachable
 /// endpoint, timeout, or non-2xx response NEVER surfaces an error to the
 /// pharmacist mid-shift — it queues the report locally instead (see
-/// PendingReportsQueue) and moves on silently. There is no user-facing
-/// "report submission failed" state; Integrated/ReportErrorWindow.xaml.cs
-/// only ever shows "Sent" or "Saved — will send later", both success-shaped
-/// confirmations, because from the pharmacist's point of view the
-/// correction IS captured either way.
+/// PendingReportsQueue) and moves on silently. Integrated/
+/// ReportErrorWindow.xaml.cs's dialog itself no longer shows a live
+/// "Sent"/"Saved" status at all (branch fix/report-submit-instant-close —
+/// the window closes the instant Submit is clicked, before either outcome
+/// is known); both SentToHq and Queued are still success-shaped from the
+/// pharmacist's point of view, so neither pops anything. The one exception
+/// is ReportSubmitOutcome.Failed — send failed (or no key configured) AND
+/// the local queue write also failed, so the correction is genuinely gone
+/// rather than merely delayed — that DOES surface an error popup.
 ///
 /// Deliberately NOT unit tested (no HTTP-mocking infrastructure exists in
 /// this test project, and this class is thin plumbing around HttpClient +
@@ -64,16 +71,18 @@ public sealed class RxReportSubmitter
     /// <summary>
     /// Submits one report — POSTs to HQ if a report key is configured and
     /// the request succeeds, otherwise queues it locally. Never throws:
-    /// every failure mode (missing key, DNS/timeout/network error,
+    /// every send failure mode (missing key, DNS/timeout/network error,
     /// non-2xx response) is caught and treated as "queue it" — see class
-    /// doc's FAIL SOFT section.
+    /// doc's FAIL SOFT section. Returns Failed (rather than throwing) in
+    /// the one case that's genuinely worth telling the pharmacist about:
+    /// the queue write itself also failed, so PendingReportsQueue.Enqueue's
+    /// return value is checked and threaded through instead of discarded.
     /// </summary>
     public async Task<ReportSubmitOutcome> SubmitOrQueueAsync(RxReportPayload payload)
     {
         if (string.IsNullOrWhiteSpace(_settings.RxVerifyReportKey))
         {
-            PendingReportsQueue.Enqueue(payload);
-            return ReportSubmitOutcome.Queued;
+            return PendingReportsQueue.Enqueue(payload) ? ReportSubmitOutcome.Queued : ReportSubmitOutcome.Failed;
         }
 
         try
@@ -97,8 +106,7 @@ public sealed class RxReportSubmitter
             // see class doc. Falls through to the queue below either way.
         }
 
-        PendingReportsQueue.Enqueue(payload);
-        return ReportSubmitOutcome.Queued;
+        return PendingReportsQueue.Enqueue(payload) ? ReportSubmitOutcome.Queued : ReportSubmitOutcome.Failed;
     }
 
     /// <summary>
