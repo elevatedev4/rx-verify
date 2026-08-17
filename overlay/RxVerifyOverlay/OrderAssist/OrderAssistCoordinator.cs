@@ -53,6 +53,35 @@ public sealed class OrderAssistCoordinator
     /// <summary>Same settle delay as the verify flow's own self-occlusion guard (Ocr/IOverlayVisibilityController.cs HideForCaptureAsync) — DWM composition isn't synchronous with a Hide() call.</summary>
     private const int CaptureSettleDelayMs = 30;
 
+    /// <summary>
+    /// OWNER FEEDBACK (2026-08-17: "The overlay on order mode is covering
+    /// some buttons. Make the bottom of the overlay a little higher so it
+    /// doesn't cover the New button"): OrderAssistOverlayWindow is always
+    /// repositioned to EXACTLY the target Pioneer window's own bounds (see
+    /// TickAsync's RepositionPhysical call) — full width AND full height,
+    /// right down to the target window's own bottom edge, which is
+    /// exactly where a dialog like "Create Recommended Orders" or the
+    /// Catalog Item Substitution Selection window puts its own action
+    /// buttons (New/Save/etc.) below the data grid. Trims that much off
+    /// ONLY the highlight window's own bottom — a highlight rect whose
+    /// OCR-detected position falls in the excluded strip simply won't be
+    /// visible (the window's own rendering surface no longer extends that
+    /// far), so it can no longer sit on top of a button down there. The
+    /// OCR CAPTURE region itself (EscriptImageCapture.CaptureRegion below)
+    /// is deliberately UNCHANGED — still reads the full popup — so
+    /// zero-quantity/substitution detection accuracy is unaffected; only
+    /// where the resulting highlights are allowed to render shrinks.
+    ///
+    /// ESTIMATE, NOT YET VERIFIED: order-assist-Screenshot 2026-08-13
+    /// 175418.png (referenced by Integrated/IntegratedOverlayCoordinator.cs's
+    /// own order-mode CONTROL BOX constants for the same reason) isn't
+    /// available anywhere on this Mac, so this wasn't measured against a
+    /// live Pioneer order-mode window either — 48dip is a starting guess
+    /// (roughly one to two button rows) pending Will's own visual check
+    /// on a real workstation.
+    /// </summary>
+    private const double OrderModeBottomInsetDip = 48;
+
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hWnd);
 
@@ -259,7 +288,11 @@ public sealed class OrderAssistCoordinator
         // left to correct it.
         if (!TickGenerationGate.IsStillCurrent(tickGeneration, _generation)) return;
 
-        overlay.RepositionPhysical(target.Value.Bounds.X, target.Value.Bounds.Y, target.Value.Bounds.Width, target.Value.Bounds.Height);
+        // See OrderModeBottomInsetDip's own doc — the highlight window
+        // stops short of the target window's own bottom edge, where
+        // Pioneer's own action buttons (e.g. "New") live.
+        var overlayHeight = OrderModeOverlayBoundsRule.TrimmedHeightPhysical(target.Value.Bounds.Height, OrderModeBottomInsetDip, scale);
+        overlay.RepositionPhysical(target.Value.Bounds.X, target.Value.Bounds.Y, target.Value.Bounds.Width, overlayHeight);
         overlay.SetHighlights(redBoxesDip, catalogHighlights);
         overlay.ForceHitTestTransparent();
         overlay.Show();
