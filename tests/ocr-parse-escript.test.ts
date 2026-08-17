@@ -1218,6 +1218,48 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  // Live report (2026-08-17): pharmacist flagged a wrong YELLOW — engine
+  // showed source refills "(not provided)", entered "2", when the page
+  // actually reads "Total Fills: 3 (including this fill)" on a
+  // "Refill ApprovedWithChanges" layout. Per the owner's correction:
+  // "Total Fills: 3 (including this fill)" means 3 total dispensings
+  // authorized, i.e. 2 refills after the original — entered "2" is
+  // CORRECT and should be GREEN. This exercises the exact reported
+  // strings end-to-end (label present, not the labelless Bug-3 fallback
+  // shape) through both extraction (record.refills/refillsFromTotalFills)
+  // and the N-1 comparison semantics in compareRefills.
+  it('full pipeline: source "Total Fills: 3 (including this fill)" vs entered "2" is GREEN (N-1 semantics)', () => {
+    const totalFillsRow = row(358, ['Total', 'Fills:', '3', '(including', 'this', 'fill)']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('3');
+    expect(record.refillsFromTotalFills).toBe(true);
+
+    const r = compareRefills(record.refills, '2', record.refillsFromTotalFills);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  // Regression: a source that states no refills information in any
+  // recognized shape (no "Refills"/"Total fills" label, and no bare
+  // "N (including this fill)" phrase anchor) must still fall through to
+  // undefined at parse time and "(not provided)" (yellow) at compare
+  // time — the Total-fills fixes above must never cause the parser to
+  // guess a refills value out of unrelated text.
+  it('regression: a plain unparseable refill source still yields undefined / "(not provided)", not a guessed value', () => {
+    const noiseRow = row(400, ['See', 'notes', 'for', 'refill', 'details']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsFromTotalFills).toBeUndefined();
+
+    const r = compareRefills(record.refills, '2', record.refillsFromTotalFills);
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('not_provided');
+  });
+
   // Round 5, Fix 1 (live report, W-T-round5): a refill script's OCR
   // dropped "Total Fills: 4 (including this fill)" down to the exact word
   // shape below, on ONE physical row shared with the quantity value.

@@ -351,6 +351,36 @@ describe('compareDrugs', () => {
         expect(r.reasonCode).toBe('drug_mismatch');
       });
 
+      // Field report (live): source "DEXTROAMPHETAMINE-AMPHETAMINE 20 MG
+      // TABLET 20 mg" vs entered "Amphetamine 20mg Salts Tab" went YELLOW
+      // unknown_drug — "Amphetamine Salts" is the common generic short
+      // name for this combo product, and "Tab" already folds to "tablet"
+      // via DOSAGE_FORM_WORDS, but a BARE "amphetamine" (single
+      // ingredient) qualified only by "salts" was left as plain
+      // "amphetamine" and never matched the two-ingredient source name.
+      it('is GREEN for the exact live-report pair: "DEXTROAMPHETAMINE-AMPHETAMINE 20 MG TABLET 20 mg" vs "Amphetamine 20mg Salts Tab"', () => {
+        const r = compareDrugs(
+          { name: 'DEXTROAMPHETAMINE-AMPHETAMINE 20 MG TABLET 20 mg' },
+          { name: 'Amphetamine 20mg Salts Tab' },
+          provider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_identity_match');
+      });
+
+      it('folds a bare "amphetamine"/"dextroamphetamine" qualified by "salts" to the same combo token as the two-ingredient name, in either ingredient order', () => {
+        const combo = normalizeDrugNameString('Dextroamphetamine-Amphetamine 20 Mg Tablet');
+        expect(normalizeDrugNameString('Amphetamine Salts 20 Mg Tablet')).toBe(combo);
+        expect(normalizeDrugNameString('Dextroamphetamine Salts 20 Mg Tablet')).toBe(combo);
+        expect(normalizeDrugNameString('Mixed Amphetamine Salts 20 Mg Tablet')).toBe(combo);
+      });
+
+      it('a BARE "amphetamine" with no salts/salt/mixed qualifier is still left untouched (real, distinct single-ingredient drug)', () => {
+        expect(normalizeDrugNameString('Amphetamine 10mg tablet')).toBe('amphetamine 10 mg tablet');
+        const r = compareDrugs({ name: 'Amphetamine 10mg tablet' }, { name: 'Dextroamp-Amphet 10 Mg Tab' }, provider);
+        expect(r.status).not.toBe('green');
+      });
+
       it('does not let a stated release-duration mismatch (12 hour vs 24 hour) resolve to a false green', () => {
         const r = compareDrugs(
           { name: 'Dextroamp-Amphet Er 30 Mg Cap 24 Hour' },

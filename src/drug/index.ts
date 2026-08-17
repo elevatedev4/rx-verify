@@ -943,7 +943,7 @@ const AMPHETAMINE_FAMILY_INGREDIENTS = new Set(['amphetamine', 'dextroamphetamin
  * additional product-level logic is added here on purpose.
  */
 function foldAmphetamineFamily(spaced: string): string {
-  const words = spaced.split(' ').map((word) => {
+  let words = spaced.split(' ').map((word) => {
     if (!word.includes('-')) {
       return AMPHETAMINE_ABBREV_MAP[word] ?? word;
     }
@@ -958,6 +958,24 @@ function foldAmphetamineFamily(spaced: string): string {
     (w) => AMPHETAMINE_FAMILY_INGREDIENTS.has(w) || w.split('-').some((p) => AMPHETAMINE_FAMILY_INGREDIENTS.has(p))
   );
   if (!hasFamilyIngredient) return words.join(' ');
+
+  // Field report: entered "Amphetamine 20mg Salts Tab" against a source
+  // stated as the full "Dextroamphetamine-Amphetamine" combo went YELLOW
+  // unknown_drug — "Amphetamine Salts" (and the USP generic name "Mixed
+  // Amphetamine Salts") is the common colloquial/generic short name for
+  // the amphetamine-dextroamphetamine combo product (Adderall), not
+  // literal single-ingredient amphetamine. Only a "salts"/"salt"/"mixed"
+  // qualifier is evidence of that meaning, though — a BARE "amphetamine"
+  // with no such qualifier (e.g. plain "Amphetamine 10mg tablet") must
+  // stay untouched, since that's a real, distinct single-ingredient drug.
+  // So: only when a salts/salt/mixed qualifier is present does a lone
+  // family-ingredient word expand to the full alphabetized combo token,
+  // BEFORE the qualifier itself is dropped below — this folds it to the
+  // same identity string as a name that already states both ingredients.
+  const hasSaltsQualifier = words.some((w) => w === 'salts' || w === 'salt' || w === 'mixed');
+  if (hasSaltsQualifier) {
+    words = words.map((w) => (AMPHETAMINE_FAMILY_INGREDIENTS.has(w) ? 'amphetamine-dextroamphetamine' : w));
+  }
 
   return words.filter((w) => w !== 'salts' && w !== 'salt' && w !== 'mixed').join(' ');
 }
