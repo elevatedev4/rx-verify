@@ -754,20 +754,32 @@ const DOSAGE_FORM_WORDS: Record<string, string> = {
  * The reverse is never done — a bare "er"/"cr"/etc. token is NOT
  * expanded up to a phrase, because a bare abbreviation is ambiguous
  * (folding "er" up would require guessing which release word was
- * meant, and could collide with an unrelated token). This is also why
- * XL/XR are NOT included here: the codebase does not treat XL/XR as
- * equivalent to ER anywhere else (grepped — no existing XL/XR<->ER
- * equivalence), so this is a NEW equivalence class this branch is not
- * authorized to introduce; only the explicit-phrase-to-abbreviation
- * folds the bug report asked for are added. XL/XR/ER stay untouched as
- * bare tokens, same as before this change.
+ * meant, and could collide with an unrelated token).
+ *
+ * Field report (2026-08-17), owner-confirmed: "Extended release 24 hour
+ * tablet and XL are the same thing here. Not to be confused with
+ * Sustained Release or SR which is different." This is the "matching
+ * owner report" this file's own prior note said an XL/XR<->ER
+ * equivalence needed before it could be introduced at this identity
+ * layer (until now, only RELEASE_EQUIVALENCE_CLASS's metoprolol-gated
+ * component-fallback below recognized it) — so XL and XR now fold to
+ * "er" as bare tokens too, same as the spelled-out phrases above. SR is
+ * deliberately excluded from this fold (stays its own "sr" token,
+ * unchanged) — that's the exact distinction the report draws, and the
+ * one the fleet-wide Bupropion SR/XL false-green (RELEASE_EQUIVALENCE_
+ * CLASS's own doc below) depends on staying intact: an XL name and an SR
+ * name still never normalize to the same string, at this layer or any
+ * other. CR/DR/IR/LA are untouched — no report has confirmed those as
+ * interchangeable with ER outside the existing metoprolol-gated class.
  */
 const RELEASE_PHRASE_FOLDS: Array<[RegExp, string]> = [
   [/\bextended[\s-]+release\b/g, 'er'],
   [/\bsustained[\s-]+release\b/g, 'sr'],
   [/\bcontrolled[\s-]+release\b/g, 'cr'],
   [/\bdelayed[\s-]+release\b/g, 'dr'],
-  [/\bimmediate[\s-]+release\b/g, 'ir']
+  [/\bimmediate[\s-]+release\b/g, 'ir'],
+  [/\bxl\b/g, 'er'],
+  [/\bxr\b/g, 'er']
 ];
 
 /**
@@ -817,22 +829,28 @@ function dedupeReleaseAbbrevs(spaced: string): string {
  * name-identity fast path in compareDrugs, since normalizeDrugNameString
  * folds the duration phrase away entirely (see foldDurationHours) and
  * would otherwise let two differently-timed products silently match.
+ *
+ * Field report (2026-08-17): owner's example wordings included "ER
+ * 24HR" (glued, abbreviated) alongside "extended release 24 hour" — also
+ * recognizes the "hr" abbreviation, spaced or glued to the number
+ * ("24 hr" / "24hr"), not just the spelled-out "hour".
  */
 export function extractStatedDurationHours(name: string): number | null {
-  const m = /\b(\d+)\s*hour\b/i.exec(name);
+  const m = /\b(\d+)\s*(?:hour|hr)\b/i.exec(name);
   return m ? Number(m[1]) : null;
 }
 
 /**
- * Fold away a stated "N hour" release-duration phrase for the identity
- * comparison string. Safe to do unconditionally here ONLY because
- * compareDrugs separately blocks the name-identity fast path whenever
- * both sides state a DIFFERENT duration (see extractStatedDurationHours)
- * — this function alone cannot tell "one side silent" apart from
- * "both sides differ", so it must never be the sole gate.
+ * Fold away a stated "N hour"/"N hr" release-duration phrase for the
+ * identity comparison string. Safe to do unconditionally here ONLY
+ * because compareDrugs separately blocks the name-identity fast path
+ * whenever both sides state a DIFFERENT duration (see
+ * extractStatedDurationHours) — this function alone cannot tell "one
+ * side silent" apart from "both sides differ", so it must never be the
+ * sole gate.
  */
 function foldDurationHours(spaced: string): string {
-  return spaced.replace(/\b\d+\s*hour\b/g, '').replace(/\s+/g, ' ').trim();
+  return spaced.replace(/\b\d+\s*(?:hour|hr)\b/g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -882,6 +900,32 @@ function foldTrailingDuplicateStrength(spaced: string): string {
   if (tail !== expectedTail) return spaced;
 
   return spaced.slice(0, lastIndex).trim();
+}
+
+/**
+ * Field report: source stated a per-ingredient combo strength as "5
+ * mg-325 mg" (each ingredient's dose spelled out with its own unit,
+ * hyphen-joined), entered as PioneerRx's common "5/325" shorthand (bare
+ * numbers, slash-joined, unit omitted since both ingredients share it) —
+ * same combination strength, different notation convention, never
+ * name-identity matched. Folds the "N unit-M unit" shape down to the bare
+ * "N/M" slash form so both conventions normalize identically; a plain
+ * "N/M" name is already in that shape and passes through untouched.
+ *
+ * Scoped narrowly: requires the SAME unit stated on both sides of the
+ * hyphen (backreference below) — a combo whose two ingredients state
+ * DIFFERENT units (e.g. "5mg-25mcg") is left untouched, since collapsing
+ * that to a bare "5/25" would silently discard a real distinguishing unit
+ * and risk conflating it with an unrelated mg/mg combo at the same
+ * numbers. Runs on `spaced` (after the digit+unit spacing pass above), so
+ * it matches regardless of whether the source states "5mg-325mg" or
+ * "5 mg-325 mg".
+ */
+function foldComboStrengthNotation(spaced: string): string {
+  return spaced.replace(
+    /\b(\d+(?:\.\d+)?) (mcg|mg|ml|g|units?)-(\d+(?:\.\d+)?) \2\b/g,
+    (_match, n1: string, _unit: string, n2: string) => `${n1}/${n2}`
+  );
 }
 
 /**
@@ -1023,10 +1067,14 @@ export function normalizeDrugNameString(raw: string): string {
   // already handled by the toLowerCase() above).
   const spaced = folded.replace(/(\d)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
 
+  // Fold a per-ingredient combo strength stated as "N unit-M unit" down to
+  // the bare "N/M" slash shorthand — see foldComboStrengthNotation's doc.
+  const comboFolded = foldComboStrengthNotation(spaced);
+
   // Round 6, fix 3 (additive): strip a trailing strength restatement that
   // exactly duplicates the strength already stated earlier in the name
   // — see foldTrailingDuplicateStrength's doc.
-  const dedupedStrength = foldTrailingDuplicateStrength(spaced);
+  const dedupedStrength = foldTrailingDuplicateStrength(comboFolded);
 
   const amphetFolded = foldAmphetamineFamily(dedupedStrength);
 

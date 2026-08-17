@@ -280,13 +280,70 @@ describe('compareDrugs', () => {
           expect(normalizeDrugNameString('Metoprolol Succinate ER 50mg')).toBe('metoprolol succinate er 50 mg');
         });
 
-        it('does NOT fold XL or XR to ER — no existing equivalence in this codebase, out of scope for this fix', () => {
+        // Field report (2026-08-17), owner-confirmed: "Extended release 24
+        // hour tablet and XL are the same thing here." XL/XR now fold to
+        // "er" as bare tokens (see RELEASE_PHRASE_FOLDS' doc) — this pair
+        // used to reach GREEN only via the slower name_component_match
+        // fallback (still covered below); it now matches at the cheaper
+        // name-identity layer directly, same overall (green) outcome.
+        it('folds XL/XR to ER at the name-identity layer (owner-confirmed 2026-08-17)', () => {
           const r = compareDrugs(
             { name: 'Metoprolol Succinate ER 50 mg' },
             { name: 'Metoprolol Succinate XL 50 mg' },
             provider
           );
-          expect(r.reasonCode).not.toBe('name_identity_match');
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        // Exact wordings from the owner report: "extended release 24 hour"
+        // / "ER 24HR" / "24 hr extended release" all describe the same
+        // once-daily release rate as a bare "XL" — every combination below
+        // must normalize identically.
+        it('"extended release 24 hour" / "ER 24HR" / "24 hr extended release" / "XL" all normalize the same', () => {
+          const variants = [
+            normalizeDrugNameString('Diltiazem 180 mg Extended Release 24 Hour Tablet'),
+            normalizeDrugNameString('Diltiazem 180 mg ER 24HR Tablet'),
+            normalizeDrugNameString('Diltiazem 180 mg 24 hr Extended Release Tablet'),
+            normalizeDrugNameString('Diltiazem 180 mg XL Tablet')
+          ];
+          for (const v of variants) expect(v).toBe(variants[0]);
+        });
+
+        it('is GREEN name_identity_match: "Diltiazem 180 mg Extended Release 24 Hour Tablet" vs "Diltiazem 180mg Xl Tab"', () => {
+          const r = compareDrugs(
+            { name: 'Diltiazem 180 mg Extended Release 24 Hour Tablet' },
+            { name: 'Diltiazem 180mg Xl Tab' },
+            provider
+          );
+          expect(r.status).toBe('green');
+          expect(r.reasonCode).toBe('name_identity_match');
+        });
+
+        // Negative test (owner report): "Not to be confused with Sustained
+        // Release or SR which is different" — SR must never fold into the
+        // XL/ER/XR class, at this identity layer or overall.
+        it('SR stays DISTINCT from XL/ER/XR — does not fold and does not resolve GREEN', () => {
+          expect(normalizeDrugNameString('Diltiazem 180 mg SR Tablet')).not.toBe(
+            normalizeDrugNameString('Diltiazem 180 mg XL Tablet')
+          );
+          expect(normalizeDrugNameString('Diltiazem 180 mg Sustained Release Tablet')).not.toBe(
+            normalizeDrugNameString('Diltiazem 180 mg Extended Release Tablet')
+          );
+
+          const rXl = compareDrugs(
+            { name: 'Diltiazem 180 mg SR Tablet' },
+            { name: 'Diltiazem 180 mg XL Tablet' },
+            provider
+          );
+          expect(rXl.reasonCode).not.toBe('name_identity_match');
+
+          const rEr = compareDrugs(
+            { name: 'Diltiazem 180 mg SR Tablet' },
+            { name: 'Diltiazem 180 mg ER Tablet' },
+            provider
+          );
+          expect(rEr.reasonCode).not.toBe('name_identity_match');
         });
       });
     });
@@ -656,6 +713,11 @@ describe('component-wise name fallback (unknown_drug branch, concept resolution 
       expect(r.explanation).toContain('succinate');
     });
 
+    // UPDATED 2026-08-17: XR now folds to "er" at the name-identity layer
+    // too (see RELEASE_PHRASE_FOLDS' doc, owner-confirmed report) — this
+    // pair now reaches GREEN via the cheaper name_identity_match path
+    // directly, before this component-fallback layer is ever consulted;
+    // same overall outcome as before (green).
     it('release-equivalence class covers XR/SR/LA too, all matching a plain "ER": "Metoprolol Succinate XR 50 Mg Tablet" vs "Metoprolol Succinate ER 50 Mg Tablet"', () => {
       const r = compareDrugs(
         { name: 'Metoprolol Succinate XR 50 Mg Tablet' },
@@ -663,7 +725,7 @@ describe('component-wise name fallback (unknown_drug branch, concept resolution 
         unresolvedProvider
       );
       expect(r.status).toBe('green');
-      expect(r.reasonCode).toBe('name_component_match');
+      expect(r.reasonCode).toBe('name_identity_match');
     });
 
     it('does NOT fold DR (delayed-release) into the XL/ER/XR/SR/LA/CR equivalence class: "Divalproex DR 250 Mg Tablet" vs "Divalproex ER 250 Mg Tablet" stays non-green', () => {

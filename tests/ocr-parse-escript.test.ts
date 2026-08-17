@@ -2019,10 +2019,13 @@ describe('parseEscriptOcr', () => {
       });
     });
 
-    // Acceptance (5): street-only source (no city token at all — the
-    // suffix word IS the last token, nothing follows it) — the "don't
-    // guess" guard must hold, and the resulting compare stays yellow.
-    it('acceptance (5): street-only source (suffix word is the last token, no city follows) keeps current street-only behavior and compares yellow', () => {
+    // UPDATED 2026-08-17 (owner-confirmed field report, prescriberAddress
+    // — see normalize-address.test.ts's matching update): a street-only
+    // source (no city/state/ZIP captured at all) confirmed against a
+    // fully-populated entered address is now GREEN exact_match_partial_
+    // source, not yellow — "The source has two lines for the address, not
+    // one line. The app failed to read the second line. This matches."
+    it('acceptance (5): street-only source (suffix word is the last token, no city follows) is GREEN exact_match_partial_source against a fully-populated entered address', () => {
       const addressRow: OcrWord[] = [
         { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
         { text: '907', x: 121, y: 116, w: 30, h: 11 },
@@ -2041,7 +2044,8 @@ describe('parseEscriptOcr', () => {
         state: 'KS',
         zip: '66099'
       });
-      expect(result.status).toBe('yellow');
+      expect(result.status).toBe('green');
+      expect(result.reasonCode).toBe('exact_match_partial_source');
     });
 
     it('GUARD: no recognized street-suffix word at all — falls back to the pre-existing street-only behavior (never guesses)', () => {
