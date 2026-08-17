@@ -334,6 +334,22 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         private set { if (_hasNotes == value) return; _hasNotes = value; OnPropertyChanged(); }
     }
 
+    /// <summary>
+    /// Diagnostic-only (2026-08-17 fix round, item 2 — see Uia/FieldReader.cs
+    /// RefillsTotalFillsLabelSeen doc), threaded into the "refills" row's
+    /// VerdictFieldInfo by Integrated/IntegratedOverlayCoordinator.cs
+    /// UpdateBoxes so a "Report error…" on that field can carry it into
+    /// Reporting/RxReportBuilder.cs. Null (not just false) means "not
+    /// applicable" — the OCR path (RefreshFromOcrAsync) never sets this at
+    /// all, unlike the Uia path, since the diagnostic is specific to
+    /// Parsing/EscriptTreeParser.cs's search logic. No UI binding — not
+    /// shown anywhere, purely a value carried through to the report.
+    /// </summary>
+    public bool? RefillsTotalFillsLabelSeen { get; private set; }
+
+    /// <summary>Pairs with RefillsTotalFillsLabelSeen — see that property's doc.</summary>
+    public string? RefillsTotalFillsLabelPrefix { get; private set; }
+
     private string _statusMessage = "Not attached to PioneerRx yet.";
     public string StatusMessage
     {
@@ -563,6 +579,13 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     private async Task RefreshFromOcrAsync(PioneerRxWindow window, PrescriptionRecord entered, int generation, RefreshTiming timing)
     {
         NonEscriptMessage = ""; // reset before this pass decides fresh — see property doc
+        // Not applicable on this path — reset so a STALE value from a
+        // previous Uia-mode refresh (the pharmacist toggled Method
+        // mid-session — see RefreshAsync's doc) can't leak into an OCR
+        // report even when this pass never calls ClearCategories (its own
+        // success path doesn't). See RefillsTotalFillsLabelSeen's doc.
+        RefillsTotalFillsLabelSeen = null;
+        RefillsTotalFillsLabelPrefix = null;
 
         OcrCaptureResult ocrResult;
         IsOcrReading = true;
@@ -698,6 +721,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         {
             source = reader.ReadSource();
             UpdateNotes(reader.SourceNotes);
+            RefillsTotalFillsLabelSeen = reader.RefillsTotalFillsLabelSeen;
+            RefillsTotalFillsLabelPrefix = reader.RefillsTotalFillsLabelPrefix;
         }
         catch (Exception ex)
         {
@@ -1020,6 +1045,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         LastOcrRawText = "";
         _lastTiming = null;
         NonEscriptMessage = ""; // NotAnEscript's own branch (RefreshFromOcrAsync) re-sets this AFTER calling ClearCategories — every other caller wants it cleared
+        RefillsTotalFillsLabelSeen = null; // not applicable — no source was read this pass, or the pharmacist is on the OCR path (see property doc)
+        RefillsTotalFillsLabelPrefix = null;
 
         // ADDENDUM item 7: no verdicts currently displayed for ANY Rx —
         // see CurrentVerdictsRxIdentity's doc. _pendingRxIdentity too, so

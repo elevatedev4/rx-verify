@@ -20,6 +20,7 @@ public sealed partial class ReportErrorWindow : Window
     private readonly VerdictFieldInfo _field;
     private readonly string? _engineBuild;
     private readonly string? _commit;
+    private readonly string _sourceInputMode;
     private readonly RxReportSubmitter _submitter;
 
     public ReportErrorWindow(VerdictFieldInfo field, string? engineBuild, string? commit, OverlaySettings settings)
@@ -29,6 +30,13 @@ public sealed partial class ReportErrorWindow : Window
         _field = field;
         _engineBuild = engineBuild;
         _commit = commit;
+        // Diagnostic-only (2026-08-17 fix round, item 2 — see
+        // Reporting/RxReportPayload.cs SourceInputMode's doc). Resolved
+        // ONCE here (not re-read from `settings` later) — matches
+        // engineBuild/commit's existing "captured at construction, not
+        // re-derived at submit time" pattern, and avoids holding onto the
+        // whole mutable OverlaySettings object as a field just for this.
+        _sourceInputMode = settings.Method.ToString().ToLowerInvariant();
         _submitter = new RxReportSubmitter(settings);
 
         FieldNameText.Text = field.DisplayName;
@@ -56,7 +64,7 @@ public sealed partial class ReportErrorWindow : Window
     /// </summary>
     private void OnSubmitClick(object sender, RoutedEventArgs e)
     {
-        var payload = RxReportBuilder.Build(_field, CorrectionTextBox.Text, _engineBuild, _commit, DateTime.UtcNow);
+        var payload = RxReportBuilder.Build(_field, CorrectionTextBox.Text, _engineBuild, _commit, DateTime.UtcNow, _sourceInputMode);
         Close();
 
         _ = SubmitInBackgroundAsync(payload);

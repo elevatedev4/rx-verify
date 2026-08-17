@@ -946,7 +946,14 @@ public sealed class IntegratedOverlayCoordinator
             .Select(r => (
                 r.ScreenRect!.Value,
                 BoxColorMapper.IsGreenBox(r.Status),
-                new VerdictFieldInfo(r.FieldKey, r.DisplayName, r.Status, r.SourceValue, r.EnteredValue, r.Explanation, r.ReasonCode)))
+                new VerdictFieldInfo(
+                    r.FieldKey, r.DisplayName, r.Status, r.SourceValue, r.EnteredValue, r.Explanation, r.ReasonCode,
+                    // Diagnostic-only (2026-08-17 fix round, item 2) —
+                    // only meaningful for the refills row itself; every
+                    // other field's VerdictFieldInfo gets the defaults
+                    // (null/null) from VerdictFieldInfo's own doc.
+                    RefillsTotalFillsLabelSeen: r.FieldKey == "refills" ? _viewModel.RefillsTotalFillsLabelSeen : null,
+                    RefillsTotalFillsLabelPrefix: r.FieldKey == "refills" ? _viewModel.RefillsTotalFillsLabelPrefix : null)))
             .ToList();
 
         boxesWindow.SetBoxes(boxes, bounds.Location, scale, scale, reportingEnabled);

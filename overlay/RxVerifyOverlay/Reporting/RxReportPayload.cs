@@ -45,6 +45,40 @@ public sealed class RxReportPayload
     public string Correction { get; set; } = "";
 
     public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// Diagnostic-only (2026-08-17 fix round, item 2 — Will's live
+    /// false-yellow on a "Refill ApprovedWithChanges" renewal response,
+    /// refills read "not provided"): which source-reading path produced
+    /// the record being reported — "ocr" or "uia" (Models/OverlaySettings.cs
+    /// VerificationMethod, lowercased). Lets the NEXT report self-diagnose
+    /// which extraction path is actually in play, since the two are
+    /// completely different code (Parsing/EscriptTreeParser.cs's UIA tree
+    /// walk vs. src/ocr/parseEscriptOcr.ts on the TS side) with different
+    /// failure modes. Null only if somehow unresolvable (should not
+    /// happen in practice — see Integrated/ReportErrorWindow.xaml.cs).
+    /// NOT part of HQ's current zod schema (rxverify-reports.ts) — see
+    /// that file's z.object() without .strict()/.passthrough(): unknown
+    /// keys are silently STRIPPED, not rejected, so this (and the two
+    /// fields below) currently round-trip to HQ but never actually
+    /// persist until that schema is extended server-side.
+    /// </summary>
+    public string? SourceInputMode { get; set; }
+
+    /// <summary>
+    /// Refills-specific diagnostic (only ever non-null when Field ==
+    /// "refills" — see Integrated/VerdictFieldInfo.cs and Uia/FieldReader.cs
+    /// RefillsTotalFillsLabelSeen doc): whether EscriptTreeParser.
+    /// DetectTotalFillsLabel found a Total-fills-shaped label ANYWHERE on
+    /// the source message, independent of whether ParseRefills could use
+    /// it as Refills. Null for every other field, or when the source
+    /// input mode wasn't "uia" (the diagnostic doesn't exist on the OCR
+    /// path).
+    /// </summary>
+    public bool? RefillsTotalFillsLabelSeen { get; set; }
+
+    /// <summary>Which FieldMap.TotalFillsKeyPrefixes entry matched, if RefillsTotalFillsLabelSeen — label text only (e.g. "Total fills: "), NEVER the refill count/value itself. Null when RefillsTotalFillsLabelSeen isn't true.</summary>
+    public string? RefillsTotalFillsLabelPrefix { get; set; }
 }
 
 /// <summary>
@@ -61,7 +95,14 @@ public sealed class RxReportPayload
 /// </summary>
 public static class RxReportBuilder
 {
-    public static RxReportPayload Build(VerdictFieldInfo field, string correction, string? engineBuild, string? commit, DateTime createdAtUtc)
+    /// <param name="sourceInputMode">
+    /// "ocr" or "uia" — see RxReportPayload.SourceInputMode's doc. Optional
+    /// (defaults to null) purely so existing single-purpose call sites/tests
+    /// that don't care about this diagnostic don't need updating; the one
+    /// real production call site (Integrated/ReportErrorWindow.xaml.cs)
+    /// always passes it, derived from OverlaySettings.Method.
+    /// </param>
+    public static RxReportPayload Build(VerdictFieldInfo field, string correction, string? engineBuild, string? commit, DateTime createdAtUtc, string? sourceInputMode = null)
     {
         var isPatientField = RxLogFormatter.IsPatientField(field.FieldKey);
 
@@ -77,7 +118,15 @@ public static class RxReportBuilder
             ReasonCode = field.ReasonCode,
             Explanation = field.Explanation,
             Correction = correction ?? "",
-            CreatedAt = createdAtUtc
+            CreatedAt = createdAtUtc,
+            SourceInputMode = sourceInputMode,
+            // Already refills-scoped and label-only at the source (see
+            // VerdictFieldInfo's doc) — passed straight through, not
+            // re-gated by field.FieldKey here, so a future VerdictFieldInfo
+            // producer that got the gating wrong fails visibly (wrong data
+            // in the payload) rather than silently here too.
+            RefillsTotalFillsLabelSeen = field.RefillsTotalFillsLabelSeen,
+            RefillsTotalFillsLabelPrefix = field.RefillsTotalFillsLabelPrefix
         };
     }
 }
