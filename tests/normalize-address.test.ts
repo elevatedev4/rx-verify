@@ -388,13 +388,37 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).toBe('address_differs');
     });
 
-    // Acceptance (5) / SAFETY BOUND (ii): source missing CITY too
-    // (street-only) is "too little to verify" — must stay yellow, never
-    // waved through by this leniency (which requires a CONFIRMED city
-    // match, not just "city wasn't stated").
-    it('SAFETY BOUND: street-only source (no city, no state, no ZIP) stays YELLOW, not green', () => {
+    // UPDATED 2026-08-17 (owner-confirmed field report, prescriberAddress:
+    // source "1811 Wakarusa Dr, Ste 102" vs entered "1811 Wakarusa Dr Ste
+    // 102 Lawrence, KS 66047" — "The source has two lines for the
+    // address, not one line. The app failed to read the second line. This
+    // matches."). Previously this exact shape (street-only source,
+    // city/state/ZIP all absent) was a deliberate SAFETY BOUND locked to
+    // YELLOW — see the superseded assertions below this comment's own
+    // history. That bound was specifically about an UNCONFIRMED city, not
+    // an authorization gap; today's report is the "matching owner report"
+    // needed to extend the leniency one step further: when the source
+    // states NONE of city/state/ZIP (never reached past the street line
+    // at all, not merely a stated-and-different city), a confirmed street
+    // match alone is now enough. A source that DOES state a city (even
+    // one that's simply absent-vs-differs) still gets the strict prior
+    // treatment — see the "entered city differs" test above, unchanged.
+    it('street-only source (no city, no state, no ZIP) is now GREEN exact_match_partial_source when street is confirmed matching', () => {
       const r = compareAddresses(
         { street: '907 W 1300 Road' },
+        { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
+      );
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match_partial_source');
+      expect(r.explanation).toContain('first address line');
+    });
+
+    // SAFETY BOUND (still enforced): a street-only source whose street
+    // does NOT actually match must still flag yellow — this leniency only
+    // ever waives the MISSING components, never a genuine street mismatch.
+    it('SAFETY BOUND: street-only source stays YELLOW when the street itself genuinely differs', () => {
+      const r = compareAddresses(
+        { street: '123 Elm St' },
         { street: '907 W 1300 Road', city: 'Faketown', state: 'KS', zip: '66099' }
       );
       expect(r.status).toBe('yellow');
@@ -420,6 +444,35 @@ describe('compareAddresses', () => {
       expect(r.reasonCode).not.toBe('exact_match_partial_source');
       expect(r.status).toBe('yellow');
       expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // Exact live-report pair (prescriberAddress, 2026-08-17): source only
+    // captured the street/suite line; entered has the full two-line
+    // address. Will: "This matches. The source has two lines for the
+    // address, not one line. The app failed to read the second line."
+    it('is GREEN for the exact live-report pair: "1811 Wakarusa Dr, Ste 102" vs "1811 Wakarusa Dr Ste 102 Lawrence, KS 66047"', () => {
+      const r = compareAddresses({ street: '1811 Wakarusa Dr, Ste 102' }, { street: '1811 Wakarusa Dr Ste 102 Lawrence, KS 66047' });
+      expect(r.status).toBe('green');
+      expect(r.reasonCode).toBe('exact_match_partial_source');
+    });
+
+    // Genuine-mismatch negative case: same partial-source shape (street +
+    // suite only, no city/state/ZIP), but the STREET itself genuinely
+    // differs — must still flag yellow, never waved through just because
+    // city/state/ZIP happen to be absent too.
+    it('is YELLOW when the partial source street genuinely differs from the entered street: "1811 Wakarusa Dr, Ste 102" vs "1900 Wakarusa Dr Ste 102 Lawrence, KS 66047"', () => {
+      const r = compareAddresses({ street: '1811 Wakarusa Dr, Ste 102' }, { street: '1900 Wakarusa Dr Ste 102 Lawrence, KS 66047' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    // Genuine-mismatch negative case: street matches, but the SUITE
+    // genuinely differs on both sides — unit_differs must still fire, not
+    // be silently waved through by the missing-city/state/ZIP leniency.
+    it('is YELLOW unit_differs when the partial source suite genuinely differs: "1811 Wakarusa Dr, Ste 102" vs "1811 Wakarusa Dr Ste 205 Lawrence, KS 66047"', () => {
+      const r = compareAddresses({ street: '1811 Wakarusa Dr, Ste 102' }, { street: '1811 Wakarusa Dr Ste 205 Lawrence, KS 66047' });
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('unit_differs');
     });
   });
 

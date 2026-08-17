@@ -1218,6 +1218,48 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  // Live report (2026-08-17): pharmacist flagged a wrong YELLOW — engine
+  // showed source refills "(not provided)", entered "2", when the page
+  // actually reads "Total Fills: 3 (including this fill)" on a
+  // "Refill ApprovedWithChanges" layout. Per the owner's correction:
+  // "Total Fills: 3 (including this fill)" means 3 total dispensings
+  // authorized, i.e. 2 refills after the original — entered "2" is
+  // CORRECT and should be GREEN. This exercises the exact reported
+  // strings end-to-end (label present, not the labelless Bug-3 fallback
+  // shape) through both extraction (record.refills/refillsFromTotalFills)
+  // and the N-1 comparison semantics in compareRefills.
+  it('full pipeline: source "Total Fills: 3 (including this fill)" vs entered "2" is GREEN (N-1 semantics)', () => {
+    const totalFillsRow = row(358, ['Total', 'Fills:', '3', '(including', 'this', 'fill)']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('3');
+    expect(record.refillsFromTotalFills).toBe(true);
+
+    const r = compareRefills(record.refills, '2', record.refillsFromTotalFills);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('exact_match');
+  });
+
+  // Regression: a source that states no refills information in any
+  // recognized shape (no "Refills"/"Total fills" label, and no bare
+  // "N (including this fill)" phrase anchor) must still fall through to
+  // undefined at parse time and "(not provided)" (yellow) at compare
+  // time — the Total-fills fixes above must never cause the parser to
+  // guess a refills value out of unrelated text.
+  it('regression: a plain unparseable refill source still yields undefined / "(not provided)", not a guessed value', () => {
+    const noiseRow = row(400, ['See', 'notes', 'for', 'refill', 'details']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsFromTotalFills).toBeUndefined();
+
+    const r = compareRefills(record.refills, '2', record.refillsFromTotalFills);
+    expect(r.status).toBe('yellow');
+    expect(r.reasonCode).toBe('not_provided');
+  });
+
   // Round 5, Fix 1 (live report, W-T-round5): a refill script's OCR
   // dropped "Total Fills: 4 (including this fill)" down to the exact word
   // shape below, on ONE physical row shared with the quantity value.
@@ -1977,10 +2019,13 @@ describe('parseEscriptOcr', () => {
       });
     });
 
-    // Acceptance (5): street-only source (no city token at all — the
-    // suffix word IS the last token, nothing follows it) — the "don't
-    // guess" guard must hold, and the resulting compare stays yellow.
-    it('acceptance (5): street-only source (suffix word is the last token, no city follows) keeps current street-only behavior and compares yellow', () => {
+    // UPDATED 2026-08-17 (owner-confirmed field report, prescriberAddress
+    // — see normalize-address.test.ts's matching update): a street-only
+    // source (no city/state/ZIP captured at all) confirmed against a
+    // fully-populated entered address is now GREEN exact_match_partial_
+    // source, not yellow — "The source has two lines for the address, not
+    // one line. The app failed to read the second line. This matches."
+    it('acceptance (5): street-only source (suffix word is the last token, no city follows) is GREEN exact_match_partial_source against a fully-populated entered address', () => {
       const addressRow: OcrWord[] = [
         { text: 'Address:', x: 51, y: 116, w: 54, h: 11 },
         { text: '907', x: 121, y: 116, w: 30, h: 11 },
@@ -1999,7 +2044,8 @@ describe('parseEscriptOcr', () => {
         state: 'KS',
         zip: '66099'
       });
-      expect(result.status).toBe('yellow');
+      expect(result.status).toBe('green');
+      expect(result.reasonCode).toBe('exact_match_partial_source');
     });
 
     it('GUARD: no recognized street-suffix word at all — falls back to the pre-existing street-only behavior (never guesses)', () => {

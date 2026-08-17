@@ -822,25 +822,52 @@ export function compareAddresses(
   //      entCity non-blank and !cityDiffers); if either is blank or
   //      differs, this branch is skipped and falls through unchanged.
   const sourceMissingStateOrZip = srcState === '' || srcZip === '';
-  const streetAndCityConfirmed =
-    srcStreet.base !== '' &&
-    entStreet.base !== '' &&
-    !streetDiffers &&
-    srcCity !== '' &&
-    entCity !== '' &&
-    !cityDiffers;
+  const streetConfirmed = srcStreet.base !== '' && entStreet.base !== '' && !streetDiffers;
+  const streetAndCityConfirmed = streetConfirmed && srcCity !== '' && entCity !== '' && !cityDiffers;
+
+  // Deferred, not returned immediately — a genuine unit/suite disagreement
+  // (checked further below, alongside the exact_match path) must still be
+  // able to override either partial-source leniency below and flag
+  // unit_differs; only once that check clears does this become the actual
+  // verdict.
+  let partialSourceExplanation: string | null = null;
+
   if (sourceMissingStateOrZip && !stateDiffers && !zipDiffers && streetAndCityConfirmed) {
     const missingParts: string[] = [];
     if (srcState === '') missingParts.push('state');
     if (srcZip === '') missingParts.push('ZIP');
-    return {
-      status: 'green',
-      reasonCode: 'exact_match_partial_source',
-      explanation: `Street and city match; source did not provide ${missingParts.join('/')}.`
-    };
+    partialSourceExplanation = `Street and city match; source did not provide ${missingParts.join('/')}.`;
   }
 
-  if (streetDiffers || cityDiffers || stateDiffers || zipDiffers) {
+  // Field report (2026-08-17), owner-confirmed: source "1811 Wakarusa Dr,
+  // Ste 102" (street + suite only) vs entered "1811 Wakarusa Dr Ste 102
+  // Lawrence, KS 66047" went YELLOW address_differs — "The source has two
+  // lines for the address, not one line. The app failed to read the
+  // second line." Same root cause as defect #7c above (OCR/UIA capture
+  // stops after the street line), just a step further: here the source
+  // never reaches city EITHER, not just state/ZIP. Extends the same
+  // leniency one step further, superseding safety bound (ii)'s prior
+  // "city absence never qualifies" rule for exactly this narrower shape —
+  // ONLY when the source states none of city/state/ZIP at all (a
+  // genuine "never reached past street" capture, not a source that states
+  // a city and it merely doesn't match). Also requires the ENTERED side to
+  // actually state at least one of city/state/ZIP — when NEITHER side
+  // states anything beyond street (both genuinely street-only entries,
+  // e.g. the pre-existing "330 Sycamore" vs "330 Sycamore St" case), there
+  // is no second line the source could have "failed to read"; that stays
+  // ordinary exact_match via the fallthrough below, unchanged. Street (the
+  // one component still always required) must be present and actively
+  // confirmed matching on both sides; a unit/suite stated on both sides
+  // still must agree (see the unit check below, which is never bypassed
+  // by this).
+  const sourceMissingCityStateZip = srcCity === '' && srcState === '' && srcZip === '';
+  const enteredHasCityStateOrZip = entCity !== '' || entState !== '' || entZip !== '';
+  if (!partialSourceExplanation && sourceMissingCityStateZip && enteredHasCityStateOrZip && streetConfirmed) {
+    partialSourceExplanation =
+      'Street (and suite/unit, if stated) matches; source only captured the first address line — city, state, and ZIP were not provided.';
+  }
+
+  if (!partialSourceExplanation && (streetDiffers || cityDiffers || stateDiffers || zipDiffers)) {
     return {
       status: 'yellow',
       reasonCode: 'address_differs',
@@ -862,6 +889,14 @@ export function compareAddresses(
       status: 'yellow',
       reasonCode: 'unit_differs',
       explanation: `Street, city, state, and ZIP match; unit differs ("${srcUnit}" vs "${entUnit}").`
+    };
+  }
+
+  if (partialSourceExplanation) {
+    return {
+      status: 'green',
+      reasonCode: 'exact_match_partial_source',
+      explanation: partialSourceExplanation
     };
   }
 

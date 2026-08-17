@@ -71,7 +71,16 @@ const DATA: LocalDrugData = {
     rendafex: [8], // bare key -- only the qualifier-blind record; a short "rendafex sr"/"rendafex xl" query never matches the longer salt-name keys below, exactly like real "bupropion sr" vs "bupropion hydrochloride sr"
     'rendafex sulfate sr': [9],
     'rendafexine sulfate sr': [9], // simulates the same product's generic_name also being indexed
-    'rendafex sulfate xl': [10]
+    // Key is "...er", not "...xl": extractNameKeys (scripts/build-drug-data.ts)
+    // builds nameIndex keys by running the raw displayName ("Rendafex Sulfate
+    // XL") through this SAME normalizeDrugNameString, which as of the
+    // 2026-08-17 owner-confirmed report now folds bare "xl"/"xr" tokens to
+    // "er" (see RELEASE_PHRASE_FOLDS' doc) -- so a real rebuild produces this
+    // key today, even though concept 10's displayName text (below) still
+    // literally reads "XL". SR is deliberately NOT folded, so this key stays
+    // genuinely distinct from 'rendafex sulfate sr' above -- the exact
+    // distinction the SR/XL regression tests further down still depend on.
+    'rendafex sulfate er': [10]
   },
   formsByIngredient: {
     zylodrine: ['tablet'],
@@ -229,7 +238,13 @@ describe('compareDrugs concept_match GREEN (synthetic fixture)', () => {
       // doseForm -- the real-data artifact this fix guards against. Both
       // state the same "150mg" so the earlier raw-text strength
       // cross-check doesn't intervene first; this isolates the
-      // qualifierConflict guard.
+      // qualifierConflict guard. The explanation now reads "sr vs er", not
+      // "sr vs xl" -- extractReleaseQualifier normalizes both raw strings
+      // through normalizeDrugNameString, which as of the 2026-08-17
+      // owner-confirmed report folds bare "xl" to "er" (SR stays
+      // unfolded) -- but the underlying protection is identical: SR and
+      // (what used to display as) XL still never normalize to the same
+      // qualifier, so the conflict still fires and still blocks green.
       const r = compareDrugs(
         { name: 'Rendafex Sulfate SR 150mg Tablet' },
         { name: 'Rendafex Sulfate XL 150mg Tablet' },
@@ -238,7 +253,7 @@ describe('compareDrugs concept_match GREEN (synthetic fixture)', () => {
       expect(r.status).not.toBe('green');
       expect(r.status).toBe('yellow');
       expect(r.reasonCode).toBe('unknown_drug');
-      expect(r.explanation).toContain('sr vs xl');
+      expect(r.explanation).toContain('sr vs er');
     });
 
     it('does NOT over-block: two DIFFERENT strings that both confirm the SAME qualifier still GREEN concept_match', () => {
