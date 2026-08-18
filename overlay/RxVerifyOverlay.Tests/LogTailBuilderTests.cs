@@ -91,6 +91,19 @@ public class LogTailBuilderTests
     }
 
     [Fact]
+    public void PreCheckGateLineIsExcluded()
+    {
+        // Integrated/IntegratedOverlayCoordinator.cs's TickCore
+        // (branch fix/precheck-mode-gate) logs the observed PioneerRx
+        // window title next to its gate decision — this MUST stay off
+        // the report allowlist (same reasoning as
+        // OrderAssistWindowTitleLineIsExcluded above): "[PRECHECK-GATE]"
+        // is deliberately not one of IsSafeLine's two recognized tags.
+        var line = Ts + "[PRECHECK-GATE] mode changed to EditRx shouldRunVerifyChecks=False title=\"Edit Rx - 0000123 - Amoxicillin - Testperson, Jordan\"";
+        Assert.False(LogTailBuilder.IsSafeLine(line));
+    }
+
+    [Fact]
     public void UntaggedLogTimingLineIsExcluded()
     {
         // e.g. UiaTreeWalker's diagnostic line, which has the timestamp

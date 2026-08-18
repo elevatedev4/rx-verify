@@ -49,6 +49,17 @@ public sealed class PioneerRxWindow : IDisposable
     public string? RxNumber { get; }
 
     /// <summary>
+    /// 2026-08-18 (branch fix/precheck-mode-gate): the screen this window's
+    /// title identifies — Pre-Check Rx / Edit Rx / New Rx (see
+    /// RxScreenModeClassifier), computed once at attach time from the same
+    /// title text already read for RxNumber above (no extra UIA property
+    /// read). See Integrated/PreCheckModeGate.cs for how
+    /// IntegratedOverlayCoordinator.TickCore uses this to restrict the
+    /// verify boxes/hover/right-click layer to Pre-Check only.
+    /// </summary>
+    public RxScreenMode ScreenMode { get; }
+
+    /// <summary>
     /// True when this instance came from TryAttach's FAST PATH (branch
     /// brief item 2d, latency fix) — the previously-resolved window was
     /// reused as-is (see AttachCacheDecision) instead of paying for a
@@ -73,7 +84,9 @@ public sealed class PioneerRxWindow : IDisposable
         _application = application;
         WindowBounds = SafeBounds(windowElement);
         NativeWindowHandle = SafeNativeHandle(windowElement);
-        RxNumber = ExtractRxNumber(SafeName(windowElement));
+        var title = SafeName(windowElement);
+        RxNumber = ExtractRxNumber(title);
+        ScreenMode = RxScreenModeClassifier.Classify(title);
         WasAttachCacheHit = wasAttachCacheHit;
     }
 

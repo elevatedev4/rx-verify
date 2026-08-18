@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Controls;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.Uia;
 using RxVerifyOverlay.ViewModels;
 
@@ -179,6 +180,20 @@ public sealed class IntegratedOverlayCoordinator
     /// a previous shift; it always starts false on every app launch.
     /// </summary>
     private bool _boxesHiddenByToggle;
+
+    /// <summary>
+    /// 2026-08-18 (branch fix/precheck-mode-gate): the RxScreenMode last
+    /// LOGGED by TickCore's PreCheckModeGate check below — null until the
+    /// first tick with a window attached. Exists purely to throttle the
+    /// diagnostic log line to "on change" (a new mode, or the very first
+    /// observation) rather than every ~250ms poll tick, which would
+    /// otherwise write the window's full title (see that log line's own
+    /// PHI-caution doc) to the local log dozens of times a minute for as
+    /// long as the pharmacist stays on the same screen — same "log
+    /// transitions, not every tick" posture as IntegratedBoxesWindow.
+    /// xaml.cs's own _diagLastOverHotspot.
+    /// </summary>
+    private RxScreenMode? _lastLoggedScreenMode;
 
     /// <summary>
     /// ROUND 7: the hwnd MainWindowAnchorRule.Resolve chose LAST tick as
@@ -494,6 +509,56 @@ public sealed class IntegratedOverlayCoordinator
         {
             HideBoxesIfShown();
             return;
+        }
+
+        // PRE-CHECK MODE GATE (2026-08-18, Will verbatim: "RxVerify verify
+        // mode should only do checks when in Pre-Check mode (from title
+        // bar), not when in other modes, like Edit Rx") — see
+        // PreCheckModeGate's own doc. Only meaningful once a specific Rx
+        // screen is attached at all (isRxScreenAttached); an unattached
+        // `window` has no title to classify and was never going to show
+        // boxes anyway (IntegratedVisibilityGate.ShouldShowBoxes already
+        // requires isRxScreenAttached below). Placed here — AFTER the
+        // narrow attach (which still unconditionally feeds
+        // pioneerExists/RxNumber/etc. above, unaffected by this gate) but
+        // BEFORE CommonTabGate/RxIdentityGate's per-field UIA work further
+        // down — for the identical "skip real, avoidable cost whose result
+        // could never be shown anyway" reasoning as the VerifyModeGate
+        // check just above. Does NOT touch OrderAssist (see
+        // PreCheckModeGate's own SCOPE doc) or the Separate window's own
+        // verdict table/OverlayViewModel's background refresh — only what
+        // this method itself draws over Pioneer.
+        if (isRxScreenAttached)
+        {
+            var screenMode = window!.ScreenMode;
+            var shouldRunVerifyChecks = PreCheckModeGate.ShouldRunVerifyChecks(screenMode);
+
+            if (screenMode != _lastLoggedScreenMode)
+            {
+                _lastLoggedScreenMode = screenMode;
+
+                // PHI CAUTION: the observed title is logged HERE ONLY —
+                // OcrLogger's local per-day log file (already not
+                // HIPAA-free as a whole, see Diagnostics/LogTailBuilder.cs's
+                // class doc), never anything that leaves this machine.
+                // "[PRECHECK-GATE]" is deliberately NOT one of
+                // LogTailBuilder.IsSafeLine's two allow-listed tags
+                // ("Timing: " / "[RIGHTCLICK-DIAG]"), so this line can
+                // never be pulled into a submitted report's logTail — same
+                // "window titles stay off the report allowlist" exclusion
+                // OrderAssistCoordinator's own window-title diagnostic
+                // line already relies on (see that class's
+                // LogNoMatchDiagnosticsIfNeeded doc).
+                string? observedTitle;
+                try { observedTitle = window.WindowElement.Name; } catch { observedTitle = null; }
+                OcrLogger.LogTiming($"[PRECHECK-GATE] mode changed to {screenMode} shouldRunVerifyChecks={shouldRunVerifyChecks} title=\"{observedTitle}\"");
+            }
+
+            if (!shouldRunVerifyChecks)
+            {
+                HideBoxesIfShown();
+                return;
+            }
         }
 
         // BOXES: still requires the NARROW Rx-screen attach, that specific
