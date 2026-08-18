@@ -177,6 +177,45 @@ public static class OcrLogger
     }
 
     /// <summary>
+    /// Reads TODAY's diagnostic log file in full (oldest line first) for
+    /// Diagnostics/LogTailBuilder.cs to filter down to a PHI-safe tail —
+    /// see Integrated/ReportErrorWindow.xaml.cs's Submit handler, the only
+    /// caller. Best-effort, same posture as every other method here: never
+    /// throws, returns an empty list if the file doesn't exist or can't be
+    /// read right now (e.g. mid-rotation on another thread) — an error
+    /// report must never fail to submit just because this diagnostic
+    /// extra couldn't be read. Opened with FileShare.ReadWrite so a
+    /// concurrent LogTiming/LogRead append from the live refresh loop
+    /// never gets blocked by this read (or vice versa).
+    /// </summary>
+    public static IReadOnlyList<string> TryReadAllLines()
+    {
+        try
+        {
+            lock (LockObj)
+            {
+                var path = LogFilePath;
+                if (!File.Exists(path)) return Array.Empty<string>();
+
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream);
+
+                var lines = new List<string>();
+                string? line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    lines.Add(line);
+                }
+                return lines;
+            }
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
     /// Truncates today's log file to a short rotation marker if it's
     /// already past MaxLogFileBytes, so the append immediately after this
     /// call starts a fresh (small) file instead of piling onto an

@@ -152,4 +152,45 @@ public class RxReportBuilderTests
         Assert.Null(payload.RefillsTotalFillsLabelSeen);
         Assert.Null(payload.RefillsTotalFillsLabelPrefix);
     }
+
+    [Fact]
+    public void LogTailDefaultsToNullWhenNotPassed()
+    {
+        // Same "existing call sites/tests shouldn't need updating" posture
+        // as SourceInputMode above.
+        var field = new VerdictFieldInfo("refills", "Refills", VerdictStatus.Red, "2", "3", "", "");
+
+        var payload = RxReportBuilder.Build(field, "some correction", null, null, CreatedAt);
+
+        Assert.Null(payload.LogTail);
+    }
+
+    [Fact]
+    public void LogTailPassesThroughVerbatim()
+    {
+        // Build does no I/O and no further scrubbing of this string — the
+        // caller (Integrated/ReportErrorWindow.xaml.cs) is responsible for
+        // having already run it through Diagnostics/LogTailBuilder.
+        // BuildSafeTail before it ever reaches here.
+        var field = new VerdictFieldInfo("refills", "Refills", VerdictStatus.Red, "2", "3", "", "");
+        const string tail = "[2026-08-17 10:00:00.000] Timing: detect->render 100ms (...)";
+
+        var payload = RxReportBuilder.Build(field, "some correction", null, null, CreatedAt, logTail: tail);
+
+        Assert.Equal(tail, payload.LogTail);
+    }
+
+    [Fact]
+    public void EmptyLogTailBecomesNullNotEmptyString()
+    {
+        // LogTailBuilder.BuildSafeTail returns "" (never null) when nothing
+        // safe was found — Build normalizes that to null so the payload
+        // matches SourceInputMode/EngineBuild's existing "omit rather than
+        // print empty" convention.
+        var field = new VerdictFieldInfo("refills", "Refills", VerdictStatus.Red, "2", "3", "", "");
+
+        var payload = RxReportBuilder.Build(field, "some correction", null, null, CreatedAt, logTail: "");
+
+        Assert.Null(payload.LogTail);
+    }
 }
