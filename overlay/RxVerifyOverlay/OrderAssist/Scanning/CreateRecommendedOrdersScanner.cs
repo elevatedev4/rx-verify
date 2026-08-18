@@ -10,9 +10,12 @@ namespace RxVerifyOverlay.OrderAssist.Scanning;
 /// <summary>
 /// End-to-end PURE pipeline for the "Create Recommended Orders" window:
 /// raw OCR words in, zero-quantity cell highlights out. Ties together
-/// TableRowGrouper -&gt; HeaderBandLocator -&gt; ColumnResolver (resolving the
-/// Order Quantity column EXACTLY, never "Suggested Order Qty" — see
-/// ColumnResolver's "substring trap" doc) -&gt; CellValueBucketizer -&gt;
+/// TableRowGrouper -&gt; HeaderRowWindowSelector (2026-08-18, W-T76/78/81 fix
+/// — searches for whichever leading row(s) actually contain the header,
+/// rather than assuming HeaderBandLocator's first 1-2 non-data rows are
+/// it) -&gt; ColumnResolver (resolving the Order Quantity column EXACTLY,
+/// never "Suggested Order Qty" — see ColumnResolver's "substring trap"
+/// doc) -&gt; CellValueBucketizer -&gt;
 /// ZeroQuantityDetector. No WPF/Win32/OCR-engine dependency at all, so
 /// the WHOLE decision (not just its individual pieces) is unit-testable
 /// with a synthetic OcrWord list shaped like the owner's reference
@@ -31,14 +34,19 @@ public static class CreateRecommendedOrdersScanner
     public static IReadOnlyList<ZeroCellHighlight> FindZeroQuantityHighlights(IReadOnlyList<OcrWord> words)
     {
         var rows = TableRowGrouper.GroupIntoRows(words);
-        var headerRowCount = HeaderBandLocator.CountHeaderRows(rows);
-        if (headerRowCount == 0 || headerRowCount >= rows.Count) return Array.Empty<ZeroCellHighlight>();
 
-        var headerRows = rows.Take(headerRowCount).ToList();
-        var bodyRows = rows.Skip(headerRowCount).ToList();
+        // 2026-08-18 (W-T76/78/81 fix — see HeaderRowWindowSelector's own
+        // root-cause doc): the header is no longer assumed to be whatever
+        // HeaderBandLocator finds at the very top of the table — window
+        // chrome (title bar, menu bar) reliably sits ABOVE the real grid
+        // header on both target windows, so this now searches for whichever
+        // leading row(s) actually contain the Order Quantity label.
+        var winner = HeaderRowWindowSelector.SelectBest(rows, new[] { OrderQuantityHeaderLabel });
+        if (winner is null) return Array.Empty<ZeroCellHighlight>();
 
-        var bands = ColumnResolver.BuildPartitionedColumnBands(headerRows);
-        var orderQuantityColumn = ColumnResolver.ResolveExact(bands, OrderQuantityHeaderLabel);
+        var bodyRows = rows.Skip(winner.StartRowIndex + winner.RowCount).ToList();
+
+        var orderQuantityColumn = ColumnResolver.ResolveExact(winner.Bands, OrderQuantityHeaderLabel);
         if (orderQuantityColumn is null) return Array.Empty<ZeroCellHighlight>();
 
         var cells = CellValueBucketizer.BucketColumn(bodyRows, orderQuantityColumn);

@@ -91,6 +91,22 @@ public class LogTailBuilderTests
     }
 
     [Fact]
+    public void OrderAssistMultiCandidateColumnDiagnosticLineIsExcluded()
+    {
+        // 2026-08-18 (W-T76/78/81 fix): the SAME "OrderAssist[{kind}]:
+        // column resolution failed for ..." prefix as
+        // OrderAssistColumnDiagnosticLineIsExcluded above (never changed —
+        // per that class's own doc, no new allowlist entry was added for
+        // it) but a materially different tail — OrderAssistCoordinator.
+        // LogColumnFailureOnce now echoes EVERY candidate row-window it
+        // scanned (each with its own resolved band labels — screen text,
+        // same PHI-adjacency as before) rather than just the winner. Must
+        // stay excluded exactly like the single-candidate shape did.
+        var line = Ts + "OrderAssist[CreateRecommendedOrders]: column resolution failed for Order Quantity. 3 candidate row-window(s) scanned: [rows=0-0 y=0-14 score=0 bands=(Create Recommended Orders | Actions)] [rows=1-1 y=20-32 score=0 bands=(Filter Type All)] [rows=1-2 y=20-52 score=1 bands=(Filter Type All Cost Per Unit)]";
+        Assert.False(LogTailBuilder.IsSafeLine(line));
+    }
+
+    [Fact]
     public void PreCheckGateLineIsExcluded()
     {
         // Integrated/IntegratedOverlayCoordinator.cs's TickCore

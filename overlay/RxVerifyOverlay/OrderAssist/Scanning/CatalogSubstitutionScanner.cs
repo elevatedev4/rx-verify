@@ -11,10 +11,15 @@ namespace RxVerifyOverlay.OrderAssist.Scanning;
 /// End-to-end PURE pipeline for the "Recommended Order - Catalog Item
 /// Substitution Selection" window: raw OCR words in, every Order Assist
 /// annotation for that window out (see <see cref="CatalogAnnotations"/>).
-/// Resolves the Supplier, Rebate Cost Per Unit, AND Shipping Size columns
-/// EXACTLY (never "Rebate Cost" or "Cost Per Unit" — the same
-/// substring-trap shape exists on this window too, see ColumnResolver's
-/// doc), reads every body row's cells, then hands them to
+/// The header row(s) are located via HeaderRowWindowSelector (2026-08-18,
+/// W-T76/78/81 fix — see its own root-cause doc: this window's title bar
+/// PLUS its own menu bar PLUS a "Catalog Items Filter: All" toolbar row
+/// all sit above the real grid header, more leading chrome rows than the
+/// old fixed 2-row assumption ever accounted for). Resolves the Supplier,
+/// Rebate Cost Per Unit, AND Shipping Size columns EXACTLY (never "Rebate
+/// Cost" or "Cost Per Unit" — the same substring-trap shape exists on this
+/// window too, see ColumnResolver's doc), reads every body row's cells,
+/// then hands them to
 /// SubstitutionRecommender (green pick), DualHighlightPlanner (yellow
 /// McKesson contrast), PackageClassifier (best-large/best-small package
 /// markers), and SortOrderChecker (the column-header sort badge) — each a
@@ -63,13 +68,18 @@ public static class CatalogSubstitutionScanner
     public static CatalogAnnotations Analyze(IReadOnlyList<OcrWord> words)
     {
         var rows = TableRowGrouper.GroupIntoRows(words);
-        var headerRowCount = HeaderBandLocator.CountHeaderRows(rows);
-        if (headerRowCount == 0 || headerRowCount >= rows.Count) return CatalogAnnotations.Empty;
 
-        var headerRows = rows.Take(headerRowCount).ToList();
-        var bodyRows = rows.Skip(headerRowCount).ToList();
+        // 2026-08-18 (W-T76/78/81 fix — see HeaderRowWindowSelector's own
+        // root-cause doc): scored against the two columns actually
+        // REQUIRED for this window (Shipping Size, resolved further below,
+        // is optional — its absence only suppresses the package markers)
+        // rather than assuming the header sits in the first 1-2 rows.
+        var winner = HeaderRowWindowSelector.SelectBest(rows, new[] { SupplierHeaderLabel, RebateCostPerUnitHeaderLabel });
+        if (winner is null) return CatalogAnnotations.Empty;
 
-        var bands = ColumnResolver.BuildPartitionedColumnBands(headerRows);
+        var bands = winner.Bands;
+        var bodyRows = rows.Skip(winner.StartRowIndex + winner.RowCount).ToList();
+
         var supplierColumn = ColumnResolver.ResolveExact(bands, SupplierHeaderLabel);
         var costColumn = ColumnResolver.ResolveExact(bands, RebateCostPerUnitHeaderLabel);
         if (supplierColumn is null || costColumn is null) return CatalogAnnotations.Empty;
@@ -143,14 +153,10 @@ public static class CatalogSubstitutionScanner
         var sortText = SortOrderChecker.Describe(sortState);
         if (sortText is not null)
         {
-            var headerTop = headerRows
-                .SelectMany(r => r)
-                .Where(w => !string.IsNullOrWhiteSpace(w.Text))
-                .Select(w => w.Y)
-                .DefaultIfEmpty(0)
-                .Min();
-
-            sortBadge = new ColumnBadge(costColumn.Left, costColumn.Right, headerTop, sortText, sortState == SortIndicatorState.Sorted);
+            // winner.Top is already the winning header row-window's own
+            // topmost word Y (see HeaderRowWindowSelector.Candidate) — no
+            // need to re-walk headerRows' words for this.
+            sortBadge = new ColumnBadge(costColumn.Left, costColumn.Right, winner.Top, sortText, sortState == SortIndicatorState.Sorted);
         }
 
         return new CatalogAnnotations(greenHighlight, yellowHighlight, bestLargeMarker, bestSmallMarker, sortBadge);

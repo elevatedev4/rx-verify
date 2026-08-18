@@ -468,48 +468,83 @@ public sealed class OrderAssistCoordinator
     /// still-unresolved capture doesn't re-log every tick, but a
     /// DIFFERENT bad capture (different bands) does.
     /// </summary>
+    /// <summary>
+    /// 2026-08-18 update (W-T76/78/81, "nothing highlights" — Will's real
+    /// diagnostic log confirmed the root cause: window chrome — title bar,
+    /// menu bar, on Catalog Substitution also a filter/toolbar row — was
+    /// eating the old fixed 2-row header search budget before it ever
+    /// reached the real grid header; see HeaderRowWindowSelector's own
+    /// root-cause doc). Re-runs HeaderRowWindowSelector.EnumerateCandidates
+    /// (the SAME search CreateRecommendedOrdersScanner/CatalogSubstitutionScanner's
+    /// own already-computed, already-fail-safe result used) purely for
+    /// logging — never second-guesses or duplicates their result.
+    ///
+    /// Branch brief item 4 ("log ALL candidate bands ... not just the
+    /// winning one"): on a genuine failure, EVERY row-window candidate this
+    /// tick considered is logged, each with its own y-range and resolved
+    /// band labels — not just whichever one happened to win (or the single
+    /// fixed header slot the old code always used) — so a future failure
+    /// paste pinpoints exactly which vertical band of the capture actually
+    /// held the real header, instantly, instead of needing another
+    /// live-diagnosis round.
+    /// </summary>
     private void LogColumnDiagnosticsIfNeeded(OrderAssistWindowKind kind, IReadOnlyList<OcrWord> words)
     {
         try
         {
             var rows = TableRowGrouper.GroupIntoRows(words);
-            var headerRowCount = HeaderBandLocator.CountHeaderRows(rows);
-            if (headerRowCount == 0 || headerRowCount >= rows.Count)
-            {
-                LogColumnFailureOnce("(no header row detected)", Array.Empty<string>());
-                return;
-            }
-
-            var headerRows = rows.Take(headerRowCount).ToList();
-            var bands = ColumnResolver.BuildPartitionedColumnBands(headerRows);
-            var labels = bands.Select(b => b.Label).ToList();
 
             var expectedLabels = kind == OrderAssistWindowKind.CreateRecommendedOrders
                 ? new[] { CreateRecommendedOrdersScanner.OrderQuantityHeaderLabel }
                 : new[] { CatalogSubstitutionScanner.SupplierHeaderLabel, CatalogSubstitutionScanner.RebateCostPerUnitHeaderLabel };
 
-            var missing = expectedLabels.Where(expected => !labels.Any(label => NormalizeForComparison(label) == NormalizeForComparison(expected))).ToList();
-            if (missing.Count == 0) return; // resolution actually succeeded -- an empty highlight result this tick is a legitimate "nothing to flag", not a failure worth logging
+            var candidates = HeaderRowWindowSelector.EnumerateCandidates(rows, expectedLabels);
+            var winner = HeaderRowWindowSelector.PickBest(candidates);
 
-            LogColumnFailureOnce(string.Join(", ", missing), labels);
+            // Resolution only actually SUCCEEDED if every expected label
+            // resolves EXACTLY off the winning candidate's own bands — the
+            // scoring above tolerates a near-miss OCR misread (see
+            // HeaderRowWindowSelector.LabelsAreCloseMatch's own doc) purely
+            // to pick the right ROW WINDOW; ColumnResolver.ResolveExact's
+            // strict equality is still what actually gates a real result,
+            // same substring-trap-safe contract as before.
+            var resolvedOk = winner is not null &&
+                expectedLabels.All(label => ColumnResolver.ResolveExact(winner.Bands, label) is not null);
+
+            if (resolvedOk) return; // an empty highlight result this tick is a legitimate "nothing to flag", not a failure worth logging
+
+            IReadOnlyList<string> missing = winner is null
+                ? expectedLabels
+                : expectedLabels.Where(label => ColumnResolver.ResolveExact(winner.Bands, label) is null).ToList();
+
+            LogColumnFailureOnce(kind, missing, candidates);
         }
         catch
         {
             // Best-effort diagnostic only — see LogNoMatchDiagnosticsIfNeeded's posture.
         }
-
-        void LogColumnFailureOnce(string missingDescription, IReadOnlyList<string> resolvedLabels)
-        {
-            var signature = $"{kind}:{string.Join("|", resolvedLabels)}";
-            if (signature == _lastLoggedColumnFailureSignature) return;
-            _lastLoggedColumnFailureSignature = signature;
-
-            var bandsDisplay = resolvedLabels.Count > 0 ? string.Join(" | ", resolvedLabels) : "(none)";
-            OcrLogger.LogTiming($"OrderAssist[{kind}]: column resolution failed for {missingDescription}. Resolved header bands this tick: [{bandsDisplay}]");
-        }
     }
 
-    /// <summary>Mirrors ColumnResolver's own (private) NormalizeLabel — whitespace-collapsed, case-insensitive — for this diagnostic's own label comparison only; never used to influence the actual resolution ColumnResolver.ResolveExact performs.</summary>
-    private static string NormalizeForComparison(string label) =>
-        string.Join(" ", label.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+    private void LogColumnFailureOnce(OrderAssistWindowKind kind, IReadOnlyList<string> missing, IReadOnlyList<HeaderRowWindowSelector.Candidate> candidates)
+    {
+        // Signature covers every candidate's start/span/labels — a tick
+        // whose candidate SET is unchanged (still the same bad capture)
+        // never re-logs; any genuine change (different OCR read, Pioneer
+        // moved to a different Rx/screen) does.
+        var signature = $"{kind}:" + string.Join(";", candidates.Select(c => $"{c.StartRowIndex}/{c.RowCount}:{string.Join(",", c.Bands.Select(b => b.Label))}"));
+        if (signature == _lastLoggedColumnFailureSignature) return;
+        _lastLoggedColumnFailureSignature = signature;
+
+        var missingDescription = missing.Count > 0 ? string.Join(", ", missing) : "(unknown)";
+
+        var candidatesDisplay = candidates.Count == 0
+            ? "(none -- header search found no non-data leading rows at all)"
+            : string.Join(" ", candidates.Select(c =>
+            {
+                var bandsDisplay = c.Bands.Count > 0 ? string.Join(" | ", c.Bands.Select(b => b.Label)) : "(no bands)";
+                return $"[rows={c.StartRowIndex}-{c.StartRowIndex + c.RowCount - 1} y={c.Top:F0}-{c.Bottom:F0} score={c.Score} bands=({bandsDisplay})]";
+            }));
+
+        OcrLogger.LogTiming($"OrderAssist[{kind}]: column resolution failed for {missingDescription}. {candidates.Count} candidate row-window(s) scanned: {candidatesDisplay}");
+    }
 }
