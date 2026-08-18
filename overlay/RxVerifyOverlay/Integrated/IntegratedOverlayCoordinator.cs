@@ -939,13 +939,14 @@ public sealed class IntegratedOverlayCoordinator
 
         var scale = DpiScaleFor(window.NativeWindowHandle);
 
-        // HOVER/RIGHT-CLICK AFFORDANCE: reportingEnabled gates ONLY
-        // whether a poll-detected right-click turns into a
-        // ReportErrorRequested (see IntegratedBoxesWindow.PollCursorForHover,
-        // fix/hover-popup-live branch) — the hover popup itself is
-        // unconditional. See OverlaySettings.RxVerifyReportKey's doc for
-        // why an unset key suppresses the affordance entirely rather than
-        // opening a dialog that could only ever queue locally forever.
+        // HOVER/RIGHT-CLICK AFFORDANCE: 2026-08-18 ("right-click must work
+        // on EVERY field") — reportingEnabled no longer gates whether a
+        // poll-detected right-click turns into a ReportErrorRequested at
+        // all (see IntegratedBoxesWindow.PollCursorForHover); it's threaded
+        // through ReportErrorRequestInfo.ReportingEnabled instead, so
+        // Integrated/ReportErrorWindow.xaml.cs can disable Submit and show
+        // a "not set up" note when OverlaySettings.RxVerifyReportKey is
+        // unset, rather than the right-click doing nothing.
         var reportingEnabled = !string.IsNullOrWhiteSpace(_settings.RxVerifyReportKey);
 
         var boxes = _viewModel.Categories

@@ -144,7 +144,7 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// <summary>The VerdictFieldInfo for each entry in _hotspots, same index — kept as a separate parallel list (rather than combining into one List&lt;(DipRect, VerdictFieldInfo)&gt;) so CursorHitTest/HoverPollDecision's existing IReadOnlyList&lt;DipRect&gt;-only signatures don't need to change. Rebuilt alongside _hotspots in every AddHotspot call.</summary>
     private readonly List<VerdictFieldInfo> _hotspotFields = new();
 
-    /// <summary>OverlaySettings.RxVerifyReportKey is non-empty, captured from SetBoxes' own reportingEnabled parameter — read by PollCursorForHover when a right-click transition fires, gating whether ReportErrorRequested is actually raised (see that property's doc).</summary>
+    /// <summary>OverlaySettings.RxVerifyReportKey is non-empty, captured from SetBoxes' own reportingEnabled parameter. 2026-08-18: no longer gates whether ReportErrorRequested is raised at all (right-click works on every field regardless) — read by PollCursorForHover purely to thread through ReportErrorRequestInfo.ReportingEnabled, so Integrated/ReportErrorWindow.xaml.cs can disable Submit and show its "not set up" note instead.</summary>
     private bool _reportingEnabled;
 
     /// <summary>
@@ -161,20 +161,6 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// guarantees the guard can never get stuck true.
     /// </summary>
     private bool _reportDialogOpen;
-
-    /// <summary>
-    /// True while ShowReportingDisabledNotice's MessageBox is currently up
-    /// — feat/report-key-delivery. MessageBox.Show pumps its own nested
-    /// message loop (same mechanic as ReportErrorWindow's ShowDialog
-    /// above), which means THIS window's own _hoverPollTimer can still
-    /// tick while it's open — without this guard a pharmacist repeatedly
-    /// right-clicking the same hotspot while the notice is already
-    /// showing could stack a second (and third...) copy of it. Set/
-    /// cleared entirely within ShowReportingDisabledNotice itself (the
-    /// call is synchronous), unlike _reportDialogOpen above, which is
-    /// mirrored from MainWindow around an async dialog lifetime.
-    /// </summary>
-    private bool _reportingDisabledNoticeShowing;
 
     private readonly DispatcherTimer _hoverPollTimer;
 
@@ -212,7 +198,7 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// <summary>Null until the first poll tick with hotspots to test against — lets the hotspot ENTER/LEAVE transition log (poll-level state, logged only on change per the troubleshooting brief) distinguish "never checked yet" from "checked and currently false".</summary>
     private bool? _diagLastOverHotspot;
 
-    /// <summary>Raised when the poll detects a right-click press (GetAsyncKeyState transition) while the cursor is over a hotspot — IntegratedOverlayCoordinator forwards this up to MainWindow.xaml.cs, which opens Integrated/ReportErrorWindow prefilled with the field's current verdict data. Never raised for a patient field (VerdictFieldInfo.IsPatientField) or when reporting is disabled (SetBoxes' reportingEnabled parameter) — see PollCursorForHover, which checks both before invoking this.</summary>
+    /// <summary>Raised when the poll detects a right-click press (GetAsyncKeyState transition) while the cursor is over a hotspot — IntegratedOverlayCoordinator forwards this up to MainWindow.xaml.cs, which opens Integrated/ReportErrorWindow prefilled with the field's current verdict data. 2026-08-18: raised UNCONDITIONALLY for every field, including patient fields and workstations with no report key configured — see RightClickOutcomeClassifier and ReportErrorRequestInfo.ReportingEnabled for how the dialog adapts instead of the click being suppressed.</summary>
     public event EventHandler<ReportErrorRequestInfo>? ReportErrorRequested;
 
     // Round 4 item 4 ("boxes are colored border + fully transparent
@@ -353,7 +339,7 @@ public sealed partial class IntegratedBoxesWindow : Window
     /// needing to know anything about them.
     /// </summary>
     /// <param name="boxes">One entry per field with a resolved on-screen rect this tick — see IntegratedOverlayCoordinator.UpdateBoxes. <c>Field</c> carries the per-field metadata the hover popup and "Report error…" affordance need (Integrated/VerdictFieldInfo.cs); it is intentionally attached PER FIELD, not per merged bar (see the class doc's HOVER/RIGHT-CLICK section) — a single merged bar can visually span several stacked fields, and the popup must describe whichever ONE field the cursor is actually over.</param>
-    /// <param name="reportingEnabled">OverlaySettings.RxVerifyReportKey is non-empty — see that property's doc: a right-click is simply never turned into a ReportErrorRequested when this is false, rather than opening a dialog that could only ever queue locally forever.</param>
+    /// <param name="reportingEnabled">OverlaySettings.RxVerifyReportKey is non-empty — see that property's doc. 2026-08-18: no longer gates whether a right-click turns into a ReportErrorRequested at all (it always does); threaded through to ReportErrorRequestInfo.ReportingEnabled instead, so the dialog can disable Submit and show a "not set up" note rather than the click doing nothing.</param>
     public void SetBoxes(IReadOnlyList<(System.Drawing.Rectangle PhysicalRect, bool IsGreen, VerdictFieldInfo Field)> boxes, System.Drawing.Point windowOriginPhysical, double dpiScaleX, double dpiScaleY, bool reportingEnabled)
     {
         BoxCanvas.Children.Clear();
@@ -561,90 +547,23 @@ public sealed partial class IntegratedBoxesWindow : Window
         if (result.RightClickTriggered)
         {
             var field = _hotspotFields[hotspotIndex];
+            var outcome = RightClickOutcomeClassifier.Classify(field.IsPatientField);
 
             // DIAG: the detector fired — everything logged from here on
             // is rare (one right-click, not one per ~60ms tick), so each
             // gate is worth its own line rather than throttling.
-            OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] detector FIRED hotspotIndex={hotspotIndex} fieldKey={field.FieldKey} reportingEnabled={_reportingEnabled} dialogOpen={_reportDialogOpen} isPatientField={field.IsPatientField}");
-
-            switch (RightClickOutcomeClassifier.Classify(_reportingEnabled, field.IsPatientField))
-            {
-                case RightClickOutcome.SuppressedReportingDisabled:
-                    // THE LIKELY ROOT CAUSE (RXVERIFY-TROUBLESHOOT round
-                    // 2): OverlaySettings.RxVerifyReportKey defaults to ""
-                    // and has no in-app setting UI anywhere — see that
-                    // property's own doc. If Will's workstation has never
-                    // had it set in settings.json directly, EVERY
-                    // right-click reaches here and is silently swallowed,
-                    // by design, indistinguishable from "right-click is
-                    // broken" — this line is what proves (or rules out)
-                    // that exact scenario the next time he tries.
-                    OcrLogger.LogTiming("[RIGHTCLICK-DIAG] suppressed: reportingEnabled=false (OverlaySettings.RxVerifyReportKey is unset — see its own doc; no in-app UI sets this today)");
-                    ShowReportingDisabledNotice();
-                    break;
-                case RightClickOutcome.SuppressedPatientField:
-                    OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] suppressed: isPatientField=true fieldKey={field.FieldKey} (by design — see VerdictFieldInfo.IsPatientField's doc)");
-                    break;
-                case RightClickOutcome.Raised:
-                    OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] raising ReportErrorRequested fieldKey={field.FieldKey}");
-                    ReportErrorRequested?.Invoke(this, new ReportErrorRequestInfo(field, cursorPhysical));
-                    break;
-            }
-        }
-    }
-
-    /// <summary>
-    /// feat/report-key-delivery: a right-click on a workstation with no
-    /// RxVerifyReportKey configured used to be entirely silent from the
-    /// pharmacist's point of view — the only trace was the
-    /// [RIGHTCLICK-DIAG] log line just above, and nobody but Will/dev
-    /// ever reads that log. That's indistinguishable from "right-click is
-    /// just broken", which is the exact confusion this branch exists to
-    /// close.
-    ///
-    /// REVIEW FIX: this fires from an even weaker foreground context than
-    /// ReportErrorWindow ever did — a GetAsyncKeyState poll on a
-    /// DispatcherTimer tick, with the physical right-click having landed
-    /// on Pioneer's own window, not one of ours. MainWindow.xaml.cs
-    /// OpenReportErrorDialog needed TWO rounds (Topmost=True +
-    /// ContentRendered's Activate()/Topmost-pulse + ShowInTaskbar=True) to
-    /// stop a plain Show()/ShowDialog() from opening invisibly BEHIND
-    /// Pioneer, because every window this process owns is
-    /// WS_EX_NOACTIVATE and so the process itself never holds real
-    /// Windows foreground — Windows' anti-focus-stealing heuristics deny
-    /// an implicit activation from a background process. A bare
-    /// MessageBox.Show call here would be exactly as vulnerable, and a
-    /// notice that pops invisibly is worse than no notice at all — the
-    /// pharmacist would conclude right-click is broken again, the exact
-    /// failure this branch exists to close. MessageBoxOptions.
-    /// DefaultDesktopOnly sidesteps the whole problem rather than
-    /// re-deriving ReportErrorWindow's two-round fix for a one-line
-    /// message: it's a genuine system-modal dialog on the default
-    /// desktop, guaranteed topmost/foreground regardless of which
-    /// process/window requested it or what activation state that process
-    /// is in — no Owner, no Activate(), no Topmost-pulse needed. Showing
-    /// on the default desktop (not this app's own, since this app has
-    /// none of its own) and stealing no window state back is exactly
-    /// right for a rare, one-shot, read-and-dismiss notice like this one.
-    /// </summary>
-    private void ShowReportingDisabledNotice()
-    {
-        if (_reportingDisabledNoticeShowing) return;
-
-        _reportingDisabledNoticeShowing = true;
-        try
-        {
-            MessageBox.Show(
-                "Error reporting isn't set up on this PC — run the pinned setup line from Manager HQ.",
-                "Rx Verify — reporting not configured",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information,
-                MessageBoxResult.OK,
-                MessageBoxOptions.DefaultDesktopOnly);
-        }
-        finally
-        {
-            _reportingDisabledNoticeShowing = false;
+            //
+            // 2026-08-18 ("right-click must work on EVERY field"): right-
+            // click is NEVER suppressed anymore — ReportErrorRequested is
+            // always raised, for every field, regardless of
+            // reportingEnabled/isPatientField. reportingEnabled is still
+            // logged/threaded through (via ReportErrorRequestInfo) purely
+            // so ReportErrorWindow can disable Submit and show the
+            // "not set up" note instead of silently eating the click —
+            // see that class's own doc and OverlaySettings.RxVerifyReportKey.
+            OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] detector FIRED hotspotIndex={hotspotIndex} fieldKey={field.FieldKey} reportingEnabled={_reportingEnabled} dialogOpen={_reportDialogOpen} isPatientField={field.IsPatientField} outcome={outcome}");
+            OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] raising ReportErrorRequested fieldKey={field.FieldKey} outcome={outcome} reportingEnabled={_reportingEnabled}");
+            ReportErrorRequested?.Invoke(this, new ReportErrorRequestInfo(field, cursorPhysical, _reportingEnabled));
         }
     }
 

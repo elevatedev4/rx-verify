@@ -19,19 +19,32 @@ namespace RxVerifyOverlay.Integrated;
 /// </summary>
 public sealed partial class ReportErrorWindow : Window
 {
+    /// <summary>Shown on screen in place of a patient field's real Source/Entered (VerdictFieldInfo.IsPatientField) — Reporting/RxReportBuilder.cs redacts to RxLogFormatter.RedactedValue ("[redacted]") independently for the payload; this is a separate, more explanatory on-screen string since the dialog is a human-facing UI, not the wire format.</summary>
+    private const string PatientFieldDisplayPlaceholder = "[hidden — patient field]";
+
     private readonly VerdictFieldInfo _field;
     private readonly string? _engineBuild;
     private readonly string? _commit;
     private readonly string _sourceInputMode;
+    private readonly bool _reportingEnabled;
     private readonly RxReportSubmitter _submitter;
 
-    public ReportErrorWindow(VerdictFieldInfo field, string? engineBuild, string? commit, OverlaySettings settings)
+    /// <param name="reportingEnabled">
+    /// ReportErrorRequestInfo.ReportingEnabled — OverlaySettings.RxVerifyReportKey
+    /// non-empty as of IntegratedBoxesWindow's last SetBoxes call. 2026-08-18
+    /// ("right-click must work on EVERY field"): this dialog now ALWAYS
+    /// opens, even when this is false — see NotSetUpNoteText/SubmitButton
+    /// below, which is how a missing key is now surfaced instead of the
+    /// right-click silently doing nothing.
+    /// </param>
+    public ReportErrorWindow(VerdictFieldInfo field, string? engineBuild, string? commit, OverlaySettings settings, bool reportingEnabled)
     {
         InitializeComponent();
 
         _field = field;
         _engineBuild = engineBuild;
         _commit = commit;
+        _reportingEnabled = reportingEnabled;
         // Diagnostic-only (2026-08-17 fix round, item 2 — see
         // Reporting/RxReportPayload.cs SourceInputMode's doc). Resolved
         // ONCE here (not re-read from `settings` later) — matches
@@ -43,12 +56,34 @@ public sealed partial class ReportErrorWindow : Window
 
         FieldNameText.Text = field.DisplayName;
         StatusText.Text = $"Status: {field.Status}";
-        SourceText.Text = $"Source: {field.SourceValue}";
-        EnteredText.Text = $"Entered: {field.EnteredValue}";
+        // 2026-08-18: patient fields show a fixed placeholder on screen
+        // instead of the real value (see PatientFieldDisplayPlaceholder's
+        // own doc) — this dialog used to never even open for these 3
+        // fields; now it does, so what WAS a redaction only inside the
+        // submitted payload also has to hold on screen.
+        SourceText.Text = $"Source: {(field.IsPatientField ? PatientFieldDisplayPlaceholder : field.SourceValue)}";
+        EnteredText.Text = $"Entered: {(field.IsPatientField ? PatientFieldDisplayPlaceholder : field.EnteredValue)}";
         ExplanationText.Text = field.Explanation;
         ExplanationText.Visibility = string.IsNullOrEmpty(field.Explanation) ? Visibility.Collapsed : Visibility.Visible;
 
-        CorrectionTextBox.Focus();
+        // 2026-08-18: patient-field correction is withheld — see
+        // Reporting/RxReportBuilder.cs PatientFieldCorrectionWithheldText.
+        // The TextBox is disabled (not hidden) so the layout stays
+        // familiar; PatientFieldNoteText explains why nothing typed here
+        // gets sent. Belt-and-suspenders only — RxReportBuilder.Build
+        // discards whatever Text this box holds for a patient field
+        // regardless of whether IsEnabled was somehow bypassed.
+        PatientFieldNoteText.Visibility = field.IsPatientField ? Visibility.Visible : Visibility.Collapsed;
+        CorrectionTextBox.IsEnabled = !field.IsPatientField;
+
+        // 2026-08-18: missing report key no longer suppresses the
+        // right-click — this dialog opens regardless, but Submit is
+        // disabled and the reason is spelled out inline (see XAML doc on
+        // NotSetUpNoteText) instead of the click doing nothing at all.
+        NotSetUpNoteText.Visibility = _reportingEnabled ? Visibility.Collapsed : Visibility.Visible;
+        SubmitButton.IsEnabled = _reportingEnabled;
+
+        if (!field.IsPatientField) CorrectionTextBox.Focus();
     }
 
     private void OnCancelClick(object sender, RoutedEventArgs e) => Close();
@@ -75,6 +110,14 @@ public sealed partial class ReportErrorWindow : Window
     /// </summary>
     private void OnSubmitClick(object sender, RoutedEventArgs e)
     {
+        // Belt-and-suspenders: SubmitButton.IsEnabled = false already
+        // prevents a normal click from reaching here when no report key is
+        // configured (see constructor) — this early-out just makes sure a
+        // future change that somehow re-enables the button (or fires this
+        // handler some other way) still can't submit nothing/queue a
+        // report that will never be retried in a meaningful way.
+        if (!_reportingEnabled) return;
+
         var logTail = LogTailBuilder.BuildSafeTail(OcrLogger.TryReadAllLines());
         var payload = RxReportBuilder.Build(_field, CorrectionTextBox.Text, _engineBuild, _commit, DateTime.UtcNow, _sourceInputMode, logTail);
         Close();

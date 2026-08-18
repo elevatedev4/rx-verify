@@ -5,51 +5,34 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for RightClickOutcomeClassifier (Integrated/RightClickOutcomeClassifier.cs)
-/// — the pure decision behind what happens to a right-click
-/// RightClickDetector already confirmed fired. RXVERIFY-TROUBLESHOOT
-/// round 2: OverlaySettings.RxVerifyReportKey being unset (no in-app UI
-/// sets it) is the prime suspect for "right-click does nothing" — these
-/// tests pin down that SuppressedReportingDisabled wins priority over
-/// SuppressedPatientField so the diagnostic log always attributes a
-/// suppressed click to the more likely real-world cause.
+/// — the pure decision behind which dialog prefill mode a right-click
+/// RightClickDetector already confirmed fired should open.
+///
+/// 2026-08-18 (owner: "right-click must work on EVERY field"): this used
+/// to pin a 3-way Classify(reportingEnabled, isPatientField) that could
+/// SUPPRESS the click entirely. Both suppressions are gone — right-click
+/// now always raises ReportErrorRequested, for every field, on every
+/// workstation regardless of OverlaySettings.RxVerifyReportKey. These
+/// tests now pin the much simpler remaining job: picking the
+/// patient-field-redacted prefill mode vs. the normal one.
 /// </summary>
 public class RightClickOutcomeClassifierTests
 {
     [Fact]
-    public void RaisedWhenReportingEnabledAndNotAPatientField()
+    public void RaisedWhenNotAPatientField()
     {
-        var outcome = RightClickOutcomeClassifier.Classify(reportingEnabled: true, isPatientField: false);
+        var outcome = RightClickOutcomeClassifier.Classify(isPatientField: false);
 
         Assert.Equal(RightClickOutcome.Raised, outcome);
     }
 
     [Fact]
-    public void SuppressedReportingDisabledWhenReportingIsOff()
+    public void RaisedPatientFieldWhenFieldIsPatientData()
     {
-        var outcome = RightClickOutcomeClassifier.Classify(reportingEnabled: false, isPatientField: false);
+        // Never suppressed anymore — still raised, just flagged so the
+        // dialog knows to redact Source/Entered and withhold Correction.
+        var outcome = RightClickOutcomeClassifier.Classify(isPatientField: true);
 
-        Assert.Equal(RightClickOutcome.SuppressedReportingDisabled, outcome);
-    }
-
-    [Fact]
-    public void SuppressedPatientFieldWhenReportingIsOnButFieldIsPatientData()
-    {
-        var outcome = RightClickOutcomeClassifier.Classify(reportingEnabled: true, isPatientField: true);
-
-        Assert.Equal(RightClickOutcome.SuppressedPatientField, outcome);
-    }
-
-    [Fact]
-    public void ReportingDisabledTakesPriorityOverPatientFieldWhenBothApply()
-    {
-        // Priority matters for DIAGNOSIS, not just correctness (both
-        // inputs true still means "suppressed" either way) — attributing
-        // it to the reporting gate points whoever reads the log at the
-        // fix that's actually missing (no in-app way to set
-        // RxVerifyReportKey at all), not a red herring about patient
-        // fields.
-        var outcome = RightClickOutcomeClassifier.Classify(reportingEnabled: false, isPatientField: true);
-
-        Assert.Equal(RightClickOutcome.SuppressedReportingDisabled, outcome);
+        Assert.Equal(RightClickOutcome.RaisedPatientField, outcome);
     }
 }

@@ -423,17 +423,32 @@ What each script does:
 ### Error reporting
 
 Right-clicking a verdict bar in Integrated mode opens a "Report error…"
-dialog — but only on a workstation that has `RxVerifyReportKey` set in
-`%AppData%\RxVerifyOverlay\settings.json`. There is no in-app UI to set
-this yet; it's delivered entirely through the install/update flow above
-(`-ReportKey` on `bootstrap-fresh.ps1` or `update-and-run.ps1`). A
-workstation with no key set still gets a clear on-screen message on
-right-click ("Error reporting isn't set up on this PC — run the pinned
-setup line from Manager HQ.") instead of doing nothing — see
-`overlay/RxVerifyOverlay/Integrated/IntegratedBoxesWindow.xaml.cs`
-`ShowReportingDisabledNotice`. Re-running the Desktop shortcut (which
-always omits `-ReportKey`) never blanks out a key a previous
-`bootstrap-fresh.ps1`/`update-and-run.ps1` run already seeded.
+dialog — on **every** field, including the 3 patient-identity ones
+(patient name/DOB/address) and on a workstation with no
+`RxVerifyReportKey` set at all. There is no in-app UI to set the key yet;
+it's delivered entirely through the install/update flow above
+(`-ReportKey` on `bootstrap-fresh.ps1` or `update-and-run.ps1`).
+
+- **No key configured**: the dialog still opens, but Submit is disabled
+  and it shows an inline note ("Error reporting isn't set up on this PC —
+  re-run the pinned setup line from HQ.") instead of the right-click doing
+  nothing — see
+  `overlay/RxVerifyOverlay/Integrated/ReportErrorWindow.xaml.cs`.
+  Re-running the Desktop shortcut (which always omits `-ReportKey`) never
+  blanks out a key a previous `bootstrap-fresh.ps1`/`update-and-run.ps1`
+  run already seeded.
+- **A patient-identity field**: the dialog shows a redacted
+  `[hidden — patient field]` placeholder instead of the real Source/
+  Entered values, and the free-text Correction box is disabled — nothing
+  typed there is ever sent. `Reporting/RxReportPayload.cs`'s
+  `RxReportBuilder.Build` enforces this in the submitted payload too
+  (redacted Source/Entered, and Correction replaced with a fixed
+  "value wrong" flag), regardless of on-screen state.
+
+A separate, compact **Feedback** button (top-right of the main overlay
+panel) opens a free-text box for general feedback about the app itself —
+POSTs to a different HQ endpoint (`/api/rxverify-feedback`), also gated on
+`RxVerifyReportKey`, with no field/verdict/log data attached.
 
 If the sync in `update-and-run.ps1` ever fails (no network, a
 GitHub-side issue), the script stops immediately and tells you to copy

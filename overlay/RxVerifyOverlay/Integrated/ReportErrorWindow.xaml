@@ -23,14 +23,18 @@
 
         Prefilled fields (Field/Status/Source/Entered) are READ-ONLY plain
         text, never editable — the pharmacist's only input is the
-        Correction TextBox. Source/Entered here are shown verbatim (this
-        dialog is never opened for a patient field at all — see
-        IntegratedBoxesWindow.PollCursorForHover, which never raises
-        ReportErrorRequested for patientName/patientDOB/patientAddress
-        (fix/hover-popup-live branch — right-click is poll-detected, not a
-        WPF ContextMenu) — so there is nothing to redact on screen here);
-        Reporting/RxReportBuilder.cs still redacts defensively before
-        anything is ever sent, belt-and-suspenders.
+        Correction TextBox. Source/Entered here are shown verbatim for a
+        normal field. 2026-08-18 ("right-click must work on EVERY field"):
+        this dialog now DOES open for the 3 patient-identity fields too
+        (patientName/patientDOB/patientAddress) — see
+        IntegratedBoxesWindow.PollCursorForHover, which used to never raise
+        ReportErrorRequested for them at all. For those fields, code-behind
+        swaps Source/Entered for a "[hidden — patient field]" placeholder
+        on screen and disables CorrectionTextBox (PatientFieldNoteText
+        explains why) — Reporting/RxReportBuilder.cs still redacts/replaces
+        both defensively before anything is ever sent, belt-and-suspenders,
+        so even a future on-screen regression here can't leak PHI into the
+        payload.
 
         RXVERIFY-TROUBLESHOOT ROUND 2 (2026-08, owner: "Alt+Tab shows NO
         Report error window anywhere — the dialog NEVER opens"):
@@ -54,6 +58,8 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TextBlock x:Name="FieldNameText" Grid.Row="0" Text="Field" FontSize="16" FontWeight="Bold" Margin="0,0,0,8" />
@@ -67,11 +73,38 @@
             </StackPanel>
         </Border>
 
-        <TextBlock Grid.Row="2" Text="What's wrong / what should this have been?" Margin="0,0,0,4" />
-        <TextBox x:Name="CorrectionTextBox" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap"
+        <!--
+            2026-08-18 ("right-click must work on EVERY field"): shown only
+            for the 3 patient-identity fields (VerdictFieldInfo.IsPatientField)
+            — see code-behind's constructor. Explains why Source/Entered
+            above show a redacted placeholder and why the Correction box
+            below is disabled, so the pharmacist isn't left guessing why a
+            patient field's dialog looks different from every other field's.
+        -->
+        <TextBlock x:Name="PatientFieldNoteText" Grid.Row="2"
+                   Text="Patient-identity fields are redacted here and no free text is sent for them — this report will only note that the value looked wrong."
+                   TextWrapping="Wrap" FontSize="11" FontStyle="Italic" Foreground="#FF8A6D00" Margin="0,0,0,6"
+                   Visibility="Collapsed" />
+
+        <TextBlock x:Name="CorrectionPromptText" Grid.Row="3" Text="What's wrong / what should this have been?" Margin="0,0,0,4" />
+        <TextBox x:Name="CorrectionTextBox" Grid.Row="4" AcceptsReturn="True" TextWrapping="Wrap"
                  Height="80" VerticalScrollBarVisibility="Auto" Margin="0,0,0,10" />
 
-        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+        <!--
+            2026-08-18: shown only when OverlaySettings.RxVerifyReportKey
+            is unset on this workstation (ReportErrorRequestInfo.ReportingEnabled
+            == false) — right-click used to be silently swallowed entirely
+            in this case (RightClickOutcomeClassifier's old
+            SuppressedReportingDisabled). Now the dialog always opens; this
+            note plus SubmitButton.IsEnabled = false (see code-behind) make
+            the reason visible instead of a click that just does nothing.
+        -->
+        <TextBlock x:Name="NotSetUpNoteText" Grid.Row="5"
+                   Text="Error reporting isn't set up on this PC — re-run the pinned setup line from HQ."
+                   TextWrapping="Wrap" FontSize="11" FontWeight="Bold" Foreground="#FFB00020" Margin="0,0,0,10"
+                   Visibility="Collapsed" />
+
+        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="CancelButton" Content="Cancel" Padding="12,4" Margin="0,0,8,0" Click="OnCancelClick" IsCancel="True" />
             <Button x:Name="SubmitButton" Content="Submit" Padding="12,4" Click="OnSubmitClick" IsDefault="True" />
         </StackPanel>

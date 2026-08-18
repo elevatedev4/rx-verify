@@ -85,7 +85,8 @@
             <Setter Property="Foreground" Value="#FFCCCCCC" />
             <Setter Property="BorderBrush" Value="#FF3A3A3A" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="8,3" />
+            <!-- Task 3: 8,3 -> 6,2 (~25%/33% smaller) -->
+            <Setter Property="Padding" Value="6,2" />
             <Setter Property="Cursor" Value="Hand" />
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
@@ -99,7 +100,20 @@
 
     </Window.Resources>
 
-    <Grid Margin="8">
+    <!--
+        Task 3 (branch fix/rightclick-all-feedback-compact): the whole
+        panel's margins/paddings/some font sizes below are tightened
+        ~15-25% from their previous values so the overlay takes noticeably
+        less screen space over PioneerRx. Kept readable on purpose — the
+        verdict table's own row text (FontSize 10) and the toggle labels
+        (FontSize 10) are left alone; only the surrounding chrome (outer
+        margin, button padding, header/badge text, field-row padding) was
+        tightened. Does NOT touch Integrated/BoxLayoutAdjuster.cs's box
+        geometry (PaddingDip/FlushGapThreshold) — those align to Pioneer's
+        own on-screen fields, not this panel's chrome, and are out of scope
+        for this task.
+    -->
+    <Grid Margin="6">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" /> <!-- Title -->
             <RowDefinition Height="Auto" /> <!-- Verification method toggle (OCR default / Escript tab direct read) -->
@@ -122,12 +136,30 @@
             needed — the per-category header rollups below already convey
             this).
         -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4" VerticalAlignment="Center">
-            <TextBlock Text="Rx Verify" Foreground="White" FontSize="16" FontWeight="Bold" />
-            <Border Background="#FF2E7D32" CornerRadius="3" Padding="5,1" Margin="6,0,0,0" VerticalAlignment="Center">
-                <TextBlock x:Name="MethodBadgeText" Text="OCR" Foreground="White" FontSize="10" FontWeight="Bold" />
-            </Border>
-        </StackPanel>
+        <Grid Grid.Row="0" Margin="0,0,0,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- Task 3: 16 -> 13 (~19%) -->
+                <TextBlock Text="Rx Verify" Foreground="White" FontSize="13" FontWeight="Bold" />
+                <Border Background="#FF2E7D32" CornerRadius="3" Padding="4,1" Margin="5,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="MethodBadgeText" Text="OCR" Foreground="White" FontSize="9" FontWeight="Bold" />
+                </Border>
+            </StackPanel>
+            <!--
+                Task 2 (branch fix/rightclick-all-feedback-compact):
+                compact "Feedback" button — top-right of the title row so
+                it's always visible without competing for space with the
+                verdict list below (the actual point of the overlay). Small
+                font/padding to stay unobtrusive; opens
+                Integrated/FeedbackWindow (see OnFeedbackClick).
+            -->
+            <Button Grid.Column="1" x:Name="FeedbackButton" Content="Feedback" FontSize="9" Padding="6,2"
+                    VerticalAlignment="Center" Click="OnFeedbackClick"
+                    ToolTip="Send feedback about Rx Verify" />
+        </Grid>
 
         <!--
             Row 1: runtime source-method toggle (main task: combine
@@ -140,13 +172,13 @@
             instead of waiting for the next auto-watch tick. The active
             method is also reflected in the badge above (MethodBadgeText).
         -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
-            <TextBlock Text="Source:" Foreground="#FF888888" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0" />
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
+            <TextBlock Text="Source:" Foreground="#FF888888" FontSize="9" VerticalAlignment="Center" Margin="0,0,5,0" />
             <RadioButton x:Name="MethodOcrRadioButton" GroupName="VerificationMethod" Content="OCR (default)"
-                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Margin="0,0,10,0"
+                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Margin="0,0,8,0"
                          IsChecked="True" Checked="OnMethodChanged" />
             <RadioButton x:Name="MethodUiaRadioButton" GroupName="VerificationMethod" Content="Escript tab (direct read)"
-                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Checked="OnMethodChanged" />
+                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Checked="OnMethodChanged" />
         </StackPanel>
 
         <!--
@@ -164,13 +196,13 @@
             mode. Same Checked-on-both-RadioButtons/_suppress pattern as
             the Source toggle above.
         -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
-            <TextBlock Text="View:" Foreground="#FF888888" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,5">
+            <TextBlock Text="View:" Foreground="#FF888888" FontSize="9" VerticalAlignment="Center" Margin="0,0,5,0" />
             <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="DisplayMode" Content="Integrated (over PioneerRx, default)"
-                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Margin="0,0,10,0"
+                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Margin="0,0,8,0"
                          IsChecked="True" Checked="OnDisplayModeChanged" />
             <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="DisplayMode" Content="Separate window"
-                         Foreground="#FFCCCCCC" FontSize="10" VerticalAlignment="Center" Checked="OnDisplayModeChanged" />
+                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Checked="OnDisplayModeChanged" />
         </StackPanel>
 
         <!--
@@ -231,7 +263,7 @@
                                 plus a header-strip color was one coloring
                                 layer too many).
                             -->
-                            <Border Background="{StaticResource BoxGrayBrush}" BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,4">
+                            <Border Background="{StaticResource BoxGrayBrush}" BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,3">
                                 <StackPanel>
                                     <!--
                                         Category header (W-T11 item 1: REWORKED back to a
@@ -257,7 +289,8 @@
                                         longer bound anywhere in this template.
                                     -->
                                     <Border Background="#FF1E1E1E">
-                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="11" Margin="5,3,0,2" />
+                                        <!-- Task 3: 11 -> 9 (~18%) -->
+                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="9" Margin="4,2,0,2" />
                                     </Border>
 
                                     <!--
@@ -281,7 +314,8 @@
                                     <ItemsControl ItemsSource="{Binding Rows}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
-                                                <Border CornerRadius="3" Margin="0,1.5" Padding="4,1.5" ToolTipService.ToolTip="{Binding TooltipText}">
+                                                <!-- Task 3: Margin 0,1.5 -> 0,1, Padding 4,1.5 -> 3,1 -->
+                                                <Border CornerRadius="3" Margin="0,1" Padding="3,1" ToolTipService.ToolTip="{Binding TooltipText}">
                                                     <Border.Style>
                                                         <Style TargetType="Border">
                                                             <Setter Property="Background" Value="{StaticResource BoxGreenBrush}" />
@@ -321,7 +355,8 @@
                                                             real verdict was already reached.
                                                         -->
                                                         <Grid Grid.Column="0">
-                                                            <TextBlock Text="{Binding Glyph}" FontWeight="Bold" FontSize="12" TextAlignment="Center" VerticalAlignment="Center">
+                                                            <!-- Task 3: 12 -> 10 (~17%) -->
+                                                            <TextBlock Text="{Binding Glyph}" FontWeight="Bold" FontSize="10" TextAlignment="Center" VerticalAlignment="Center">
                                                                 <TextBlock.Style>
                                                                     <Style TargetType="TextBlock">
                                                                         <Setter Property="Foreground" Value="{StaticResource GreenBrush}" />
@@ -357,7 +392,7 @@
                                                             </ProgressBar>
                                                         </Grid>
 
-                                                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" Foreground="#FFBBBBBB" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" Foreground="#FFBBBBBB" FontSize="9" TextWrapping="Wrap" VerticalAlignment="Center" />
 
                                                         <!--
                                                             Column 2: Source value — plain text, no per-cell
@@ -365,7 +400,7 @@
                                                             now carries the match-state color, uniformly
                                                             across both Source and Entered.
                                                         -->
-                                                        <TextBlock Grid.Column="2" Text="{Binding SourceValue}" Foreground="White" FontSize="10" TextWrapping="Wrap" Margin="1,0" VerticalAlignment="Center">
+                                                        <TextBlock Grid.Column="2" Text="{Binding SourceValue}" Foreground="White" FontSize="9" TextWrapping="Wrap" Margin="1,0" VerticalAlignment="Center">
                                                             <TextBlock.Style>
                                                                 <Style TargetType="TextBlock">
                                                                     <Setter Property="FontFamily" Value="Segoe UI" />
@@ -388,7 +423,7 @@
                                                             a transposed digit is visible as column
                                                             misalignment, not just a string diff.
                                                         -->
-                                                        <TextBlock Grid.Column="3" Text="{Binding EnteredValue}" Foreground="White" FontSize="10" TextWrapping="Wrap" Margin="1,0" VerticalAlignment="Center">
+                                                        <TextBlock Grid.Column="3" Text="{Binding EnteredValue}" Foreground="White" FontSize="9" TextWrapping="Wrap" Margin="1,0" VerticalAlignment="Center">
                                                             <TextBlock.Style>
                                                                 <Style TargetType="TextBlock">
                                                                     <Setter Property="FontWeight" Value="Normal" />
@@ -532,8 +567,29 @@
             RefreshDrugFieldAsync) sits above the button row, both inside
             one bottom-anchored block.
         -->
-        <Border Grid.Row="6" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,4,0,0" Padding="0,4,0,0">
+        <Border Grid.Row="6" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,3,0,0" Padding="0,3,0,0">
             <StackPanel>
+                <!--
+                    Task 4 (branch fix/rightclick-all-feedback-compact):
+                    "Update ready" banner — collapsed by default, shown by
+                    code-behind (MainWindow.xaml.cs CheckForUpdateAsync/
+                    ApplyUpdateBannerState) when Diagnostics/UpdateChecker's
+                    pure IsUpdateAvailable comparison finds the latest
+                    origin/main commit differs from this build's own
+                    AppDiagnostics.GetCommitSha(). "Update" launches the
+                    pinned bootstrap one-liner in a new PowerShell process
+                    and exits this app (OnUpdateClick) — see UpdateLauncher's
+                    own doc for the exact command construction.
+                -->
+                <Border x:Name="UpdateBannerBorder" Background="#FF1B3A1E" BorderBrush="#FF2E7D32" BorderThickness="1"
+                        CornerRadius="3" Padding="6,3" Margin="0,0,0,4" Visibility="Collapsed">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                        <TextBlock Text="Update ready" Foreground="#FF9CCC65" FontSize="10" FontWeight="Bold"
+                                   VerticalAlignment="Center" Margin="0,0,8,0" />
+                        <Button x:Name="UpdateButton" Content="Update" FontSize="9" Padding="6,2" Click="OnUpdateClick" />
+                    </StackPanel>
+                </Border>
+
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
                            TextWrapping="Wrap" Margin="0,0,0,4" />
                 <StackPanel Orientation="Horizontal">
@@ -581,7 +637,7 @@
         </Border>
 
         <!-- Row 5: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="7" Header="Engine settings" Foreground="White" Margin="0,4,0,0">
+        <Expander Grid.Row="7" Header="Engine settings" Foreground="White" Margin="0,3,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">

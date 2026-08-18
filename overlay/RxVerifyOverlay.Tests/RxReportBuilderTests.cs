@@ -193,4 +193,43 @@ public class RxReportBuilderTests
 
         Assert.Null(payload.LogTail);
     }
+
+    // 2026-08-18 ("right-click must work on EVERY field"): right-click now
+    // opens the report dialog for patient fields too (see
+    // RightClickOutcomeClassifier), so the pharmacist's typed Correction
+    // text can reach this builder for a patient field — these tests pin
+    // down that it is ALWAYS discarded and replaced with the fixed
+    // stand-in, regardless of what was typed, since a correction for
+    // patientName/patientDOB/patientAddress would itself BE the PHI.
+    [Theory]
+    [InlineData("patientName")]
+    [InlineData("patientDOB")]
+    [InlineData("patientAddress")]
+    public void PatientFieldCorrectionIsAlwaysReplacedWithFixedStandIn(string patientFieldKey)
+    {
+        var field = new VerdictFieldInfo(
+            FieldKey: patientFieldKey,
+            DisplayName: "whatever",
+            Status: VerdictStatus.Yellow,
+            SourceValue: "SYNTHETIC-SOURCE-VALUE",
+            EnteredValue: "SYNTHETIC-ENTERED-VALUE",
+            Explanation: "not provided",
+            ReasonCode: "not_provided");
+
+        var payload = RxReportBuilder.Build(field, "SYNTHETIC-JANE-DOE-01/01/1990-should be this instead", null, null, CreatedAt);
+
+        Assert.Equal(RxReportBuilder.PatientFieldCorrectionWithheldText, payload.Correction);
+        Assert.DoesNotContain("SYNTHETIC", payload.Correction);
+    }
+
+    [Fact]
+    public void PatientFieldCorrectionIsReplacedEvenWhenTheTypedCorrectionIsEmpty()
+    {
+        var field = new VerdictFieldInfo(
+            "patientAddress", "Patient Address", VerdictStatus.Yellow, "SYNTHETIC-SOURCE", "SYNTHETIC-ENTERED", "not provided", "not_provided");
+
+        var payload = RxReportBuilder.Build(field, "", null, null, CreatedAt);
+
+        Assert.Equal(RxReportBuilder.PatientFieldCorrectionWithheldText, payload.Correction);
+    }
 }

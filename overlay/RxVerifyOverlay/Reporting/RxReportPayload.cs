@@ -41,7 +41,7 @@ public sealed class RxReportPayload
 
     public string? Explanation { get; set; }
 
-    /// <summary>The pharmacist's free-text description of what's wrong / what it should have been. Never auto-redacted (see VerdictFieldInfo.IsPatientField's doc for why the whole affordance is hidden for patient fields instead of trying to scrub this).</summary>
+    /// <summary>The pharmacist's free-text description of what's wrong / what it should have been. 2026-08-18: for a patient field (VerdictFieldInfo.IsPatientField) this is NEVER the pharmacist's actual typed text — RxReportBuilder.Build replaces it unconditionally with the fixed PatientFieldCorrectionWithheldText, since free text about a patient field (e.g. "should be Jane Smith") would itself be the PHI leak.</summary>
     public string Correction { get; set; } = "";
 
     public DateTime CreatedAt { get; set; }
@@ -114,6 +114,17 @@ public sealed class RxReportPayload
 /// </summary>
 public static class RxReportBuilder
 {
+    /// <summary>
+    /// 2026-08-18 ("right-click must work on EVERY field"): fixed
+    /// stand-in for Correction on a patient field — see the parameter doc
+    /// on Build's <paramref name="correction"/> for why the pharmacist's
+    /// own typed text can never be included here. Deliberately generic
+    /// (no field-specific detail) — even "wrong name" or "wrong DOB"
+    /// wording risks encoding a shape of what changed; this only signals
+    /// that the field was flagged, not what the flag says.
+    /// </summary>
+    public const string PatientFieldCorrectionWithheldText = "user reports value wrong (patient field, text withheld)";
+
     /// <param name="sourceInputMode">
     /// "ocr" or "uia" — see RxReportPayload.SourceInputMode's doc. Optional
     /// (defaults to null) purely so existing single-purpose call sites/tests
@@ -143,7 +154,15 @@ public static class RxReportBuilder
             Status = field.Status.ToString().ToLowerInvariant(),
             ReasonCode = field.ReasonCode,
             Explanation = field.Explanation,
-            Correction = correction ?? "",
+            // 2026-08-18: a patient field's free-text Correction is
+            // dropped and replaced with a fixed stand-in, REGARDLESS of
+            // whatever the caller passed in — a correction for e.g.
+            // patientName would BE the patient's real name, so this can't
+            // be a UI-only guard (defense in depth: even if a future
+            // caller/dialog state somehow lets patient-field free text
+            // reach here, it never reaches the payload). See
+            // PatientFieldCorrectionWithheldText's own doc.
+            Correction = isPatientField ? PatientFieldCorrectionWithheldText : (correction ?? ""),
             CreatedAt = createdAtUtc,
             SourceInputMode = sourceInputMode,
             // Already refills-scoped and label-only at the source (see

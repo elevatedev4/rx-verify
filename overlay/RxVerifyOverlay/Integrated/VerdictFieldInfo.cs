@@ -45,16 +45,20 @@ public sealed record VerdictFieldInfo(
     string? RefillsTotalFillsLabelPrefix = null)
 {
     /// <summary>
-    /// True for the 3 patient-identity fields (RxLogFormatter.IsPatientField)
-    /// — IntegratedBoxesWindow's poll-driven right-click detection
-    /// (PollCursorForHover, fix/hover-popup-live branch) never raises
-    /// ReportErrorRequested for these, rather than merely
-    /// redacting the prefilled Source/Entered in the dialog: the free-text
-    /// correction box a pharmacist would type into next is exactly the
-    /// kind of PHI leak the owner's "NO patient fields in the payload"
-    /// design decision (see HQ-ENDPOINT-SPEC.md) is trying to prevent, and
-    /// there is no safe way to auto-redact free text someone is actively
-    /// composing.
+    /// True for the 3 patient-identity fields (RxLogFormatter.IsPatientField).
+    /// 2026-08-18 ("right-click must work on EVERY field"): IntegratedBoxesWindow's
+    /// poll-driven right-click detection (PollCursorForHover) still raises
+    /// ReportErrorRequested for these fields — it used to suppress the
+    /// click entirely, which was itself confusing ("right-click just
+    /// doesn't work here"). Instead Integrated/ReportErrorWindow.xaml.cs
+    /// shows a redacted "[hidden — patient field]" placeholder in place of
+    /// the real Source/Entered, and Reporting/RxReportBuilder.cs drops
+    /// whatever free text the pharmacist typed into Correction, replacing
+    /// it with a fixed reason code — the free-text correction box a
+    /// pharmacist would type into is exactly the kind of PHI leak the
+    /// owner's "NO patient fields in the payload" design decision (see
+    /// HQ-ENDPOINT-SPEC.md) is trying to prevent, so that text is withheld
+    /// from the payload rather than the whole affordance being hidden.
     /// </summary>
     public bool IsPatientField => RxLogFormatter.IsPatientField(FieldKey);
 }

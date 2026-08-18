@@ -120,6 +120,21 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // posture as _integratedOverlay.
     private readonly OrderAssist.OrderAssistCoordinator _orderAssistCoordinator;
 
+    // UPDATE-READY CHECK (branch fix/rightclick-all-feedback-compact, task
+    // 4) — how often CheckForUpdateAsync re-polls GitHub's commits/main
+    // after the first, startup-time check (see the constructor's Loaded
+    // handler and _updateCheckTimer below). 4 hours per the branch brief;
+    // this is a background poll of a public, unauthenticated endpoint, not
+    // something that needs to be aggressive — see Update/UpdateService.cs's
+    // own FAIL SOFT doc for why a missed/failed check is never a problem.
+    private const double CheckForUpdateIntervalHours = 4;
+
+    /// <summary>Owns the actual HTTP fetch + stale-vs-current comparison (Update/UpdateService.cs) — this window just drives WHEN it runs and reflects LastKnownUpdateAvailable into UpdateBannerBorder's visibility (ApplyUpdateBannerState).</summary>
+    private readonly Update.UpdateService _updateService = new();
+
+    /// <summary>Fires CheckForUpdateAsync every CheckForUpdateIntervalHours — separate from _autoRefreshTimer (a completely different cadence/purpose) rather than piggybacking on it, so a future change to the refresh interval can never accidentally change how often this app phones home to GitHub.</summary>
+    private readonly DispatcherTimer _updateCheckTimer;
+
     /// <summary>
     /// INTEGRATED DISPLAY MODE: whether this window should start hidden.
     /// Read by App.xaml.cs right after construction — a window that starts
@@ -377,6 +392,17 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // its own.
         _ = new RxReportSubmitter(_settings).RetryPendingAsync();
 
+        // UPDATE-READY CHECK (branch fix/rightclick-all-feedback-compact,
+        // task 4): one check on startup, fire-and-forget — never awaited,
+        // never blocks the constructor/first refresh — plus a recurring
+        // timer for every CheckForUpdateIntervalHours after that. See
+        // Update/UpdateService.cs's own FAIL SOFT doc for why a failed
+        // check here is always silent.
+        _ = CheckForUpdateAsync();
+        _updateCheckTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(CheckForUpdateIntervalHours) };
+        _updateCheckTimer.Tick += async (_, _) => await CheckForUpdateAsync();
+        _updateCheckTimer.Start();
+
         // EngineClient now owns a PERSISTENT node.exe (latency fix — see
         // Engine/EngineClient.cs) instead of spawning one per call, so it
         // must be explicitly disposed on shutdown or that process would
@@ -389,6 +415,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             _titleChangeWatcher.Dispose();
             _integratedOverlay.Shutdown();
             _orderAssistCoordinator.Shutdown();
+            _updateCheckTimer.Stop();
 
             // App.xaml sets ShutdownMode="OnExplicitShutdown" (needed
             // because this window can now start never-shown in Integrated
@@ -438,6 +465,89 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Unexpected error updating the integrated overlay: {ex.Message}", "Rx Verify",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>
+    /// "&lt;sha&gt; &lt;builtAt&gt;" of the TypeScript engine subprocess, or null if
+    /// the --serve handshake never happened — same string shape
+    /// Reporting/RxReportPayload.cs EngineBuild expects (see its own doc).
+    /// Extracted from OpenReportErrorDialog (RXVERIFY-TROUBLESHOOT round 2)
+    /// so 2026-08-18's Feedback window (OpenFeedbackWindow) can reuse the
+    /// exact same resolution instead of re-deriving it.
+    /// </summary>
+    private string? ResolveEngineBuildString() =>
+        string.IsNullOrEmpty(_engineClient.EngineBuildSha) && string.IsNullOrEmpty(_engineClient.EngineBuildBuiltAt)
+            ? null
+            : $"{_engineClient.EngineBuildSha ?? "unknown"} {_engineClient.EngineBuildBuiltAt ?? "unknown"}";
+
+    /// <summary>
+    /// 2026-08-18 (branch fix/rightclick-all-feedback-compact, task 2):
+    /// compact "Feedback" button on the main overlay panel — opens
+    /// Integrated/FeedbackWindow, a small free-text box that mirrors
+    /// ReportErrorWindow's instant-close-then-submit-in-background pattern
+    /// (see FeedbackWindow.xaml.cs OnSendClick). Deliberately does NOT set
+    /// the dialog-open guard (_reportDialogOpen) — that guard exists
+    /// specifically to stop a second right-click stacking a second
+    /// ReportErrorWindow; Feedback is opened from a deliberate button
+    /// click, not the poll-driven right-click path, and nothing about
+    /// stacking two Feedback windows (or one of each) is unsafe the way a
+    /// stacked ReportErrorWindow was.
+    /// </summary>
+    private void OnFeedbackClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new FeedbackWindow(ResolveEngineBuildString(), AppDiagnostics.GetCommitSha(), _settings);
+        dialog.ContentRendered += (_, _) =>
+        {
+            dialog.Activate();
+            dialog.Topmost = false;
+            dialog.Topmost = true;
+        };
+        dialog.ShowDialog();
+    }
+
+    /// <summary>
+    /// 2026-08-18 (branch fix/rightclick-all-feedback-compact, task 4):
+    /// runs one Update/UpdateService.CheckAsync call against this build's
+    /// own AppDiagnostics.GetCommitSha(), then reflects the result onto
+    /// UpdateBannerBorder. Never throws — UpdateService.CheckAsync itself
+    /// already never throws (see its own FAIL SOFT doc), so this has
+    /// nothing further to guard; called fire-and-forget both at startup
+    /// and from _updateCheckTimer's Tick (see constructor).
+    /// </summary>
+    private async Task CheckForUpdateAsync()
+    {
+        await _updateService.CheckAsync(AppDiagnostics.GetCommitSha());
+        ApplyUpdateBannerState();
+    }
+
+    /// <summary>Shows/hides UpdateBannerBorder to match _updateService.LastKnownUpdateAvailable — the one place that reads that property into the UI, so CheckForUpdateAsync (background) and OnUpdateClick (foreground, belt-and-suspenders after a click) both stay in sync with the same source of truth.</summary>
+    private void ApplyUpdateBannerState()
+    {
+        UpdateBannerBorder.Visibility = _updateService.LastKnownUpdateAvailable ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Launches the pinned bootstrap one-liner in a new PowerShell process
+    /// and exits this app — see Update/UpdateLauncher.LaunchBootstrapAndExit's
+    /// own doc for the exact command construction and why failures aren't
+    /// swallowed inside that method. OverlaySettings.RxVerifyReportKey is
+    /// passed through only when set (LaunchBootstrapAndExit/
+    /// BuildBootstrapCommand already treat null/blank as "omit -ReportKey
+    /// entirely", matching bootstrap-fresh.ps1's own default), so a
+    /// workstation that never had a report key configured updates exactly
+    /// the same way it always could via the manual one-liner.
+    /// </summary>
+    private void OnUpdateClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Update.UpdateLauncher.LaunchBootstrapAndExit(_settings.RxVerifyReportKey);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Couldn't start the update: {ex.Message}\n\nYou can still update manually — see the pinned setup line from HQ.", "Rx Verify",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -757,16 +867,14 @@ public partial class MainWindow : Window, IOverlayVisibilityController
 
         OcrLogger.LogTiming($"[RIGHTCLICK-DIAG] MainWindow: handler entered fieldKey={info.Field.FieldKey}");
 
-        var engineBuild = string.IsNullOrEmpty(_engineClient.EngineBuildSha) && string.IsNullOrEmpty(_engineClient.EngineBuildBuiltAt)
-            ? null
-            : $"{_engineClient.EngineBuildSha ?? "unknown"} {_engineClient.EngineBuildBuiltAt ?? "unknown"}";
+        var engineBuild = ResolveEngineBuildString();
 
         _reportDialogOpen = true;
         _integratedOverlay.SetReportDialogOpen(true);
 
         try
         {
-            var dialog = new ReportErrorWindow(info.Field, engineBuild, AppDiagnostics.GetCommitSha(), _settings);
+            var dialog = new ReportErrorWindow(info.Field, engineBuild, AppDiagnostics.GetCommitSha(), _settings, info.ReportingEnabled);
             OcrLogger.LogTiming("[RIGHTCLICK-DIAG] MainWindow: ReportErrorWindow constructed");
 
             dialog.ContentRendered += (_, _) =>

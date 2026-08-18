@@ -11,5 +11,14 @@ namespace RxVerifyOverlay.Integrated;
 /// WindowStartupLocation="CenterScreen" (the previous behavior, still the
 /// XAML fallback if positioning ever fails) has no way to know which of
 /// two monitors "the screen" should mean.
+///
+/// <see cref="ReportingEnabled"/> (2026-08-18, "right-click must work on
+/// EVERY field") carries IntegratedBoxesWindow's own SetBoxes-time
+/// snapshot of OverlaySettings.RxVerifyReportKey being non-empty straight
+/// through to Integrated/ReportErrorWindow.xaml.cs — a right-click used
+/// to never even raise this event when it was false (see
+/// RightClickOutcomeClassifier's git history); now the dialog always
+/// opens, and this is what tells it to disable Submit and show the "not
+/// set up" note instead of silently swallowing the click.
 /// </summary>
-public readonly record struct ReportErrorRequestInfo(VerdictFieldInfo Field, System.Drawing.Point ClickPointPhysical);
+public readonly record struct ReportErrorRequestInfo(VerdictFieldInfo Field, System.Drawing.Point ClickPointPhysical, bool ReportingEnabled);

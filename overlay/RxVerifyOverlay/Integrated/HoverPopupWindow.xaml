@@ -33,13 +33,22 @@
         ActualWidth/ActualHeight AFTER a layout pass to compute where to
         position it (see ShowFor).
     -->
-    <Border Background="#FF2B2B2B" BorderBrush="#FF555555" BorderThickness="1" CornerRadius="4" Padding="10,8">
-        <StackPanel MaxWidth="320">
-            <TextBlock x:Name="FieldNameText" Foreground="White" FontWeight="Bold" FontSize="13" Margin="0,0,0,3" />
-            <TextBlock x:Name="StatusText" Foreground="#FFDDDDDD" FontSize="12" />
-            <TextBlock x:Name="SourceText" Foreground="#FFDDDDDD" FontSize="12" TextWrapping="Wrap" />
-            <TextBlock x:Name="EnteredText" Foreground="#FFDDDDDD" FontSize="12" TextWrapping="Wrap" />
-            <TextBlock x:Name="ExplanationText" Foreground="#FFAAAAAA" FontSize="11" FontStyle="Italic" TextWrapping="Wrap" Margin="0,4,0,0" />
+    <!--
+        Task 3 (branch fix/rightclick-all-feedback-compact, compact
+        overlay): padding/MaxWidth/fonts all tightened ~15-25% from their
+        previous values (10,8 / 320 / 13,12,11) — see MainWindow.xaml's own
+        Task 3 comment for the matching main-panel changes. Purely cosmetic:
+        no field here changed, no behavior/positioning logic (ShowFor still
+        reads ActualWidth/ActualHeight after layout, same as before) was
+        touched.
+    -->
+    <Border Background="#FF2B2B2B" BorderBrush="#FF555555" BorderThickness="1" CornerRadius="4" Padding="8,6">
+        <StackPanel MaxWidth="270">
+            <TextBlock x:Name="FieldNameText" Foreground="White" FontWeight="Bold" FontSize="11" Margin="0,0,0,2" />
+            <TextBlock x:Name="StatusText" Foreground="#FFDDDDDD" FontSize="10" />
+            <TextBlock x:Name="SourceText" Foreground="#FFDDDDDD" FontSize="10" TextWrapping="Wrap" />
+            <TextBlock x:Name="EnteredText" Foreground="#FFDDDDDD" FontSize="10" TextWrapping="Wrap" />
+            <TextBlock x:Name="ExplanationText" Foreground="#FFAAAAAA" FontSize="9" FontStyle="Italic" TextWrapping="Wrap" Margin="0,3,0,0" />
         </StackPanel>
     </Border>
 </Window>
