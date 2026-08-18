@@ -76,12 +76,23 @@ public sealed class VerdictRowViewModel
     public bool IsPending => ReasonCode == Models.ReasonCodes.PendingDrugLookup;
 
     /// <summary>
+    /// Which color MainWindow.xaml's row Border/glyph render this field
+    /// as — see FieldBarColorMapper's doc for the full green/yellow/gray/
+    /// red rule (gray = the field genuinely could not be read/compared;
+    /// yellow = it was read but the engine wants a human glance).
+    /// </summary>
+    public FieldBarColor BarColor => FieldBarColorMapper.Classify(Status, ReasonCode);
+
+    /// <summary>
     /// Glyph for the status — WCAG requires color never be the ONLY
     /// signal, so this is the PRIMARY indicator and cell color is
     /// reinforcement. "!" (not "?") for yellow/uncertain: a question
     /// mark reads as "unknown meaning to the pharmacist", where "!" reads
     /// as "needs a look", which matches the yellow verdict's actual
-    /// intent (not_provided/unverified, not necessarily unknown).
+    /// intent (not_provided/unverified, not necessarily unknown). Used
+    /// as-is for BOTH yellow and gray field bars (see BarColor) — gray
+    /// is still "needs a look", just for a different reason (couldn't be
+    /// read vs. read-but-uncertain).
     /// </summary>
     public string Glyph => Status switch
     {
