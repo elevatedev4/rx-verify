@@ -1,6 +1,8 @@
 using System;
 using System.Windows;
+using RxVerifyOverlay.Diagnostics;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.Reporting;
 
 namespace RxVerifyOverlay.Integrated;
@@ -61,10 +63,20 @@ public sealed partial class ReportErrorWindow : Window
     /// plain captured value and _submitter only holds settings (no UI
     /// refs), so nothing the background task touches is disposed by the
     /// Close() above it.
+    ///
+    /// logTail (2026-08-17 fix round — Will verbatim: "Make sure the
+    /// RxVerify error reports are sending the logs... the HIPAA-free logs
+    /// obviously"): read + filtered HERE, synchronously, before Close() —
+    /// same "capture everything the background task needs before the
+    /// window goes away" posture as the rest of this method. OcrLogger.
+    /// TryReadAllLines/LogTailBuilder.BuildSafeTail are both best-effort
+    /// (never throw), so a slow/locked/missing log file degrades to no
+    /// logTail rather than blocking or failing the submit.
     /// </summary>
     private void OnSubmitClick(object sender, RoutedEventArgs e)
     {
-        var payload = RxReportBuilder.Build(_field, CorrectionTextBox.Text, _engineBuild, _commit, DateTime.UtcNow, _sourceInputMode);
+        var logTail = LogTailBuilder.BuildSafeTail(OcrLogger.TryReadAllLines());
+        var payload = RxReportBuilder.Build(_field, CorrectionTextBox.Text, _engineBuild, _commit, DateTime.UtcNow, _sourceInputMode, logTail);
         Close();
 
         _ = SubmitInBackgroundAsync(payload);

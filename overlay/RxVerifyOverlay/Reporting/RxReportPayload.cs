@@ -79,6 +79,25 @@ public sealed class RxReportPayload
 
     /// <summary>Which FieldMap.TotalFillsKeyPrefixes entry matched, if RefillsTotalFillsLabelSeen — label text only (e.g. "Total fills: "), NEVER the refill count/value itself. Null when RefillsTotalFillsLabelSeen isn't true.</summary>
     public string? RefillsTotalFillsLabelPrefix { get; set; }
+
+    /// <summary>
+    /// PHI-safe tail of Ocr/OcrLogger.cs's per-day diagnostic log (2026-08-17
+    /// fix round, item — Will verbatim: "Make sure the RxVerify error
+    /// reports are sending the logs (from the right click) — the
+    /// HIPAA-free logs obviously"), built by
+    /// Diagnostics/LogTailBuilder.BuildSafeTail from
+    /// Integrated/ReportErrorWindow.xaml.cs's Submit handler — see that
+    /// class's doc for the exact line-allowlist rule (timing lines +
+    /// right-click diagnostic trail only; every raw-OCR/patient line is
+    /// excluded by construction, not by redaction). Capped ~16KB / last
+    /// ~80 lines. Null when nothing safe was available to attach (log file
+    /// missing/unreadable, or empty after filtering) — never a reason to
+    /// block the report itself. Same "currently round-trips to HQ but
+    /// doesn't persist until the server schema is extended" caveat as
+    /// SourceInputMode/RefillsTotalFillsLabelSeen above (rxverify-reports.ts
+    /// silently strips unknown keys).
+    /// </summary>
+    public string? LogTail { get; set; }
 }
 
 /// <summary>
@@ -102,7 +121,14 @@ public static class RxReportBuilder
     /// real production call site (Integrated/ReportErrorWindow.xaml.cs)
     /// always passes it, derived from OverlaySettings.Method.
     /// </param>
-    public static RxReportPayload Build(VerdictFieldInfo field, string correction, string? engineBuild, string? commit, DateTime createdAtUtc, string? sourceInputMode = null)
+    /// <param name="logTail">
+    /// See RxReportPayload.LogTail's doc — already filtered to the PHI-safe
+    /// allowlist (Diagnostics/LogTailBuilder.BuildSafeTail) by the caller;
+    /// this builder does no I/O and applies no further scrubbing, it just
+    /// carries the string through. Optional/null for the same
+    /// don't-need-updating reason as sourceInputMode above.
+    /// </param>
+    public static RxReportPayload Build(VerdictFieldInfo field, string correction, string? engineBuild, string? commit, DateTime createdAtUtc, string? sourceInputMode = null, string? logTail = null)
     {
         var isPatientField = RxLogFormatter.IsPatientField(field.FieldKey);
 
@@ -126,7 +152,8 @@ public static class RxReportBuilder
             // producer that got the gating wrong fails visibly (wrong data
             // in the payload) rather than silently here too.
             RefillsTotalFillsLabelSeen = field.RefillsTotalFillsLabelSeen,
-            RefillsTotalFillsLabelPrefix = field.RefillsTotalFillsLabelPrefix
+            RefillsTotalFillsLabelPrefix = field.RefillsTotalFillsLabelPrefix,
+            LogTail = string.IsNullOrEmpty(logTail) ? null : logTail
         };
     }
 }
