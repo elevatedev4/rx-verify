@@ -4,8 +4,8 @@
         xmlns:models="clr-namespace:RxVerifyOverlay.Models"
         xmlns:vm="clr-namespace:RxVerifyOverlay.ViewModels"
         Title="VerifyOCR"
-        Width="420" Height="720"
-        MinWidth="340" MinHeight="300"
+        Width="390" Height="480"
+        MinWidth="320" MinHeight="260"
         Topmost="True"
         WindowStartupLocation="Manual"
         ResizeMode="CanResizeWithGrip"
@@ -98,26 +98,61 @@
             </Style.Triggers>
         </Style>
 
+        <!--
+            Compaction round 2 (branch fix/verify-overlay-compact2, owner
+            verbatim: "still too big and not efficient... talking about
+            Verify overlay, not Order"). Round 1 (fix/rightclick-all-
+            feedback-compact, see the Grid.Margin comment below) only
+            trimmed padding/font sizes ~15-25%; this round goes after the
+            actual wasted SPACE — merging the Source/View toggles from two
+            stacked rows into one (see Grid.Row="1" below) needs a compact
+            grouping chrome instead of the old "Source:"/"View:" text
+            labels, borrowed from the identical pattern already proven in
+            Integrated/ControlBoxWindow.xaml's own Round 9 ("thin grouping
+            border replacing text labels") — same idea, dark-palette
+            variant to match this window's #FF1E1E1E background instead of
+            ControlBoxWindow's light Pioneer-ribbon palette.
+        -->
+        <Style x:Key="ToggleGroupBorderStyle" TargetType="Border">
+            <Setter Property="Background" Value="#FF262626" />
+            <Setter Property="BorderBrush" Value="#FF3A3A3A" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="Padding" Value="5,2" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+        </Style>
+
     </Window.Resources>
 
     <!--
         Task 3 (branch fix/rightclick-all-feedback-compact): the whole
         panel's margins/paddings/some font sizes below are tightened
         ~15-25% from their previous values so the overlay takes noticeably
-        less screen space over PioneerRx. Kept readable on purpose — the
-        verdict table's own row text (FontSize 10) and the toggle labels
-        (FontSize 10) are left alone; only the surrounding chrome (outer
-        margin, button padding, header/badge text, field-row padding) was
-        tightened. Does NOT touch Integrated/BoxLayoutAdjuster.cs's box
-        geometry (PaddingDip/FlushGapThreshold) — those align to Pioneer's
-        own on-screen fields, not this panel's chrome, and are out of scope
-        for this task.
+        less screen space over PioneerRx. Does NOT touch
+        Integrated/BoxLayoutAdjuster.cs's box geometry (PaddingDip/
+        FlushGapThreshold) — those align to Pioneer's own on-screen
+        fields, not this panel's chrome, and are out of scope for this
+        task.
+
+        Compaction round 2 (branch fix/verify-overlay-compact2): round 1
+        above only trimmed padding/fonts; owner tested it and said it was
+        "still too big and not efficient." This round targets actual
+        wasted space rather than more font/padding shaving (data fonts
+        stay at FontSize 9-10, the floor for arm's-length readability):
+        Width/Height cut from 420x720 to 390x480 (~38% less screen area),
+        the Source/View toggle rows merged from two stacked Auto rows into
+        one (see the single Grid.Row="1" below — was rows 1 AND 2, now
+        just 1, so every row index from the verdict list down shifted up
+        by one), and outer/inner margins tightened further throughout.
+        Window stays ResizeMode="CanResizeWithGrip" and position is NOT
+        persisted across launches (computed fresh from Width/Height in
+        the constructor every run — see the Left/Top comment above), so
+        shrinking the defaults here doesn't disturb any saved state.
     -->
-    <Grid Margin="6">
+    <Grid Margin="5">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" /> <!-- Title -->
-            <RowDefinition Height="Auto" /> <!-- Verification method toggle (OCR default / Escript tab direct read) -->
-            <RowDefinition Height="Auto" /> <!-- Display mode toggle (Integrated-over-Pioneer default / Separate window) -->
+            <RowDefinition Height="Auto" /> <!-- Source + View toggles, merged into one row (round 2) -->
             <RowDefinition Height="*" />    <!-- Verdict list (fixed order, never resorted) — the main content -->
             <RowDefinition Height="Auto" /> <!-- W-T11 item 6: e-script notes, red text, only when present -->
             <RowDefinition Height="Auto" /> <!-- VerifyOCR: OCR status line + raw-text expander -->
@@ -162,51 +197,57 @@
         </Grid>
 
         <!--
-            Row 1: runtime source-method toggle (main task: combine
-            "Verify" (UIA/Escript-tab read) and "VerifyOCR" (screen-OCR
-            read) into one app where the pharmacist picks at runtime).
-            OCR stays the default (see Models/OverlaySettings.cs
-            VerificationMethod). Switching immediately saves settings and
-            triggers a fresh RefreshAsync (see OnMethodChanged in
-            MainWindow.xaml.cs) so the change takes effect right away
-            instead of waiting for the next auto-watch tick. The active
-            method is also reflected in the badge above (MethodBadgeText).
-        -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
-            <TextBlock Text="Source:" Foreground="#FF888888" FontSize="9" VerticalAlignment="Center" Margin="0,0,5,0" />
-            <RadioButton x:Name="MethodOcrRadioButton" GroupName="VerificationMethod" Content="OCR (default)"
-                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Margin="0,0,8,0"
-                         IsChecked="True" Checked="OnMethodChanged" />
-            <RadioButton x:Name="MethodUiaRadioButton" GroupName="VerificationMethod" Content="Escript tab (direct read)"
-                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Checked="OnMethodChanged" />
-        </StackPanel>
-
-        <!--
-            Row 2 (INTEGRATED DISPLAY MODE): Integrated (verdict boxes
-            drawn directly over PioneerRx + a small control panel in its
-            ribbon — see Integrated/IntegratedOverlayCoordinator.cs, now
-            the default, see Models/OverlaySettings.cs DisplayMode) vs.
-            Separate (this standalone window, the original behavior).
-            This toggle is the ONLY way to switch INTO Integrated mode —
-            once there, this window hides itself (see MainWindow.xaml.cs
+            Row 1: runtime source-method toggle (combine "Verify" (UIA/
+            Escript-tab read) and "VerifyOCR" (screen-OCR read) into one
+            app where the pharmacist picks at runtime) AND the INTEGRATED
+            DISPLAY MODE toggle (Integrated — verdict boxes drawn
+            directly over PioneerRx + a small control panel in its ribbon,
+            see Integrated/IntegratedOverlayCoordinator.cs, the default —
+            vs. Separate, this standalone window, the original behavior),
+            merged onto ONE row (round 2 compaction — was two stacked
+            rows). OCR/Integrated stay the defaults (see
+            Models/OverlaySettings.cs VerificationMethod/DisplayMode).
+            Switching source immediately saves settings and triggers a
+            fresh RefreshAsync (see OnMethodChanged in MainWindow.xaml.cs)
+            so the change takes effect right away instead of waiting for
+            the next auto-watch tick; the active method is also reflected
+            in the badge above (MethodBadgeText). The View toggle is the
+            ONLY way to switch INTO Integrated mode — once there, this
+            window hides itself (see MainWindow.xaml.cs
             HideSeparateWindowRequested) and the control box's OWN
             identical toggle (Integrated/ControlBoxWindow.xaml) is what
             lets the pharmacist switch back, plus an "Open full view"
             button that reveals this window again without changing the
-            mode. Same Checked-on-both-RadioButtons/_suppress pattern as
-            the Source toggle above.
+            mode. Grouping borders (ToggleGroupBorderStyle) replace the
+            old "Source:"/"View:" text labels and the old "(default)"/
+            "(over PioneerRx...)" content suffixes — same de-duplication
+            already proven in Integrated/ControlBoxWindow.xaml's Round 9 —
+            a ToolTip on each group still spells out what it's for.
         -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,5">
-            <TextBlock Text="View:" Foreground="#FF888888" FontSize="9" VerticalAlignment="Center" Margin="0,0,5,0" />
-            <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="DisplayMode" Content="Integrated (over PioneerRx, default)"
-                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Margin="0,0,8,0"
-                         IsChecked="True" Checked="OnDisplayModeChanged" />
-            <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="DisplayMode" Content="Separate window"
-                         Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Checked="OnDisplayModeChanged" />
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+            <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Verification source: OCR screen-read (default) or direct Escript-tab read">
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="MethodOcrRadioButton" GroupName="VerificationMethod" Content="OCR"
+                                 Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Margin="0,0,6,0"
+                                 IsChecked="True" Checked="OnMethodChanged" />
+                    <RadioButton x:Name="MethodUiaRadioButton" GroupName="VerificationMethod" Content="Escript"
+                                 Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Checked="OnMethodChanged" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Display mode: Integrated over PioneerRx (default) or this Separate window">
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="DisplayMode" Content="Integrated"
+                                 Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Margin="0,0,6,0"
+                                 IsChecked="True" Checked="OnDisplayModeChanged" />
+                    <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="DisplayMode" Content="Separate"
+                                 Foreground="#FFCCCCCC" FontSize="9" VerticalAlignment="Center" Checked="OnDisplayModeChanged" />
+                </StackPanel>
+            </Border>
         </StackPanel>
 
         <!--
-            Row 3: compact grouped table — 3 categories (Patient /
+            Row 2 (was Row 3 before round 2's toggle-row merge): compact
+            grouped table — 3 categories (Patient /
             Prescriber / Rx, see Models/EngineModels.cs
             FieldCategories), each with a rolled-up status header
             (worst-status-wins: any Red field -> Red header, else any
@@ -229,23 +270,23 @@
             toolbar/status controls that used to live above it moved to
             the bottom bar below (W-T9 item 1).
         -->
-        <Grid Grid.Row="3">
+        <Grid Grid.Row="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <!-- Column header labels for the compact table below -->
-            <Grid Grid.Row="0" Margin="4,0,4,2">
+            <!-- Column header labels for the compact table below (round 2: Margin/Field-col width tightened to match the field rows' own glyph+name columns below, 18+50 -> 16+44 = 60) -->
+            <Grid Grid.Row="0" Margin="3,0,3,1">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="62" />
+                    <ColumnDefinition Width="60" />
                     <ColumnDefinition Width="*" MinWidth="70" />
                     <ColumnDefinition Width="*" MinWidth="70" />
                     <ColumnDefinition Width="14" />
                 </Grid.ColumnDefinitions>
                 <TextBlock Grid.Column="0" Text="Field" Foreground="#FF888888" FontSize="9" FontWeight="Bold" />
-                <TextBlock Grid.Column="1" Text="Source" Foreground="#FF888888" FontSize="9" FontWeight="Bold" Margin="4,0,0,0" />
-                <TextBlock Grid.Column="2" Text="Entered" Foreground="#FF888888" FontSize="9" FontWeight="Bold" Margin="4,0,0,0" />
+                <TextBlock Grid.Column="1" Text="Source" Foreground="#FF888888" FontSize="9" FontWeight="Bold" Margin="3,0,0,0" />
+                <TextBlock Grid.Column="2" Text="Entered" Foreground="#FF888888" FontSize="9" FontWeight="Bold" Margin="3,0,0,0" />
             </Grid>
 
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
@@ -263,7 +304,7 @@
                                 plus a header-strip color was one coloring
                                 layer too many).
                             -->
-                            <Border Background="{StaticResource BoxGrayBrush}" BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,3">
+                            <Border Background="{StaticResource BoxGrayBrush}" BorderBrush="#FF3A3A3A" BorderThickness="1" CornerRadius="4" Margin="0,0,0,2">
                                 <StackPanel>
                                     <!--
                                         Category header (W-T11 item 1: REWORKED back to a
@@ -289,8 +330,8 @@
                                         longer bound anywhere in this template.
                                     -->
                                     <Border Background="#FF1E1E1E">
-                                        <!-- Task 3: 11 -> 9 (~18%) -->
-                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="9" Margin="4,2,0,2" />
+                                        <!-- Task 3: 11 -> 9 (~18%); round 2: Margin 4,2,0,2 -> 3,1,0,1 -->
+                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="9" Margin="3,1,0,1" />
                                     </Border>
 
                                     <!--
@@ -314,8 +355,8 @@
                                     <ItemsControl ItemsSource="{Binding Rows}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
-                                                <!-- Task 3: Margin 0,1.5 -> 0,1, Padding 4,1.5 -> 3,1 -->
-                                                <Border CornerRadius="3" Margin="0,1" Padding="3,1" ToolTipService.ToolTip="{Binding TooltipText}">
+                                                <!-- Task 3: Margin 0,1.5 -> 0,1, Padding 4,1.5 -> 3,1; round 2: Margin 0,1 -> 0,0.5,0,0.5, Padding 3,1 -> 3,0.5 -->
+                                                <Border CornerRadius="3" Margin="0,0.5,0,0.5" Padding="3,0.5" ToolTipService.ToolTip="{Binding TooltipText}">
                                                     <Border.Style>
                                                         <Style TargetType="Border">
                                                             <Setter Property="Background" Value="{StaticResource BoxGreenBrush}" />
@@ -332,10 +373,11 @@
                                                             </Style.Triggers>
                                                         </Style>
                                                     </Border.Style>
+                                                    <!-- round 2: glyph/name columns 18+50 -> 16+44 (matches the header row's Field column above, now 60 total), giving Source/Entered a bit more room at the narrower 390px window width -->
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
-                                                            <ColumnDefinition Width="18" />
-                                                            <ColumnDefinition Width="50" />
+                                                            <ColumnDefinition Width="16" />
+                                                            <ColumnDefinition Width="44" />
                                                             <ColumnDefinition Width="*" MinWidth="70" />
                                                             <ColumnDefinition Width="*" MinWidth="70" />
                                                         </Grid.ColumnDefinitions>
@@ -453,7 +495,7 @@
         </Grid>
 
         <!--
-            Row 2 (W-T11 item 6): e-script notes (NCPDP Note element, see
+            Row 3 (was Row 2/4 before round 2's row merge; W-T11 item 6): e-script notes (NCPDP Note element, see
             Parsing/EscriptTreeParser.ParseNotes and
             OverlayViewModel.Notes/HasNotes) — RED text, at the BOTTOM of
             the overlay (below the verdict table, above the bottom
@@ -462,8 +504,8 @@
             (the common case) shows nothing here at all — no empty red
             box.
         -->
-        <StackPanel Grid.Row="4">
-            <Border Margin="0,4,0,0" Padding="0,0,0,4">
+        <StackPanel Grid.Row="3">
+            <Border Margin="0,3,0,0" Padding="0,0,0,3">
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="Visibility" Value="Collapsed" />
@@ -495,7 +537,7 @@
                 never sets this — it has its own SourceUnavailableReason
                 status-message flow instead).
             -->
-            <Border Margin="0,4,0,0" Padding="0,0,0,4">
+            <Border Margin="0,3,0,0" Padding="0,0,0,3">
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="Visibility" Value="Collapsed" />
@@ -512,7 +554,7 @@
         </StackPanel>
 
         <!--
-            Row 3 (VerifyOCR): always-visible OCR timing/char-count status
+            Row 4 (was Row 3/5 before round 2's row merge; VerifyOCR): always-visible OCR timing/char-count status
             line (branch brief item 3 — the headline diagnostic: proving
             capture+OCR speed and letting Will judge text quality on his
             real screen) plus a collapsed-by-default expander showing the
@@ -521,7 +563,7 @@
             every read, for a permanent record — this is the live/
             in-the-moment view of the same data.
         -->
-        <StackPanel Grid.Row="5" Margin="0,0,0,4">
+        <StackPanel Grid.Row="4" Margin="0,0,0,2">
             <!--
                 Task 2 (OCR reading indicator): small indeterminate
                 spinner next to the OCR status line, visible only while
@@ -558,7 +600,7 @@
         </StackPanel>
 
         <!--
-            Row 4: BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
+            Row 5 (was Row 4/6 before round 2's row merge): BOTTOM BAR (W-T9 item 1) — Refresh, "Dump UIA Tree",
             the Auto-watch checkbox, and the "last checked"/status text
             all moved down here from the old top toolbar, so the verdict
             list above gets the space and the pharmacist's eye starts on
@@ -567,7 +609,7 @@
             RefreshDrugFieldAsync) sits above the button row, both inside
             one bottom-anchored block.
         -->
-        <Border Grid.Row="6" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,3,0,0" Padding="0,3,0,0">
+        <Border Grid.Row="5" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0" Margin="0,2,0,0" Padding="0,2,0,0">
             <StackPanel>
                 <!--
                     Task 4 (branch fix/rightclick-all-feedback-compact):
@@ -591,7 +633,7 @@
                 </Border>
 
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#FFBBBBBB" FontSize="10"
-                           TextWrapping="Wrap" Margin="0,0,0,4" />
+                           TextWrapping="Wrap" Margin="0,0,0,2" />
                 <StackPanel Orientation="Horizontal">
                     <Button Content="Refresh" Margin="0,0,6,0" Click="OnRefreshClick" />
                     <!--
@@ -636,8 +678,8 @@
             </StackPanel>
         </Border>
 
-        <!-- Row 5: engine path settings, always visible in v0 (small footprint, no PHI) -->
-        <Expander Grid.Row="7" Header="Engine settings" Foreground="White" Margin="0,3,0,0">
+        <!-- Row 6 (was Row 5/7 before round 2's row merge): engine path settings, always visible in v0 (small footprint, no PHI); collapsed by default (IsExpanded not set) so it costs only its header's height until opened -->
+        <Expander Grid.Row="6" Header="Engine settings" Foreground="White" Margin="0,2,0,0">
             <StackPanel Margin="0,6,0,0">
                 <TextBlock Text="rx-verify dist/cli.js path:" Foreground="#FFBBBBBB" FontSize="11" />
                 <Grid Margin="0,2,0,6">
