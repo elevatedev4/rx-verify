@@ -66,15 +66,24 @@ public sealed partial class ReportErrorWindow : Window
         ExplanationText.Text = field.Explanation;
         ExplanationText.Visibility = string.IsNullOrEmpty(field.Explanation) ? Visibility.Collapsed : Visibility.Visible;
 
-        // 2026-08-18: patient-field correction is withheld — see
-        // Reporting/RxReportBuilder.cs PatientFieldCorrectionWithheldText.
-        // The TextBox is disabled (not hidden) so the layout stays
-        // familiar; PatientFieldNoteText explains why nothing typed here
-        // gets sent. Belt-and-suspenders only — RxReportBuilder.Build
-        // discards whatever Text this box holds for a patient field
-        // regardless of whether IsEnabled was somehow bypassed.
+        // 2026-08-19 policy change (Will verbatim: "it won't let me type
+        // anything in the box... Fix that"): CorrectionTextBox is now
+        // ENABLED for patient fields too — see PatientFieldNoteText's own
+        // XAML doc and Reporting/RxReportBuilder.cs's PatientFieldCorrectionGuard
+        // for the actual enforcement (typed text is sent as-is UNLESS it
+        // contains a significant fragment of this field's own real
+        // captured value, in which case Build still withholds it exactly
+        // like it always did before this change).
         PatientFieldNoteText.Visibility = field.IsPatientField ? Visibility.Visible : Visibility.Collapsed;
-        CorrectionTextBox.IsEnabled = !field.IsPatientField;
+
+        // Live feedback for the same guard, re-run on every keystroke —
+        // see OnCorrectionTextChanged. Only wired for patient fields; a
+        // non-patient field's correction was never redacted and isn't
+        // gated by this guard at all, so there's nothing to check there.
+        if (field.IsPatientField)
+        {
+            CorrectionTextBox.TextChanged += OnCorrectionTextChanged;
+        }
 
         // 2026-08-18: missing report key no longer suppresses the
         // right-click — this dialog opens regardless, but Submit is
@@ -83,10 +92,29 @@ public sealed partial class ReportErrorWindow : Window
         NotSetUpNoteText.Visibility = _reportingEnabled ? Visibility.Collapsed : Visibility.Visible;
         SubmitButton.IsEnabled = _reportingEnabled;
 
-        if (!field.IsPatientField) CorrectionTextBox.Focus();
+        // 2026-08-19: focus the Correction box regardless of field type —
+        // patient fields get real keyboard focus here too now (see class
+        // doc's "check all fields" item: every OTHER field already
+        // focused/accepted typing correctly — CorrectionTextBox.IsEnabled
+        // was the ONLY per-field gate anywhere in this window, and it's
+        // gone now).
+        CorrectionTextBox.Focus();
     }
 
     private void OnCancelClick(object sender, RoutedEventArgs e) => Close();
+
+    /// <summary>
+    /// UI-ONLY feedback (2026-08-19) — see PatientFieldNoteText/
+    /// CorrectionGuardNoteText's own XAML docs and PatientFieldCorrectionGuard's
+    /// own doc for why this is never trusted as the actual safety decision
+    /// (RxReportBuilder.Build re-runs the identical check authoritatively
+    /// at submit time, regardless of what this shows).
+    /// </summary>
+    private void OnCorrectionTextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        var tripped = PatientFieldCorrectionGuard.ContainsPatientValueFragment(CorrectionTextBox.Text, _field.SourceValue, _field.EnteredValue);
+        CorrectionGuardNoteText.Visibility = tripped ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     /// <summary>
     /// Owner's request (2026-08-17): the window must go away the instant

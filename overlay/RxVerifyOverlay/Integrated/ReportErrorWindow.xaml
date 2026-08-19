@@ -30,11 +30,23 @@
         IntegratedBoxesWindow.PollCursorForHover, which used to never raise
         ReportErrorRequested for them at all. For those fields, code-behind
         swaps Source/Entered for a "[hidden — patient field]" placeholder
-        on screen and disables CorrectionTextBox (PatientFieldNoteText
-        explains why) — Reporting/RxReportBuilder.cs still redacts/replaces
-        both defensively before anything is ever sent, belt-and-suspenders,
-        so even a future on-screen regression here can't leak PHI into the
+        on screen — Reporting/RxReportBuilder.cs still redacts both
+        defensively before anything is ever sent, belt-and-suspenders, so
+        even a future on-screen regression here can't leak PHI into the
         payload.
+
+        2026-08-19 policy change (Will verbatim: "it won't let me type
+        anything in the box... Fix that"): CorrectionTextBox is now ENABLED
+        for patient fields too (it used to be disabled outright, which was
+        this exact bug) — PatientFieldNoteText warns against typing the
+        patient's actual data instead, and RxReportBuilder.Build's
+        PatientFieldCorrectionGuard is the actual enforcement: it withholds
+        the typed text (replacing it with a fixed stand-in, same as before
+        this change) ONLY if it detects the patient's real captured value
+        leaking into it — otherwise the typed description is sent as-is.
+        CorrectionGuardNoteText is live, on-screen-only feedback for that
+        same check, re-run on every keystroke; see code-behind's
+        OnCorrectionTextChanged.
 
         RXVERIFY-TROUBLESHOOT ROUND 2 (2026-08, owner: "Alt+Tab shows NO
         Report error window anywhere — the dialog NEVER opens"):
@@ -60,6 +72,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TextBlock x:Name="FieldNameText" Grid.Row="0" Text="Field" FontSize="16" FontWeight="Bold" Margin="0,0,0,8" />
@@ -74,21 +87,38 @@
         </Border>
 
         <!--
-            2026-08-18 ("right-click must work on EVERY field"): shown only
-            for the 3 patient-identity fields (VerdictFieldInfo.IsPatientField)
-            — see code-behind's constructor. Explains why Source/Entered
-            above show a redacted placeholder and why the Correction box
-            below is disabled, so the pharmacist isn't left guessing why a
-            patient field's dialog looks different from every other field's.
+            2026-08-19 policy change (Will verbatim: "it won't let me type
+            anything in the box... Fix that"): shown only for the 3
+            patient-identity fields (VerdictFieldInfo.IsPatientField) — see
+            code-behind's constructor. The Correction box below is now
+            ENABLED for these fields too (it used to be disabled entirely,
+            which is the bug this note replaces the explanation for) — this
+            warns the pharmacist to describe the PROBLEM, not restate the
+            patient's actual data, since Reporting/RxReportBuilder.cs still
+            enforces that as a hard rule (see PatientFieldCorrectionGuard)
+            regardless of what this note says.
         -->
         <TextBlock x:Name="PatientFieldNoteText" Grid.Row="2"
-                   Text="Patient-identity fields are redacted here and no free text is sent for them — this report will only note that the value looked wrong."
+                   Text="Patient field — describe the problem WITHOUT typing the patient's actual name/DOB/address. This report leaves this computer."
                    TextWrapping="Wrap" FontSize="11" FontStyle="Italic" Foreground="#FF8A6D00" Margin="0,0,0,6"
                    Visibility="Collapsed" />
 
         <TextBlock x:Name="CorrectionPromptText" Grid.Row="3" Text="What's wrong / what should this have been?" Margin="0,0,0,4" />
         <TextBox x:Name="CorrectionTextBox" Grid.Row="4" AcceptsReturn="True" TextWrapping="Wrap"
-                 Height="80" VerticalScrollBarVisibility="Auto" Margin="0,0,0,10" />
+                 Height="80" VerticalScrollBarVisibility="Auto" Margin="0,0,0,4" />
+
+        <!--
+            2026-08-19: live feedback only — see code-behind's
+            OnCorrectionTextChanged, wired for patient fields only.
+            PatientFieldCorrectionGuard re-runs on every keystroke purely
+            to show/hide this; the actual send-time decision is always
+            re-computed authoritatively inside Reporting/RxReportPayload.cs
+            RxReportBuilder.Build, never trusted from this UI-only check.
+        -->
+        <TextBlock x:Name="CorrectionGuardNoteText" Grid.Row="5"
+                   Text="Your note appears to contain the patient's actual info — it was kept on this PC; describe the pattern instead."
+                   TextWrapping="Wrap" FontSize="11" FontStyle="Italic" Foreground="#FFB00020" Margin="0,0,0,10"
+                   Visibility="Collapsed" />
 
         <!--
             2026-08-18: shown only when OverlaySettings.RxVerifyReportKey
@@ -99,12 +129,12 @@
             note plus SubmitButton.IsEnabled = false (see code-behind) make
             the reason visible instead of a click that just does nothing.
         -->
-        <TextBlock x:Name="NotSetUpNoteText" Grid.Row="5"
+        <TextBlock x:Name="NotSetUpNoteText" Grid.Row="6"
                    Text="Error reporting isn't set up on this PC — re-run the pinned setup line from HQ."
                    TextWrapping="Wrap" FontSize="11" FontWeight="Bold" Foreground="#FFB00020" Margin="0,0,0,10"
                    Visibility="Collapsed" />
 
-        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="CancelButton" Content="Cancel" Padding="12,4" Margin="0,0,8,0" Click="OnCancelClick" IsCancel="True" />
             <Button x:Name="SubmitButton" Content="Submit" Padding="12,4" Click="OnSubmitClick" IsDefault="True" />
         </StackPanel>

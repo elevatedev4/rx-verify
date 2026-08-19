@@ -194,42 +194,112 @@ public class RxReportBuilderTests
         Assert.Null(payload.LogTail);
     }
 
-    // 2026-08-18 ("right-click must work on EVERY field"): right-click now
-    // opens the report dialog for patient fields too (see
-    // RightClickOutcomeClassifier), so the pharmacist's typed Correction
-    // text can reach this builder for a patient field — these tests pin
-    // down that it is ALWAYS discarded and replaced with the fixed
-    // stand-in, regardless of what was typed, since a correction for
-    // patientName/patientDOB/patientAddress would itself BE the PHI.
+    // 2026-08-19 policy change (Will verbatim: "On reporting an error on
+    // patient address, it won't let me type anything in the box... Fix
+    // that"): a patient field's typed Correction is now sent AS TYPED,
+    // UNLESS PatientFieldCorrectionGuard.ContainsPatientValueFragment
+    // finds it leaks the field's own real captured Source/Entered value —
+    // see RxVerifyOverlay.Tests/PatientFieldCorrectionGuardTests.cs for
+    // the guard logic itself; these tests pin down Build's USE of it
+    // (previously the replacement was unconditional — see this section's
+    // git history for that older, stricter shape).
     [Theory]
     [InlineData("patientName")]
     [InlineData("patientDOB")]
     [InlineData("patientAddress")]
-    public void PatientFieldCorrectionIsAlwaysReplacedWithFixedStandIn(string patientFieldKey)
+    public void PatientFieldSafeDescriptiveCorrectionIsSentAsTyped(string patientFieldKey)
     {
         var field = new VerdictFieldInfo(
             FieldKey: patientFieldKey,
             DisplayName: "whatever",
             Status: VerdictStatus.Yellow,
-            SourceValue: "SYNTHETIC-SOURCE-VALUE",
-            EnteredValue: "SYNTHETIC-ENTERED-VALUE",
+            SourceValue: "JORDAN QUINCY TESTPATIENT",
+            EnteredValue: "JORDAN Q TESTPATIENT",
             Explanation: "not provided",
             ReasonCode: "not_provided");
 
-        var payload = RxReportBuilder.Build(field, "SYNTHETIC-JANE-DOE-01/01/1990-should be this instead", null, null, CreatedAt);
+        const string safeCorrection = "the two spellings do not match, please verify against the script";
+        var payload = RxReportBuilder.Build(field, safeCorrection, null, null, CreatedAt);
+
+        Assert.Equal(safeCorrection, payload.Correction);
+    }
+
+    [Theory]
+    [InlineData("patientName")]
+    [InlineData("patientDOB")]
+    [InlineData("patientAddress")]
+    public void PatientFieldCorrectionContainingTheExactSourceValueIsWithheld(string patientFieldKey)
+    {
+        var field = new VerdictFieldInfo(
+            FieldKey: patientFieldKey,
+            DisplayName: "whatever",
+            Status: VerdictStatus.Yellow,
+            SourceValue: "JORDAN QUINCY TESTPATIENT",
+            EnteredValue: "JORDAN Q TESTPATIENT",
+            Explanation: "not provided",
+            ReasonCode: "not_provided");
+
+        var payload = RxReportBuilder.Build(field, "should be JORDAN QUINCY TESTPATIENT not the entered version", null, null, CreatedAt);
 
         Assert.Equal(RxReportBuilder.PatientFieldCorrectionWithheldText, payload.Correction);
-        Assert.DoesNotContain("SYNTHETIC", payload.Correction);
+        Assert.DoesNotContain("JORDAN", payload.Correction);
     }
 
     [Fact]
-    public void PatientFieldCorrectionIsReplacedEvenWhenTheTypedCorrectionIsEmpty()
+    public void PatientFieldCorrectionContainingOnlyAFragmentOfTheEnteredValueIsWithheld()
     {
+        var field = new VerdictFieldInfo(
+            "patientAddress", "Patient Address", VerdictStatus.Yellow,
+            "123 MAIN STREET APT 4", "123 MAIN ST APT 4", "not provided", "not_provided");
+
+        var payload = RxReportBuilder.Build(field, "entered says main street apt but should be different", null, null, CreatedAt);
+
+        Assert.Equal(RxReportBuilder.PatientFieldCorrectionWithheldText, payload.Correction);
+    }
+
+    [Fact]
+    public void PatientFieldCorrectionWithRearrangedWordsOfTheSourceValueIsStillWithheld()
+    {
+        var field = new VerdictFieldInfo(
+            "patientName", "Patient Name", VerdictStatus.Yellow,
+            "TESTPATIENT JORDAN QUINCY", "JORDAN Q TESTPATIENT", "not provided", "not_provided");
+
+        var payload = RxReportBuilder.Build(field, "QUINCY JORDAN TESTPATIENT is the correct order", null, null, CreatedAt);
+
+        Assert.Equal(RxReportBuilder.PatientFieldCorrectionWithheldText, payload.Correction);
+    }
+
+    [Fact]
+    public void PatientFieldEmptyCorrectionPassesThroughAsEmptyNotWithheld()
+    {
+        // 2026-08-19: an empty correction has nothing to leak — the
+        // withheld stand-in is reserved for text that actually contains
+        // the patient's data, not "any patient-field correction at all"
+        // (the old, unconditional policy this replaces).
         var field = new VerdictFieldInfo(
             "patientAddress", "Patient Address", VerdictStatus.Yellow, "SYNTHETIC-SOURCE", "SYNTHETIC-ENTERED", "not provided", "not_provided");
 
         var payload = RxReportBuilder.Build(field, "", null, null, CreatedAt);
 
-        Assert.Equal(RxReportBuilder.PatientFieldCorrectionWithheldText, payload.Correction);
+        Assert.Equal("", payload.Correction);
+    }
+
+    [Fact]
+    public void PatientFieldSourceAndEnteredRedactionIsUnaffectedByTheCorrectionOutcomeEitherWay()
+    {
+        // Source/Entered redaction is a completely separate rule from the
+        // Correction guard — confirms neither a safe nor a withheld
+        // correction changes it.
+        var field = new VerdictFieldInfo(
+            "patientAddress", "Patient Address", VerdictStatus.Yellow,
+            "JORDAN QUINCY TESTPATIENT", "JORDAN Q TESTPATIENT", "not provided", "not_provided");
+
+        var safePayload = RxReportBuilder.Build(field, "safe description here", null, null, CreatedAt);
+        var withheldPayload = RxReportBuilder.Build(field, "should be JORDAN QUINCY TESTPATIENT", null, null, CreatedAt);
+
+        Assert.Equal(RxLogFormatter.RedactedValue, safePayload.Source);
+        Assert.Equal(RxLogFormatter.RedactedValue, safePayload.Entered);
+        Assert.Equal(RxLogFormatter.RedactedValue, withheldPayload.Source);
+        Assert.Equal(RxLogFormatter.RedactedValue, withheldPayload.Entered);
     }
 }
