@@ -33,16 +33,38 @@ namespace RxVerifyOverlay.Integrated;
 /// </summary>
 public sealed class IntegratedOverlayCoordinator
 {
-    // CONTROL BOX anchor, relative to PioneerRx's own WindowBounds — see
-    // the owner's reference screenshot: the ribbon band right of the last
-    // toolbar group (roughly x 850-1490, y 60-155 in a 1928-wide
-    // maximized window) sits empty. Kept as named DIP constants (not
-    // inline numbers) specifically so they're easy to retune against a
-    // real workstation without hunting through positioning math.
-    private const double ControlBoxRightInsetDip = 510; // box's LEFT edge sits this far in from the window's RIGHT edge — round 4: bumped from 450 (420 + ~30px margin) to 510 (480 + ~30px margin) to keep pace with ControlBoxWidthDip's widening below, so the box's right edge doesn't run off the window's right edge. Round 9: ControlBoxWidthDip shrank back to 420 for the minimal-layout redesign, so the box's right edge now sits even further inside the window's right edge than before — still safe, no retune needed; this inset is untouched.
-    private const double ControlBoxTopOffsetDip = 60;   // box's TOP edge sits this far down from the window's TOP edge
-    private const double ControlBoxWidthDip = 420;      // must match ControlBoxWindow.xaml's Width — round 9: narrowed from 480 to 420 as part of the "minimal layout" redesign (2-row layout, icon-ish action buttons, no redundant "Source:"/"View:" labels) needing less horizontal room
-    private const double ControlBoxHeightDip = 76;      // must match ControlBoxWindow.xaml's Height — round 9: shortened from 92 to 76 when the redesign collapsed the box from 3 rows to 2
+    // CONTROL BOX anchor, relative to PioneerRx's own WindowBounds.
+    // Kept as named DIP constants (not inline numbers) specifically so
+    // they're easy to retune against a real workstation without hunting
+    // through positioning math.
+    //
+    // ROUND 3 (branch fix/overlay-compact-round3, Will verbatim, W-T86):
+    // "Make this smaller and make it fit nicely in the gray area, don't
+    // cover any buttons or green." Will attached a screenshot, but the
+    // overlay window itself is NOT in the capture — topmost WPF windows
+    // are commonly excluded from PrintScreen — so the screenshot only
+    // shows the underlying PioneerRx screen: a field table at top, a
+    // large empty gray region below it, and Pioneer's own bottom-right
+    // buttons (Previous / Finish - F12 / Cancel - ESC). RETIRED the old
+    // top-right ribbon anchor (ControlBoxRightInsetDip/TopOffsetDip,
+    // measured off a DIFFERENT reference screenshot — see the round-4/9
+    // history in git blame) in favor of anchoring into that dead
+    // lower-left region instead: clear of the table rows at top AND
+    // clear of the bottom-right button cluster, by construction (this
+    // box sits at the LEFT, those buttons sit at the RIGHT).
+    //
+    // NEEDS LIVE CONFIRMATION — unlike the original top-right anchor
+    // (which was measured directly off a real reference screenshot before
+    // being retuned by two later review rounds), these two are a REASONED
+    // fixed position, not pixel-measured: no coordinates for the actual
+    // gray region or the bottom button row's exact height ever reached
+    // this branch. If Will finds it still overlaps the button row or sits
+    // oddly, retune ControlBoxBottomInsetDip (taller bottom margin) or
+    // ControlBoxLeftInsetDip here — no XAML changes needed for either.
+    private const double ControlBoxLeftInsetDip = 40;    // box's LEFT edge sits this far in from PioneerRx's own LEFT edge
+    private const double ControlBoxBottomInsetDip = 60;  // box's BOTTOM edge sits this far up from PioneerRx's own BOTTOM edge — clearance above a typical bottom action-button row
+    private const double ControlBoxWidthDip = 230;       // must match ControlBoxWindow.xaml's Width — round 3: shrunk from 450 to 230 (~49%) after moving the Method/Display mode toggles + Hide checkbox + Mode dropdown + Full view/Copy(safe) behind a settings cog flyout (see ControlBoxWindow.xaml), leaving only status text + a few icon buttons in the always-visible row
+    private const double ControlBoxHeightDip = 36;       // must match ControlBoxWindow.xaml's Height — round 3: collapsed from a 2-row 76dip box to a single slim row
 
     // ORDER MODE control-box anchor (owner's live pharmacy report,
     // 2026-08-14: "the recommended order pops up in a window above the
@@ -967,16 +989,37 @@ public sealed class IntegratedOverlayCoordinator
         // OrderModeControlBox*Dip constants' own doc. A plain bool read
         // straight from settings, same as everywhere else this class
         // touches OrderAssistEnabled (see OrderAssistToggleRequested's doc).
+        //
+        // Round 3 (branch fix/overlay-compact-round3) only retuned the
+        // VERIFY-mode (orderModeActive == false) anchor — from a top-right
+        // ribbon anchor (bounds.Right/bounds.Top) to a bottom-left one
+        // (bounds.Left/bounds.Bottom) — see ControlBoxLeftInsetDip's own
+        // doc for why. Order mode's own anchor (top-right, next to
+        // Pioneer's "Color Legend") is UNTOUCHED — different anchor
+        // family entirely, so the two branches below compute physicalX/Y
+        // from different corners of `bounds` rather than sharing one
+        // inset/offset formula the way they used to.
         var orderModeActive = _settings.OrderAssistEnabled;
-        var rightInsetDip = orderModeActive ? OrderModeControlBoxRightInsetDip : ControlBoxRightInsetDip;
-        var topOffsetDip = orderModeActive ? OrderModeControlBoxTopOffsetDip : ControlBoxTopOffsetDip;
-        var widthDip = orderModeActive ? OrderModeControlBoxWidthDip : ControlBoxWidthDip;
-        var heightDip = orderModeActive ? OrderModeControlBoxHeightDip : ControlBoxHeightDip;
-
-        var physicalX = bounds.Right - (int)Math.Round(rightInsetDip * scale);
-        var physicalY = bounds.Top + (int)Math.Round(topOffsetDip * scale);
-        var physicalWidth = (int)Math.Round(widthDip * scale);
-        var physicalHeight = (int)Math.Round(heightDip * scale);
+        int physicalX, physicalY, physicalWidth, physicalHeight;
+        if (orderModeActive)
+        {
+            physicalWidth = (int)Math.Round(OrderModeControlBoxWidthDip * scale);
+            physicalHeight = (int)Math.Round(OrderModeControlBoxHeightDip * scale);
+            physicalX = bounds.Right - (int)Math.Round(OrderModeControlBoxRightInsetDip * scale);
+            physicalY = bounds.Top + (int)Math.Round(OrderModeControlBoxTopOffsetDip * scale);
+        }
+        else
+        {
+            physicalWidth = (int)Math.Round(ControlBoxWidthDip * scale);
+            physicalHeight = (int)Math.Round(ControlBoxHeightDip * scale);
+            physicalX = bounds.Left + (int)Math.Round(ControlBoxLeftInsetDip * scale);
+            // Anchored from the BOTTOM (unlike Order mode's top anchor
+            // above) — physicalY is the box's TOP edge, so back it off
+            // from bounds.Bottom by both the margin AND the box's own
+            // height to land the desired clearance ABOVE Pioneer's
+            // bottom edge, not overlapping it.
+            physicalY = bounds.Bottom - (int)Math.Round(ControlBoxBottomInsetDip * scale) - physicalHeight;
+        }
 
         // REVIEW FIX (Will's live test, W-T75 — defensive, item 3):
         // reconciles the box's own visible content (NormalPanel vs.

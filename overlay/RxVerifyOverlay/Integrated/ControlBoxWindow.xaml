@@ -7,16 +7,18 @@
         ShowInTaskbar="False"
         Topmost="True"
         WindowStartupLocation="Manual"
-        Width="450" Height="76"
+        Width="230" Height="36"
         Background="#FFF3F3F3"
         BorderBrush="#FFC8C8C8"
         BorderThickness="1"
         ShowActivated="False">
     <!--
-        CONTROL BOX (item 2) — small interactive panel overlaid in
-        PioneerRx's own top-right ribbon space (see
-        IntegratedOverlayCoordinator's ControlBoxRightInsetDip/
-        ControlBoxTopOffsetDip constants for exactly where). UNLIKE
+        CONTROL BOX (item 2) — small interactive panel overlaid on
+        PioneerRx (see IntegratedOverlayCoordinator's ControlBoxLeftInsetDip/
+        ControlBoxBottomInsetDip constants for exactly where — ROUND 3,
+        branch fix/overlay-compact-round3, moved this from the top-right
+        ribbon anchor to Pioneer's dead lower-left region; see that
+        class's own doc for why). UNLIKE
         IntegratedBoxesWindow, this is a NORMAL (non-click-through)
         window — it must receive clicks — so no WS_EX_TRANSPARENT/
         WS_EX_LAYERED here, just a light gray palette (see below) in a
@@ -34,15 +36,33 @@
         control box only.
 
         LAYOUT (round 9, owner: "rearrange the display to make it user
-        friendly and minimal"): collapsed from 3 rows to 2 — row 1 is
-        status + icon-ish action buttons (Refresh/Feedback/Full view/
-        Copy logs), row 2 is the Method/View toggle groups (visually
-        grouped by a thin border instead of "Source:"/"View:" text
-        labels, which just restated what the toggle content already
-        says) plus the Hide checkbox. Every control that was clickable
-        before still is — nothing here removes functionality, only
-        chrome. Row 1 reserves right margin for CloseButton's corner
-        overlay (below) so the two never overlap.
+        friendly and minimal"): collapsed from 3 rows to 2. ROUND 3
+        (below) collapsed it further, to ONE row — see that doc block for
+        the current shape; this paragraph is kept for history. Row 1
+        reserves right margin for CloseButton's corner overlay (below) so
+        the two never overlap.
+
+        ROUND 3 (branch fix/overlay-compact-round3, Will verbatim, W-T86:
+        "There is so much wasted space. We'll almost never change between
+        the modes (OCR, etc), so that should go into a settings cog or
+        something. Make this smaller and make it fit nicely in the gray
+        area, don't cover any buttons or green."): collapsed from 2 rows
+        to ONE slim row. Everything the pharmacist touches rarely now
+        lives behind SettingsButton's cog flyout (SettingsPopup, below) —
+        the Method (OCR/Escript) and Display (Integrated/Separate) toggle
+        groups, the Hide (\) checkbox, the Mode (Verify/Order) dropdown,
+        and "Full view"/"Copy (safe)". The always-visible row keeps only
+        what changes or gets clicked every refresh: the status/timing
+        text, Refresh, Feedback, the update dot (conditional), the cog
+        itself, and CloseButton (corner overlay, unchanged). Width
+        450 -> 230 (~49%, at the "half or less" target), Height 76 -> 36
+        (one row instead of two). Nothing here removes functionality —
+        every control that was clickable before still is, just one click
+        further behind the cog instead of always on screen. This window
+        is NOT currently draggable by the pharmacist (no DragMove/
+        MouseDown handler exists) — its position is entirely computed
+        every ~250ms tick by IntegratedOverlayCoordinator.UpdateControlBox,
+        so "keep it draggable if it already is" (brief) is a no-op here.
 
         FEEDBACK + UPDATE REACHABILITY (branch fix/feedback-from-ribbon,
         Will verbatim: "I can't see anything on the overlay currently for
@@ -144,9 +164,9 @@
     </Window.Resources>
 
     <Grid Margin="6">
-        <!-- NORMAL content: status + toggles + actions, 2 compact rows -->
+        <!-- NORMAL content: status + a handful of icon actions, ONE slim row (round 3) -->
         <StackPanel x:Name="NormalPanel">
-            <DockPanel Margin="0,0,20,4" LastChildFill="False">
+            <DockPanel Margin="0,0,20,0" LastChildFill="False">
                 <!--
                     Owner request (2026-08-13): "Remove the counter showing
                     the accurate/errors. that is not needed on the top
@@ -201,54 +221,105 @@
                             </ControlTemplate>
                         </Button.Template>
                     </Button>
-                    <Button x:Name="OpenSeparateButton" Content="Full view" Margin="0,0,4,0" Click="OnOpenSeparateClick" ToolTip="Open full view" />
-                    <!-- 2026-08-13 (RXVERIFY-TROUBLESHOOT): the PHI-including "Copy" button (CopyLogsButton, redactPatient: false) was removed per owner request; "Copy (safe)" below is the only copy action now. -->
-                    <Button x:Name="CopyLogsNoHipaaButton" Content="Copy (safe)" Click="OnCopyLogsNoHipaaClick" ToolTip="Copy logs (no HIPAA)" />
+                    <!--
+                        ROUND 3 (branch fix/overlay-compact-round3): the
+                        settings cog — Will verbatim, "We'll almost never
+                        change between the modes (OCR, etc), so that
+                        should go into a settings cog or something."
+                        Toggles SettingsPopup (below) open/closed. Icon
+                        button, same sizing as Refresh/Feedback above.
+                    -->
+                    <Button x:Name="SettingsButton" Content="&#9881;" FontSize="12" Padding="3,0" Click="OnSettingsClick" ToolTip="Settings (source, view, more)" />
                 </StackPanel>
             </DockPanel>
-            <StackPanel Orientation="Horizontal">
-                <!-- Source (Method) toggle group -->
-                <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Verification source">
-                    <StackPanel Orientation="Horizontal">
-                        <RadioButton x:Name="MethodOcrRadioButton" GroupName="ControlBoxMethod" Content="OCR" Checked="OnMethodChanged" />
-                        <RadioButton x:Name="MethodUiaRadioButton" GroupName="ControlBoxMethod" Content="Escript" Margin="0" Checked="OnMethodChanged" />
-                    </StackPanel>
-                </Border>
-                <!-- Display mode (View) toggle group -->
-                <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Display mode">
-                    <StackPanel Orientation="Horizontal">
-                        <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="ControlBoxDisplay" Content="Integrated" Checked="OnDisplayModeChanged" />
-                        <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="ControlBoxDisplay" Content="Separate" Margin="0" Checked="OnDisplayModeChanged" />
-                    </StackPanel>
-                </Border>
-                <!--
-                    Item 2: hides the verdict BOXES layer only (this
-                    control box stays up) — kept in sync with the global
-                    `\` hotkey (see code-behind's RegisterHotKey/WndProc);
-                    session-only, always starts unchecked on app restart
-                    (never persisted to settings.json) so a pharmacist can
-                    never inherit a hidden overlay from a previous shift.
-                -->
-                <CheckBox x:Name="HideOverlayCheckBox" Content="Hide (\)" VerticalAlignment="Center" Checked="OnHideOverlayToggled" Unchecked="OnHideOverlayToggled" ToolTip="Hide overlay (\)" />
-                <!--
-                    MODE DROPDOWN (owner spec, 2026-08-14) — REPLACES the
-                    old "Order Assist" checkbox. Two items only:
-                    "Mode: Verify" (index 0, the default — OverlaySettings.
-                    OrderAssistEnabled defaults false) and "Mode: Order"
-                    (index 1). Selecting "Mode: Order" here is what
-                    triggers ControlBoxWindow.xaml.cs SetOrderAssistState
-                    to swap THIS ENTIRE PANEL out for CompactOrderPanel
-                    below (see that method's doc) — this row itself
-                    disappears the instant Order mode is chosen, since the
-                    whole point is the box no longer blocks Pioneer's
-                    popup once Order mode is active.
-                -->
-                <ComboBox x:Name="ModeComboBoxNormal" Style="{StaticResource ModeComboBoxStyle}" Margin="8,0,0,0" Width="110" SelectionChanged="OnModeComboBoxChanged" ToolTip="Order mode highlights zero order quantities and cheaper secondary substitutions on Pioneer's order screens; Verify mode resumes normal rx-verification highlights">
-                    <ComboBoxItem Content="Mode: Verify" />
-                    <ComboBoxItem Content="Mode: Order" />
-                </ComboBox>
-            </StackPanel>
         </StackPanel>
+
+        <!--
+            ROUND 3 SETTINGS FLYOUT (branch fix/overlay-compact-round3):
+            everything the pharmacist rarely touches, moved off the
+            always-visible row into this on-demand popup — see
+            SettingsButton above and OnSettingsClick in the code-behind
+            (a plain IsOpen toggle; no auto-dismiss-on-outside-click,
+            deliberately: this window is WS_EX_NOACTIVATE and never takes
+            focus during its own ~250ms reposition tick, and a
+            StaysOpen="False" popup's dismiss behavior on a
+            never-activated parent is untested territory this branch
+            isn't the place to gamble on — a second cog click is a
+            reliable, always-available close path instead). Square
+            corners/opaque background on purpose (no AllowsTransparency)
+            — same plain-rectangle aesthetic as the box itself, and one
+            less interaction with the NOACTIVATE window style to worry
+            about. ApplyModeLayout (below) force-closes this whenever
+            Order mode toggles, so it can never be left open floating
+            over a collapsed NormalPanel.
+
+            Content is the OLD row-2 verbatim, MOVED here (not duplicated
+            — each control has exactly one live instance, same as
+            before): Method (Source) toggle group, Display (View) toggle
+            group, the Hide (\) checkbox, the Mode (Verify/Order)
+            dropdown, "Full view", and "Copy (safe)" — same x:Name's
+            where code-behind reads one by name (the toggles/checkbox/
+            combo), same Click/Checked/SelectionChanged handlers, same
+            events out to IntegratedOverlayCoordinator. "Full view"/"Copy
+            (safe)" never needed x:Name (their handlers read the Button
+            from the Click event's own `sender`, not a named field — see
+            OnOpenSeparateClick/OnCopyLogsNoHipaaClick), so they're
+            unnamed here same as before.
+        -->
+        <Popup x:Name="SettingsPopup" PlacementTarget="{Binding ElementName=SettingsButton}" Placement="Bottom" StaysOpen="True">
+            <Border Background="#FFF3F3F3" BorderBrush="#FFC8C8C8" BorderThickness="1" Padding="8">
+                <StackPanel Width="240">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <!-- Source (Method) toggle group -->
+                        <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Verification source">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="MethodOcrRadioButton" GroupName="ControlBoxMethod" Content="OCR" Checked="OnMethodChanged" />
+                                <RadioButton x:Name="MethodUiaRadioButton" GroupName="ControlBoxMethod" Content="Escript" Margin="0" Checked="OnMethodChanged" />
+                            </StackPanel>
+                        </Border>
+                        <!-- Display mode (View) toggle group -->
+                        <Border Style="{StaticResource ToggleGroupBorderStyle}" ToolTip="Display mode">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="DisplayIntegratedRadioButton" GroupName="ControlBoxDisplay" Content="Integrated" Checked="OnDisplayModeChanged" />
+                                <RadioButton x:Name="DisplaySeparateRadioButton" GroupName="ControlBoxDisplay" Content="Separate" Margin="0" Checked="OnDisplayModeChanged" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <!--
+                            Item 2: hides the verdict BOXES layer only (this
+                            control box stays up) — kept in sync with the global
+                            `\` hotkey (see code-behind's RegisterHotKey/WndProc);
+                            session-only, always starts unchecked on app restart
+                            (never persisted to settings.json) so a pharmacist can
+                            never inherit a hidden overlay from a previous shift.
+                        -->
+                        <CheckBox x:Name="HideOverlayCheckBox" Content="Hide (\)" VerticalAlignment="Center" Margin="0,0,8,0" Checked="OnHideOverlayToggled" Unchecked="OnHideOverlayToggled" ToolTip="Hide overlay (\)" />
+                        <!--
+                            MODE DROPDOWN (owner spec, 2026-08-14) — REPLACES the
+                            old "Order Assist" checkbox. Two items only:
+                            "Mode: Verify" (index 0, the default — OverlaySettings.
+                            OrderAssistEnabled defaults false) and "Mode: Order"
+                            (index 1). Selecting "Mode: Order" here is what
+                            triggers ControlBoxWindow.xaml.cs SetOrderAssistState
+                            to swap NormalPanel out for CompactOrderPanel below
+                            (see that method's doc) — this whole flyout closes
+                            with it (ApplyModeLayout), since the whole point is
+                            the box no longer blocks Pioneer's popup once Order
+                            mode is active.
+                        -->
+                        <ComboBox x:Name="ModeComboBoxNormal" Style="{StaticResource ModeComboBoxStyle}" Width="110" SelectionChanged="OnModeComboBoxChanged" ToolTip="Order mode highlights zero order quantities and cheaper secondary substitutions on Pioneer's order screens; Verify mode resumes normal rx-verification highlights">
+                            <ComboBoxItem Content="Mode: Verify" />
+                            <ComboBoxItem Content="Mode: Order" />
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="Full view" Margin="0,0,4,0" Click="OnOpenSeparateClick" ToolTip="Open full view" />
+                        <Button Content="Copy (safe)" Click="OnCopyLogsNoHipaaClick" ToolTip="Copy logs (no HIPAA)" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Popup>
 
         <!--
             COMPACT ORDER-MODE PANEL (owner spec, 2026-08-14: "should

@@ -323,7 +323,21 @@ public sealed partial class ControlBoxWindow : Window
         // SetMaximizedGuardState, which now also checks _isOrderModeActive
         // directly; this call just makes sure a note left showing from
         // BEFORE Order mode was chosen doesn't linger over the tiny box.
-        if (orderModeActive) MaximizeNoteBorder.Visibility = Visibility.Collapsed;
+        // Branch fix/overlay-compact-round3: same reasoning for
+        // SettingsPopup — it lives logically "inside" NormalPanel's
+        // content but, as a Popup, doesn't automatically close just
+        // because NormalPanel.Visibility went Collapsed above (Popups
+        // render in their own top-level window, independent of the
+        // visual tree's Visibility). Guarded by orderModeActive (not
+        // unconditional) for the same reason as MaximizeNoteBorder above:
+        // this method runs every ~250ms reconciliation tick even in
+        // Verify mode (see UpdateControlBox), and an unconditional close
+        // here would make the popup impossible to keep open at all.
+        if (orderModeActive)
+        {
+            MaximizeNoteBorder.Visibility = Visibility.Collapsed;
+            SettingsPopup.IsOpen = false;
+        }
     }
 
     /// <summary>
@@ -382,6 +396,14 @@ public sealed partial class ControlBoxWindow : Window
 
     /// <summary>Branch fix/feedback-from-ribbon: see UpdateRequested's own doc.</summary>
     private void OnUpdateDotClick(object sender, RoutedEventArgs e) => UpdateRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>
+    /// Branch fix/overlay-compact-round3: toggles SettingsPopup open/
+    /// closed — see the Popup's own XAML doc for why this is a plain
+    /// toggle (StaysOpen="True", no outside-click dismiss) rather than
+    /// the more typical StaysOpen="False" pattern.
+    /// </summary>
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => SettingsPopup.IsOpen = !SettingsPopup.IsOpen;
 
     /// <summary>
     /// Branch fix/feedback-from-ribbon: shows/hides UpdateDotButton — the
