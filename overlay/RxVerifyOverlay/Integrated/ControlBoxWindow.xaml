@@ -7,18 +7,18 @@
         ShowInTaskbar="False"
         Topmost="True"
         WindowStartupLocation="Manual"
-        Width="230" Height="36"
+        Width="280" Height="36"
         Background="#FFF3F3F3"
         BorderBrush="#FFC8C8C8"
         BorderThickness="1"
         ShowActivated="False">
     <!--
         CONTROL BOX (item 2) — small interactive panel overlaid on
-        PioneerRx (see IntegratedOverlayCoordinator's ControlBoxLeftInsetDip/
-        ControlBoxBottomInsetDip constants for exactly where — ROUND 3,
-        branch fix/overlay-compact-round3, moved this from the top-right
-        ribbon anchor to Pioneer's dead lower-left region; see that
-        class's own doc for why). UNLIKE
+        PioneerRx (see IntegratedOverlayCoordinator's ControlBoxRightInsetDip/
+        ControlBoxTopOffsetDip constants for exactly where — ROUND 4,
+        branch fix/ribbon-topright-title, restored this to the top-right
+        ribbon anchor ROUND 3 had briefly moved away from; see that
+        round's own doc block, and ROUND 4's below, for why). UNLIKE
         IntegratedBoxesWindow, this is a NORMAL (non-click-through)
         window — it must receive clicks — so no WS_EX_TRANSPARENT/
         WS_EX_LAYERED here, just a light gray palette (see below) in a
@@ -63,6 +63,28 @@
         MouseDown handler exists) — its position is entirely computed
         every ~250ms tick by IntegratedOverlayCoordinator.UpdateControlBox,
         so "keep it draggable if it already is" (brief) is a no-op here.
+        POSITION: this round ALSO moved the box's anchor from top-right
+        to a reasoned bottom-left position (see the round's own commit) —
+        ROUND 4 below reverts that specific part; the row/cog/size work
+        above is otherwise untouched.
+
+        ROUND 4 (branch fix/ribbon-topright-title, Will verbatim, after
+        re-pulling round 3: "Much more compact which is good. But it
+        needs to stay in the top right, not at the bottom left. And add
+        the title of the app in there too RxVerify"): two tweaks, size
+        unchanged from round 3 otherwise.
+          1. ANCHOR reverted to top-right — see
+             IntegratedOverlayCoordinator's ControlBoxRightInsetDip/
+             ControlBoxTopOffsetDip (retuned for this box's new, smaller
+             230-wide footprint; not just the old round-3-era numbers).
+             Order mode's own top-right anchor (near Pioneer's "Color
+             Legend") was never touched by round 3 OR this round.
+          2. TITLE: a small bold "RxVerify" label added at the LEFT end
+             of the row, before StatusTimeText (see below) — same
+             FontSize as the other chrome text (9-10), just bold, so it
+             reads as a label without competing with the status text or
+             icons for attention. Width grew only by what the label
+             needs: 230 -> 280 (+50).
 
         FEEDBACK + UPDATE REACHABILITY (branch fix/feedback-from-ribbon,
         Will verbatim: "I can't see anything on the overlay currently for
@@ -167,6 +189,18 @@
         <!-- NORMAL content: status + a handful of icon actions, ONE slim row (round 3) -->
         <StackPanel x:Name="NormalPanel">
             <DockPanel Margin="0,0,20,0" LastChildFill="False">
+                <!--
+                    ROUND 4 (branch fix/ribbon-topright-title, Will
+                    verbatim: "add the title of the app in there too
+                    RxVerify") — the leftmost element in the row, docked
+                    Left and declared FIRST so it sits before
+                    StatusTimeText (also Dock=Left — DockPanel stacks
+                    same-side children in declaration order). Bold to read
+                    as a label distinct from the plain-weight status text
+                    that follows it; same FontSize as the rest of this
+                    row's chrome text.
+                -->
+                <TextBlock Text="RxVerify" DockPanel.Dock="Left" Foreground="#FF333333" FontSize="10" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,6,0" />
                 <!--
                     Owner request (2026-08-13): "Remove the counter showing
                     the accurate/errors. that is not needed on the top
