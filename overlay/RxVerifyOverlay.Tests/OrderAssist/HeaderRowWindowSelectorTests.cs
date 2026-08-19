@@ -112,6 +112,72 @@ public class HeaderRowWindowSelectorTests
         Assert.NotNull(ColumnResolver.ResolveExact(winner.Bands, "Suggested Order Qty"));
     }
 
+    // ---- ROUND 2 (W-T85 bug 1): a chrome row ABOVE the header that itself
+    // misclassifies as "data" must not kill the whole scan ---------------
+
+    [Fact]
+    public void SkipsPastAFalsePositiveDataLookingChromeRowToFindTheRealHeader()
+    {
+        // Row0: title/menu chrome (not data). Row1: a FILTER row containing
+        // something decimal-shaped (mirrors Will's real screenshot: "Order
+        // Date: 8/18/2026" — a date/spinner glyph OCR can turn into, or
+        // that genuinely reads as, a decimal-point token) -- this row
+        // WOULD classify as HeaderBandLocator.IsDataRow == true. Row2: the
+        // REAL header, two rows further down than round 1's fix alone
+        // could tolerate once row1 already looked like data. Row3: real
+        // data.
+        var rows = new List<IReadOnlyList<OcrWord>>
+        {
+            Row(Word("Create", 0, 0, 60), Word("Recommended", 65, 0, 110), Word("Orders", 180, 0, 55)),
+            Row(Word("Order", 0, 20, 40), Word("Date", 45, 20, 35), Word("8.18", 90, 20, 40)), // false-positive "data" row
+            Row(Word("Order", 0, 40, 40), Word("Quantity", 45, 40, 60)),
+            Row(Word("0", 10, 60, 15)),
+        };
+
+        var winner = HeaderRowWindowSelector.SelectBest(rows, new[] { "Order Quantity" });
+
+        Assert.NotNull(winner);
+        Assert.Equal(2, winner!.StartRowIndex);
+        Assert.NotNull(ColumnResolver.ResolveExact(winner.Bands, "Order Quantity"));
+    }
+
+    [Fact]
+    public void StopsScanningOnceARealHeaderCandidateHasAlreadyScored()
+    {
+        // Once the real header (row0) has already been found and scored,
+        // a LATER data-looking row (row1) still correctly ends the scan —
+        // this is the ORIGINAL round-1 behavior, unchanged for the case it
+        // was already right about. Row2 (more header-shaped text, further
+        // down) must NEVER be reachable/considered once genuine data (row1)
+        // has been seen after a real header was already found.
+        var rows = new List<IReadOnlyList<OcrWord>>
+        {
+            Row(Word("Order", 0, 0, 40), Word("Quantity", 45, 0, 60)),
+            Row(Word("7.00", 10, 20, 30)), // genuine data, right after the real header
+            Row(Word("Supplier", 0, 40, 50)), // must never be reached
+        };
+
+        var candidates = HeaderRowWindowSelector.EnumerateCandidates(rows, new[] { "Order Quantity", "Supplier" });
+
+        Assert.DoesNotContain(candidates, c => c.StartRowIndex == 2);
+    }
+
+    [Fact]
+    public void FalsePositiveDataRowIsNeverItselfUsedAsAHeaderCandidateStart()
+    {
+        var rows = new List<IReadOnlyList<OcrWord>>
+        {
+            Row(Word("8.18", 0, 0, 40)), // looks like data from row 0
+            Row(Word("Order", 0, 20, 40), Word("Quantity", 45, 20, 60)),
+            Row(Word("0", 10, 40, 15)),
+        };
+
+        var candidates = HeaderRowWindowSelector.EnumerateCandidates(rows, new[] { "Order Quantity" });
+
+        Assert.DoesNotContain(candidates, c => c.StartRowIndex == 0);
+        Assert.Contains(candidates, c => c.StartRowIndex == 1 && c.Score > 0);
+    }
+
     // ---- LabelsAreCloseMatch (scoring-only OCR-noise tolerance) --------
 
     [Fact]

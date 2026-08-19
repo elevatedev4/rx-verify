@@ -10,6 +10,7 @@ using RxVerifyOverlay.Integrated;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.OrderAssist.Geometry;
+using RxVerifyOverlay.OrderAssist.Ocr;
 using RxVerifyOverlay.OrderAssist.Scanning;
 using RxVerifyOverlay.OrderAssist.Windows;
 
@@ -94,6 +95,39 @@ public sealed class OrderAssistCoordinator
     private bool _windowShown;
     private bool _tickInProgress;
 
+    // ------------------------------------------------------------------
+    // HIGHLIGHT STABILITY (ROUND 2, W-T85: "the items are flashing a
+    // bunch instead of staying solid") — see HighlightStabilityPolicy's
+    // own doc for the two jobs these fields back: holding a displayed
+    // result through a transient empty tick, and requiring a genuinely
+    // different result to repeat before adopting it. All reset together
+    // (ResetHighlightStability) whenever "the window changed" per the
+    // branch brief's own wording — target lost entirely, target KIND
+    // switched, or Order Assist toggled off — so a stale signature from a
+    // completely different screen can never suppress/delay a fresh
+    // result on a new one.
+    // ------------------------------------------------------------------
+
+    /// <summary>HighlightSignature of whatever is CURRENTLY displayed — "" means nothing is shown. See HighlightStabilityPolicy.Decide's own param docs.</summary>
+    private string _displayedSignature = "";
+
+    /// <summary>The actual DIP-space geometry currently displayed — retained so a KeepDisplayed decision can redraw it after the self-occlusion hide/clear step (only needed on the fallback path where OrderAssistOverlayWindow.IsExcludedFromCapture is false; see TickAsync).</summary>
+    private IReadOnlyList<DipRect> _displayedRedBoxesDip = Array.Empty<DipRect>();
+
+    private CatalogHighlights? _displayedCatalogHighlightsDip;
+
+    /// <summary>How many CONSECUTIVE ticks immediately before this one computed an empty result — see HighlightStabilityPolicy.Decide's own param doc.</summary>
+    private int _consecutiveEmptyTicks;
+
+    /// <summary>The signature most recently proposed as a REPLACEMENT for _displayedSignature (non-empty, different from it) — reset to "" the instant a tick proposes something else, or matches what's displayed.</summary>
+    private string _pendingSignature = "";
+
+    /// <summary>How many CONSECUTIVE ticks have now proposed _pendingSignature — see HighlightStabilityPolicy.Decide's own param doc.</summary>
+    private int _pendingChangeStreak;
+
+    /// <summary>The target window KIND the stability state above was last computed against — a kind switch (Create Recommended Orders &lt;-&gt; Catalog Substitution) means the signature space itself changed meaning, so stability state resets exactly like "target lost entirely" does.</summary>
+    private OrderAssistWindowKind? _lastTickKind;
+
     /// <summary>
     /// REVIEW FIX (blocking — race: disabling mid-tick could re-show a
     /// stale highlight): bumped on EVERY SetEnabled call (both true and
@@ -127,6 +161,9 @@ public sealed class OrderAssistCoordinator
 
     /// <summary>Same de-dup pattern as _lastLoggedNoMatchTitlesSignature, for LogColumnDiagnosticsIfNeeded's "matched a target window but couldn't resolve its expected column(s)" case — keyed on the resolved header band labels actually seen that tick.</summary>
     private string? _lastLoggedColumnFailureSignature;
+
+    /// <summary>Same de-dup pattern as _lastLoggedColumnFailureSignature, for LogSelectionBandsIfChanged (ROUND 2, W-T85 bug 2) — keyed on the actual band Y-range list, so a still-selected row never re-logs every ~1s tick, but a genuinely different capture (a different row now selected, or the selection cleared) does.</summary>
+    private string? _lastLoggedSelectionBandsSignature;
 
     public OrderAssistCoordinator(OverlaySettings settings, IOcrEngine? ocrEngine = null)
     {
@@ -167,6 +204,7 @@ public sealed class OrderAssistCoordinator
         {
             _timer.Stop();
             HideOverlayIfShown();
+            ResetHighlightStability();
         }
     }
 
@@ -210,11 +248,10 @@ public sealed class OrderAssistCoordinator
 
         // REVIEW FIX (blocking): capture THIS tick's generation now, and
         // never mutate the overlay's visible state below without
-        // re-confirming it's still current (see the final check right
-        // before RepositionPhysical/SetHighlights/Show) — see
-        // TickGenerationGate's doc for the exact race this closes. The
-        // CTS is real, best-effort cancellation on top of that (see the
-        // _tickCts field doc) — using var disposes it the moment this
+        // re-confirming it's still current (see the final check below) —
+        // see TickGenerationGate's doc for the exact race this closes.
+        // The CTS is real, best-effort cancellation on top of that (see
+        // the _tickCts field doc) — using var disposes it the moment this
         // tick returns by any path, and SetEnabled's own Cancel() call
         // already tolerates that being disposed by the time it runs.
         var tickGeneration = _generation;
@@ -226,16 +263,37 @@ public sealed class OrderAssistCoordinator
         {
             LogNoMatchDiagnosticsIfNeeded(scan.VisiblePioneerWindowTitles);
             HideOverlayIfShown();
+            // "The window changed" — see ResetHighlightStability's own
+            // doc: a held/pending signature from whatever WAS on screen
+            // has no business influencing a completely different (or
+            // absent) screen once Pioneer navigates away.
+            ResetHighlightStability();
             return;
         }
 
         var target = scan.Target;
 
+        // A held/pending signature only makes sense against the SAME
+        // target kind it was computed against — Create Recommended
+        // Orders' row-index signatures and Catalog Substitution's are not
+        // comparable at all, so a kind switch resets exactly like losing
+        // the target entirely does.
+        if (_lastTickKind is not null && _lastTickKind != target.Value.Kind)
+        {
+            ResetHighlightStability();
+        }
+        _lastTickKind = target.Value.Kind;
+
         var overlay = EnsureOverlayWindow();
 
-        // SELF-OCCLUSION GUARD — see class doc. Only hidden if it was
-        // actually showing; nothing to hide on the very first tick.
-        if (_windowShown)
+        // SELF-OCCLUSION GUARD — see class doc AND OrderAssistOverlayWindow.
+        // IsExcludedFromCapture's own doc (ROUND 2, W-T85 bug 3 fix): once
+        // Windows itself omits this window from any GDI capture, there's
+        // nothing to hide — skip the round trip (and its visible on/off
+        // pulse) entirely, same early-return MainWindow.HideForCaptureAsync
+        // already uses for the verify flow's own equivalent window.
+        var usingCaptureExclusion = overlay.IsExcludedFromCapture;
+        if (!usingCaptureExclusion && _windowShown)
         {
             overlay.HideAndClear();
             _windowShown = false;
@@ -243,56 +301,146 @@ public sealed class OrderAssistCoordinator
         }
 
         using var bitmap = EscriptImageCapture.CaptureRegion(target.Value.Bounds);
+
+        // ROUND 2 (W-T85 bug 2, Will verbatim: "The analysis is also
+        // skipping whatever row is highlighted (usually the first row
+        // starts highlighted, as a dark blue)") — see
+        // SelectionRowColorDetector's own ROOT CAUSE doc. Normalizes
+        // white-on-selection-blue rows to normal dark-on-light contrast
+        // BEFORE OCR ever sees them, for BOTH target kinds (a no-op when
+        // no selection band is present this tick). Logging is best-effort
+        // and throttled the same "log on change" way as every other
+        // diagnostic in this class — see LogSelectionBandsIfChanged.
+        var selectionBands = SelectionRowNormalizer.NormalizeInPlace(bitmap);
+        LogSelectionBandsIfChanged(selectionBands);
+
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
 
         var scale = DpiScaleFor(target.Value.Handle);
 
         var redBoxesDip = new List<DipRect>();
         CatalogHighlights? catalogHighlights = null;
+        var newSignature = "";
 
         switch (target.Value.Kind)
         {
             case OrderAssistWindowKind.CreateRecommendedOrders:
-                foreach (var highlight in CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(ocrResult.Words))
+                var zeroHighlights = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(ocrResult.Words);
+                foreach (var highlight in zeroHighlights)
                 {
                     redBoxesDip.Add(ToDip(highlight.Left, highlight.Top, highlight.Right, highlight.Bottom, scale));
                 }
+                newSignature = HighlightSignature.ForZeroQuantityHighlights(zeroHighlights);
                 break;
 
             case OrderAssistWindowKind.CatalogSubstitution:
-                catalogHighlights = ToDip(CatalogSubstitutionScanner.Analyze(ocrResult.Words), scale);
+                var annotations = CatalogSubstitutionScanner.Analyze(ocrResult.Words);
+                catalogHighlights = ToDip(annotations, scale);
+                newSignature = HighlightSignature.ForCatalogAnnotations(annotations);
                 break;
-        }
-
-        if (redBoxesDip.Count == 0 && (catalogHighlights is null || IsEmpty(catalogHighlights)))
-        {
-            // Nothing to highlight this tick (e.g. no zero quantities, or
-            // no substitution meets the 25% bar) — stay hidden rather
-            // than show an empty overlay window. Could ALSO mean column
-            // resolution itself failed (a bad/partial OCR capture, or the
-            // window's actual header text doesn't match what this app
-            // expects) — see LogColumnDiagnosticsIfNeeded, which tells
-            // the two apart and only logs the latter.
-            LogColumnDiagnosticsIfNeeded(target.Value.Kind, ocrResult.Words);
-            return;
         }
 
         // REVIEW FIX (blocking): the actual fix — see TickAsync's own doc
         // above and TickGenerationGate's doc. Everything above this point
         // only computed a result; nothing touched the overlay's visible
-        // state yet, so bailing out here (rather than earlier) is always
-        // safe. If SetEnabled ran at all since this tick started
-        // (enabling OR disabling — either means this result is stale),
-        // discard it instead of showing/repositioning a highlight the
-        // pharmacist may have already turned off, with no future tick
-        // left to correct it.
+        // state (or this tick's own stability bookkeeping) yet, so
+        // bailing out here is always safe. If SetEnabled ran at all since
+        // this tick started (enabling OR disabling — either means this
+        // result is stale), discard it instead of showing/repositioning a
+        // highlight the pharmacist may have already turned off, with no
+        // future tick left to correct it.
         if (!TickGenerationGate.IsStillCurrent(tickGeneration, _generation)) return;
 
+        // HIGHLIGHT STABILITY (ROUND 2, W-T85 bug 3: "the items are
+        // flashing a bunch instead of staying solid") — see
+        // HighlightStabilityPolicy's own doc for the full reasoning. This
+        // decision governs WHICH result actually reaches the overlay;
+        // note it never affects the diagnostic-logging path below, which
+        // still fires on every empty tick exactly as before.
+        var decision = HighlightStabilityPolicy.Decide(newSignature, _displayedSignature, _consecutiveEmptyTicks, _pendingChangeStreak);
+        var isNewResultEmpty = string.IsNullOrEmpty(newSignature);
+
+        if (isNewResultEmpty)
+        {
+            _consecutiveEmptyTicks++;
+            _pendingSignature = "";
+            _pendingChangeStreak = 0;
+        }
+        else
+        {
+            _consecutiveEmptyTicks = 0;
+            if (newSignature == _displayedSignature)
+            {
+                _pendingSignature = "";
+                _pendingChangeStreak = 0;
+            }
+            else if (newSignature == _pendingSignature)
+            {
+                _pendingChangeStreak++;
+            }
+            else
+            {
+                _pendingSignature = newSignature;
+                _pendingChangeStreak = 1;
+            }
+        }
+
+        if (isNewResultEmpty)
+        {
+            // Nothing NEW to highlight this tick (e.g. no zero
+            // quantities, or no substitution meets the 25% bar) — could
+            // ALSO mean column resolution itself failed (a bad/partial
+            // OCR capture, or the window's actual header text doesn't
+            // match what this app expects) — see LogColumnDiagnosticsIfNeeded,
+            // which tells the two apart and only logs the latter. Fires
+            // regardless of the stability decision below (KeepDisplayed
+            // vs. Clear) — this diagnostic is about what THIS tick's OCR
+            // pass found, independent of what's still on screen from a
+            // held previous result.
+            LogColumnDiagnosticsIfNeeded(target.Value.Kind, ocrResult.Words);
+        }
+
+        switch (decision)
+        {
+            case HighlightStabilityPolicy.Decision.Clear:
+                HideOverlayIfShown();
+                _displayedSignature = "";
+                _displayedRedBoxesDip = Array.Empty<DipRect>();
+                _displayedCatalogHighlightsDip = null;
+                break;
+
+            case HighlightStabilityPolicy.Decision.Display:
+                DrawAndShow(overlay, target.Value, scale, redBoxesDip, catalogHighlights);
+                _displayedSignature = newSignature;
+                _displayedRedBoxesDip = redBoxesDip;
+                _displayedCatalogHighlightsDip = catalogHighlights;
+                break;
+
+            case HighlightStabilityPolicy.Decision.KeepDisplayed:
+                // Nothing NEW to draw — but the fallback (non-exclusion)
+                // hide/clear step above already blanked this window's
+                // content for the capture, so it must be explicitly
+                // redrawn with whatever was ALREADY displayed, or the
+                // held highlight would just vanish instead of staying
+                // solid (defeating the entire point of this policy).
+                // Under capture exclusion, the window was never touched
+                // this tick, so there's nothing to redo.
+                if (!usingCaptureExclusion && _displayedSignature.Length > 0)
+                {
+                    DrawAndShow(overlay, target.Value, scale, _displayedRedBoxesDip, _displayedCatalogHighlightsDip);
+                }
+                break;
+        }
+    }
+
+    /// <summary>Repositions the overlay to the target window's current bounds and draws exactly the given highlights — the ONE place TickAsync actually mutates the overlay's visible content, called either with this tick's freshly computed result (Decision.Display) or a retained previous one being redrawn after a fallback-path hide/clear (Decision.KeepDisplayed) — see HighlightStabilityPolicy's own doc.</summary>
+    private void DrawAndShow(OrderAssistOverlayWindow overlay, OrderAssistWindowLocator.TargetWindow target, double scale, IReadOnlyList<DipRect> redBoxesDip, CatalogHighlights? catalogHighlights)
+    {
         // See OrderModeBottomInsetDip's own doc — the highlight window
         // stops short of the target window's own bottom edge, where
         // Pioneer's own action buttons (e.g. "New") live.
-        var overlayHeight = OrderModeOverlayBoundsRule.TrimmedHeightPhysical(target.Value.Bounds.Height, OrderModeBottomInsetDip, scale);
-        overlay.RepositionPhysical(target.Value.Bounds.X, target.Value.Bounds.Y, target.Value.Bounds.Width, overlayHeight);
+        var overlayHeight = OrderModeOverlayBoundsRule.TrimmedHeightPhysical(target.Bounds.Height, OrderModeBottomInsetDip, scale);
+        overlay.RepositionPhysical(target.Bounds.X, target.Bounds.Y, target.Bounds.Width, overlayHeight);
         overlay.SetHighlights(redBoxesDip, catalogHighlights);
         overlay.ForceHitTestTransparent();
         overlay.Show();
@@ -389,12 +537,6 @@ public sealed class OrderAssistCoordinator
             sortBadgeAnchorDip, sortBadgeText, sortBadgeIsSorted);
     }
 
-    private static bool IsEmpty(CatalogHighlights catalog) =>
-        catalog.GreenRowDip is null &&
-        catalog.YellowRowDip is null &&
-        catalog.BestLargePackageDip is null &&
-        catalog.BestSmallPackageDip is null &&
-        catalog.SortBadgeAnchorDip is null;
 
     private static double DpiScaleFor(IntPtr windowHandle)
     {
@@ -409,6 +551,18 @@ public sealed class OrderAssistCoordinator
         if (!_windowShown) return;
         _overlayWindow?.HideAndClear();
         _windowShown = false;
+    }
+
+    /// <summary>Clears every HighlightStabilityPolicy bookkeeping field back to "nothing displayed, no history" — call whenever "the window changed" (target lost, target KIND switched, or Order Assist disabled) so a signature from a completely different screen can never suppress or delay a fresh result on a new one. See the fields' own doc block for the full reasoning.</summary>
+    private void ResetHighlightStability()
+    {
+        _displayedSignature = "";
+        _displayedRedBoxesDip = Array.Empty<DipRect>();
+        _displayedCatalogHighlightsDip = null;
+        _consecutiveEmptyTicks = 0;
+        _pendingSignature = "";
+        _pendingChangeStreak = 0;
+        _lastTickKind = null;
     }
 
     /// <summary>
@@ -468,6 +622,28 @@ public sealed class OrderAssistCoordinator
     /// still-unresolved capture doesn't re-log every tick, but a
     /// DIFFERENT bad capture (different bands) does.
     /// </summary>
+    /// <summary>
+    /// ROUND 2 (W-T85 bug 2) — best-effort, throttled diagnostic for
+    /// SelectionRowNormalizer's own bitmap preprocessing (see that class's
+    /// and SelectionRowColorDetector's own doc for why this exists: the
+    /// exact color bounds are an UNVERIFIED estimate, and this is what
+    /// proves or disproves the detector actually firing on Will's real
+    /// screen without another live-diagnosis round). Logs only the Y-range
+    /// count/list — never any OCR'd text, never a screenshot — so there is
+    /// nothing PHI-adjacent here at all, unlike the window-title/column-band
+    /// diagnostics elsewhere in this class.
+    /// </summary>
+    private void LogSelectionBandsIfChanged(IReadOnlyList<(int Top, int Bottom)> bands)
+    {
+        var signature = bands.Count == 0 ? "" : string.Join(",", bands.Select(b => $"{b.Top}-{b.Bottom}"));
+        if (signature == _lastLoggedSelectionBandsSignature) return;
+        _lastLoggedSelectionBandsSignature = signature;
+
+        OcrLogger.LogTiming(bands.Count == 0
+            ? "OrderAssist: selection-band normalizer found 0 bands this tick"
+            : $"OrderAssist: selection-band normalizer inverted {bands.Count} band(s) this tick: [{signature}]");
+    }
+
     /// <summary>
     /// 2026-08-18 update (W-T76/78/81, "nothing highlights" — Will's real
     /// diagnostic log confirmed the root cause: window chrome — title bar,

@@ -35,19 +35,50 @@ namespace RxVerifyOverlay.OrderAssist.Geometry;
 ///
 /// FIX: don't assume the header starts at row 0 and don't cap the search
 /// at 2 rows. Treat EVERY leading non-data row (HeaderBandLocator.IsDataRow
-/// == false — the moment a genuine data row appears, nothing after it
-/// could still be "the header", so the scan stops there, same structural
-/// assumption CountHeaderRows already made, just applied per candidate
-/// start instead of as one single global cutoff) as a possible header
-/// START, try it alone AND paired with the row immediately below it (for a
-/// 2-line-wrapped header, e.g. "Suggested" / "Order Qty" — same
-/// accommodation the old maxHeaderRows=2 cap existed for), build column
-/// bands for EACH candidate independently, and SCORE each one by how many
-/// of the caller's expected column labels it actually contains. The
-/// highest-scoring candidate wins. A pure chrome row (title/menu/filter)
-/// scores 0 against real column labels and can never win once the genuine
-/// header row is anywhere within the scan range — it doesn't matter how
-/// many chrome rows come before it.
+/// == false) as a possible header START, try it alone AND paired with the
+/// row immediately below it (for a 2-line-wrapped header, e.g. "Suggested"
+/// / "Order Qty" — same accommodation the old maxHeaderRows=2 cap existed
+/// for), build column bands for EACH candidate independently, and SCORE
+/// each one by how many of the caller's expected column labels it actually
+/// contains. The highest-scoring candidate wins. A pure chrome row
+/// (title/menu/filter) scores 0 against real column labels and can never
+/// win once the genuine header row is anywhere within the scan range — it
+/// doesn't matter how many chrome rows come before it.
+///
+/// ROOT CAUSE ROUND 2 (W-T85, 2026-08-19 — Will's live Windows test of
+/// round 1: "The recommended order page is still not highlighting 0
+/// items", plus his real Create Recommended Orders screenshot): round 1
+/// still `break`-ed the ENTIRE scan the instant ANY leading row looked
+/// like data (HeaderBandLocator.IsDataRow — a literal decimal-point
+/// number anywhere in the row). That's exactly right once the real header
+/// has already been found (nothing past it could be header either), but
+/// WRONG when applied to the FIRST data-looking row encountered: the
+/// screenshot confirms this window's chrome includes a FILTER ROW above
+/// the real header — "Order Date: 8/18/2026 [calendar-picker] Inventory
+/// Group: &lt;All&gt; Supplier: &lt;All&gt;" — and a date/spinner glyph in that row
+/// is exactly the kind of token OCR can turn into (or that genuinely IS)
+/// a decimal-shaped false positive, which killed the scan before it ever
+/// reached the real header 1-3 chrome rows further down. Catalog
+/// Substitution's own chrome has no date, which is why round 1 already
+/// worked there. Fixed by only trusting a data-looking row as the genuine
+/// header/body boundary AFTER at least one real candidate has already
+/// scored above 0 — see EnumerateCandidates' own comment for the exact
+/// mechanics; this is suggested-fix option 1 from the branch brief ("don't
+/// break on leading pseudo-data rows before any candidate has scored
+/// &gt;0"), chosen over tightening IsDataRow's own regex (option 3) because
+/// it doesn't depend on correctly guessing the EXACT OCR misread shape (a
+/// misread "/" as "." in the date, a spinner glyph, or something else
+/// entirely) — any single false-positive "data" row above the real header
+/// is now harmless regardless of what caused it.
+///
+/// MaxRowSpan=2 (unchanged): Will's screenshot shows most header labels
+/// wrap to 2 visual lines, and the widest wrap on the whole header
+/// ("Units Needed For Max", 3 lines) belongs to a column this app never
+/// resolves — every label this app actually targets (Supplier, Rebate
+/// Cost Per Unit, Shipping Size, Order Quantity, Suggested Order Qty) is
+/// confirmed 2 lines or fewer in that screenshot, so 2 remains sufficient;
+/// no PHI/real values were copied out of that screenshot, only this
+/// layout observation.
 ///
 /// FAIL-SAFE PROPERTY PRESERVED: this only changes WHICH rows feed
 /// ColumnResolver.BuildPartitionedColumnBands — the actual accept/reject
@@ -100,12 +131,37 @@ public static class HeaderRowWindowSelector
         var candidates = new List<Candidate>();
         var scanLimit = Math.Min(rows.Count, maxRowsToScan);
 
+        // ROUND 2 (W-T85, "Create Recommended Orders still resolves
+        // nothing" — Will's real screenshot confirmed the FILTER row
+        // ("Order Date: 8/18/2026 [calendar] Inventory Group: <All>
+        // Supplier: <All>") sits above the real header, and OCR reading a
+        // date/spinner glyph can misclassify that row as "data" via
+        // HeaderBandLocator.IsDataRow's decimal-number heuristic. The
+        // ORIGINAL round-1 fix still `break`-ed the WHOLE scan on the
+        // first such row — fine for Catalog Substitution (its chrome has
+        // no date), fatal for Create Recommended Orders (killed the scan
+        // before the real header, 1-3 rows further down, was ever
+        // reached). Fixed: a data-looking row is only trusted as the
+        // genuine header/body boundary once at least one REAL header
+        // candidate has already scored above 0 elsewhere in this scan —
+        // until then, a data-looking row is skipped (never used as a
+        // candidate START, since a real header label is never numeric)
+        // but scanning continues past it, bounded by maxRowsToScan same
+        // as before.
+        var haveFoundAScoringCandidate = false;
+
         for (var start = 0; start < scanLimit; start++)
         {
-            // A genuine data row can never be (part of) the header — and
-            // nothing below it in a well-formed grid could be either, so
-            // stop scanning entirely rather than just skipping this row.
-            if (HeaderBandLocator.IsDataRow(rows[start])) break;
+            if (HeaderBandLocator.IsDataRow(rows[start]))
+            {
+                // Once we've already found the real header, a data row IS
+                // the genuine start of the body — nothing below it could
+                // be header either, so stop entirely (original behavior).
+                // Until then, treat it as possible NOISE above the real
+                // header (e.g. the filter row's date) and keep looking.
+                if (haveFoundAScoringCandidate) break;
+                continue;
+            }
 
             for (var span = 1; span <= MaxRowSpan && start + span <= scanLimit; span++)
             {
@@ -114,6 +170,7 @@ public static class HeaderRowWindowSelector
                 var window = rows.Skip(start).Take(span).ToList();
                 var bands = ColumnResolver.BuildPartitionedColumnBands(window);
                 var score = ScoreBands(bands, expectedLabels);
+                if (score > 0) haveFoundAScoringCandidate = true;
 
                 var allWords = window.SelectMany(r => r).Where(w => !string.IsNullOrWhiteSpace(w.Text)).ToList();
                 var top = allWords.Count > 0 ? allWords.Min(w => w.Y) : 0;

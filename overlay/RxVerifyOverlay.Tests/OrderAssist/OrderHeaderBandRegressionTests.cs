@@ -153,4 +153,63 @@ public class OrderHeaderBandRegressionTests
         Assert.NotNull(annotations.GreenHighlight);
         Assert.Equal(0, annotations.GreenHighlight!.RowIndex); // ANDA row, cheapest
     }
+
+    // ---- ROUND 2 (W-T85 bug 1): a FILTER-ROW chrome line that itself
+    // misclassifies as "data" (Will's real screenshot: "Order Date:
+    // 8/18/2026 [calendar] Inventory Group: <All> Supplier: <All>" — a
+    // date/spinner glyph OCR can turn into, or that genuinely reads as, a
+    // decimal-point token) must not kill the whole header search before it
+    // ever reaches the real header, further down. -----------------------
+
+    private static List<OcrWord> CreateRecommendedOrdersWordsWithADateLikeFilterRowAboveHeader()
+    {
+        return new List<OcrWord>
+        {
+            // Row 0 (y=0): title/menu chrome -- ordinary, non-data.
+            Word("Create", 0, 0, 60), Word("Recommended", 65, 0, 110), Word("Orders", 180, 0, 55),
+
+            // Row 1 (y=20): the FILTER row -- contains a decimal-shaped
+            // token (see class doc) that HeaderBandLocator.IsDataRow
+            // classifies as "data", even though it's still chrome.
+            Word("Order", 0, 20, 40), Word("Date", 45, 20, 35), Word("8.18", 90, 20, 40),
+            Word("Inventory", 200, 20, 60), Word("Group", 265, 20, 45),
+
+            // Row 2 (y=40): the REAL grid header, past the false-positive
+            // "data" row above it.
+            Word("Cost", 0, 40, 35), Word("Per", 40, 40, 25), Word("Unit", 70, 40, 35),
+            Word("Order", 150, 40, 40), Word("Quantity", 195, 40, 60),
+
+            // Row 3 (y=60): data row, Order Quantity = 0 (should highlight).
+            Word("5.00", 10, 60, 30), Word("0", 200, 60, 15),
+
+            // Row 4 (y=80): data row, Order Quantity = 2 (should NOT highlight).
+            Word("6.00", 10, 80, 30), Word("2", 200, 80, 15),
+        };
+    }
+
+    [Fact]
+    public void OldApproachStopsAtTheFalsePositiveFilterRowAndNeverSeesTheRealHeader()
+    {
+        var words = CreateRecommendedOrdersWordsWithADateLikeFilterRowAboveHeader();
+        var rows = TableRowGrouper.GroupIntoRows(words);
+
+        // The OLD (round-1) CountHeaderRows stops the instant ANY row
+        // looks like data -- here that happens at row 1 (the filter row
+        // itself), not because of the 2-row cap this time.
+        var oldHeaderRowCount = HeaderBandLocator.CountHeaderRows(rows);
+        var oldBands = ColumnResolver.BuildPartitionedColumnBands(rows.Take(oldHeaderRowCount).ToList());
+
+        Assert.Equal(1, oldHeaderRowCount);
+        Assert.Null(ColumnResolver.ResolveExact(oldBands, CreateRecommendedOrdersScanner.OrderQuantityHeaderLabel));
+    }
+
+    [Fact]
+    public void FixedScannerSkipsThePseudoDataFilterRowAndHighlightsTheGenuineZero()
+    {
+        var highlights = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(CreateRecommendedOrdersWordsWithADateLikeFilterRowAboveHeader());
+
+        var highlight = Assert.Single(highlights);
+        Assert.Equal(200, highlight.Left);
+        Assert.Equal(215, highlight.Right);
+    }
 }

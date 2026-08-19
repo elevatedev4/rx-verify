@@ -107,6 +107,18 @@ public class LogTailBuilderTests
     }
 
     [Fact]
+    public void SelectionBandNormalizerLineIsExcluded()
+    {
+        // W-T85 round 2 bug 2 fix: OrderAssistCoordinator.LogSelectionBandsIfChanged
+        // logs local-only band Y-ranges (no OCR'd text, no screenshot) —
+        // still under the "OrderAssist:" prefix, which is not one of
+        // IsSafeLine's two recognized tags, so this stays excluded the
+        // same way every other OrderAssist diagnostic line already does.
+        var line = Ts + "OrderAssist: selection-band normalizer inverted 1 band(s) this tick: [40-52]";
+        Assert.False(LogTailBuilder.IsSafeLine(line));
+    }
+
+    [Fact]
     public void PreCheckGateLineIsExcluded()
     {
         // Integrated/IntegratedOverlayCoordinator.cs's TickCore
