@@ -156,6 +156,15 @@ public sealed partial class ControlBoxWindow : Window
     {
         try
         {
+            // REVIEW FIX (reviewer verdict on c3bda63, finding 2):
+            // belt-and-suspenders alongside HideControlBoxIfShown's new
+            // CloseSettingsPopup() call — see that method's own doc. This
+            // window closing outright (app shutdown, via
+            // IntegratedOverlayCoordinator.Shutdown() below) is a
+            // DIFFERENT path than Hide(), so it gets its own explicit
+            // close here rather than assuming the coordinator's call
+            // already covered it.
+            SettingsPopup.IsOpen = false;
             if (_hotkeyRegistered) UnregisterHotKey(_hwnd, HideOverlayHotkeyId);
             _hwndSource?.RemoveHook(WndProc);
         }
@@ -404,6 +413,24 @@ public sealed partial class ControlBoxWindow : Window
     /// the more typical StaysOpen="False" pattern.
     /// </summary>
     private void OnSettingsClick(object sender, RoutedEventArgs e) => SettingsPopup.IsOpen = !SettingsPopup.IsOpen;
+
+    /// <summary>
+    /// REVIEW FIX (reviewer verdict on c3bda63, finding 2 — "Popup
+    /// lifecycle vs. ControlBoxWindow.Hide()"): ApplyModeLayout above
+    /// only force-closes SettingsPopup for the Order-mode case, but
+    /// IntegratedOverlayCoordinator.HideControlBoxIfShown() calls
+    /// _controlBox?.Hide() from several OTHER teardown paths too
+    /// (Integrated mode switched off, PioneerRx detached, etc.) — none of
+    /// which went through ApplyModeLayout. Hide() on this window does
+    /// NOT close an open Popup (a Popup is its own top-level HWND,
+    /// independent of its logical owner's visibility), so the flyout
+    /// could otherwise be left floating over PioneerRx with the control
+    /// box itself gone. Mirrors the exact fix already used for the
+    /// Order-mode case: a plain IsOpen = false, exposed here so the
+    /// coordinator can call it right alongside every _controlBox?.Hide().
+    /// Safe/idempotent to call whether or not the popup is currently open.
+    /// </summary>
+    public void CloseSettingsPopup() => SettingsPopup.IsOpen = false;
 
     /// <summary>
     /// Branch fix/feedback-from-ribbon: shows/hides UpdateDotButton — the

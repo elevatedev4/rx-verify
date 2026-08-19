@@ -1125,6 +1125,18 @@ public sealed class IntegratedOverlayCoordinator
     private void HideControlBoxIfShown()
     {
         if (!_controlBoxShown) return;
+        // REVIEW FIX (reviewer verdict on c3bda63, finding 2 — "Popup
+        // lifecycle vs. ControlBoxWindow.Hide()"): ApplyModeLayout's own
+        // SettingsPopup.IsOpen = false (Order-mode case) only covers ONE
+        // of several teardown paths that end up calling _controlBox?.Hide()
+        // below (Integrated mode switched off, PioneerRx detached, etc. —
+        // see this method's callers). A Popup is a separate top-level
+        // HWND that does NOT close just because its logical owner calls
+        // Hide() on itself, so without this, the settings flyout could be
+        // left floating over PioneerRx with the control box gone from
+        // under it. Same fix, same place it's needed: right alongside the
+        // Hide() call.
+        _controlBox?.CloseSettingsPopup();
         _controlBox?.Hide();
         _controlBoxShown = false;
     }
