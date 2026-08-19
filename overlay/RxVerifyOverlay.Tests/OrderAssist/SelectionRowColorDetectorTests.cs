@@ -57,6 +57,25 @@ public class SelectionRowColorDetectorTests
     }
 
     [Fact]
+    public void ClassicLightBlueIsNotSelectionBackground()
+    {
+        // (173,216,230) -- the standard "light blue" web color, and a
+        // plausible stand-in for Pioneer's own pale header-row tint (a
+        // subtle blue-ish highlight some grid header rows use, distinct
+        // from the SATURATED, dark selection fill this detector targets).
+        Assert.False(SelectionRowColorDetector.IsSelectionBackgroundColor(r: 173, g: 216, b: 230));
+    }
+
+    [Fact]
+    public void PaleHeaderTintBlueIsNotSelectionBackground()
+    {
+        // (200,220,245) -- another plausible pale/washed-out header-row
+        // blue tint (light, low-saturation) that must never be confused
+        // with the dark, saturated selection fill.
+        Assert.False(SelectionRowColorDetector.IsSelectionBackgroundColor(r: 200, g: 220, b: 245));
+    }
+
+    [Fact]
     public void BlackTextIsNotSelectionBackground()
     {
         Assert.False(SelectionRowColorDetector.IsSelectionBackgroundColor(r: 10, g: 10, b: 10));

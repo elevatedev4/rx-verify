@@ -178,6 +178,51 @@ public class HeaderRowWindowSelectorTests
         Assert.Contains(candidates, c => c.StartRowIndex == 1 && c.Score > 0);
     }
 
+    [Fact]
+    public void ScansExactlyTheDefaultCapAndReportsNoHeaderFoundWhenNoneOfThemMatch()
+    {
+        // 12 leading non-data rows (none matching "Supplier"), exactly
+        // DefaultMaxRowsToScan -- pins BOTH that the scan actually visits
+        // every one of them (12 candidates, one per row, each scoring 0)
+        // AND that it correctly terminates reporting "no header found"
+        // (SelectBest null) rather than hanging or throwing.
+        var rows = new List<IReadOnlyList<OcrWord>>();
+        for (var i = 0; i < HeaderRowWindowSelector.DefaultMaxRowsToScan; i++)
+        {
+            rows.Add(Row(Word($"Chrome{i}", 0, i * 20, 40)));
+        }
+
+        var candidates = HeaderRowWindowSelector.EnumerateCandidates(rows, new[] { "Supplier" });
+
+        // Every one of the 12 rows was visited as a candidate START (span=1
+        // AND span=2 windows both get tried per start, so the raw count is
+        // higher than 12 — see EnumerateCandidates' own doc — what matters
+        // here is that all 12 DISTINCT start rows were reached, and NONE
+        // of them, in either span, ever scored above 0).
+        Assert.Equal(HeaderRowWindowSelector.DefaultMaxRowsToScan, candidates.Select(c => c.StartRowIndex).Distinct().Count());
+        Assert.All(candidates, c => Assert.Equal(0, c.Score));
+        Assert.Null(HeaderRowWindowSelector.SelectBest(rows, new[] { "Supplier" }));
+    }
+
+    [Fact]
+    public void NeverScansPastTheDefaultCapEvenWhenARealHeaderSitsJustBeyondIt()
+    {
+        // Same 12 non-matching rows as above, PLUS a genuine "Supplier"
+        // header one row past the cap (row index 12) -- must never be
+        // reached, so SelectBest still reports no header found.
+        var rows = new List<IReadOnlyList<OcrWord>>();
+        for (var i = 0; i < HeaderRowWindowSelector.DefaultMaxRowsToScan; i++)
+        {
+            rows.Add(Row(Word($"Chrome{i}", 0, i * 20, 40)));
+        }
+        rows.Add(Row(Word("Supplier", 0, HeaderRowWindowSelector.DefaultMaxRowsToScan * 20, 50)));
+
+        var candidates = HeaderRowWindowSelector.EnumerateCandidates(rows, new[] { "Supplier" });
+
+        Assert.DoesNotContain(candidates, c => c.StartRowIndex == HeaderRowWindowSelector.DefaultMaxRowsToScan);
+        Assert.Null(HeaderRowWindowSelector.SelectBest(rows, new[] { "Supplier" }));
+    }
+
     // ---- LabelsAreCloseMatch (scoring-only OCR-noise tolerance) --------
 
     [Fact]

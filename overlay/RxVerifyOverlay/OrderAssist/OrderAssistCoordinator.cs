@@ -417,16 +417,42 @@ public sealed class OrderAssistCoordinator
                 break;
 
             case HighlightStabilityPolicy.Decision.KeepDisplayed:
-                // Nothing NEW to draw — but the fallback (non-exclusion)
-                // hide/clear step above already blanked this window's
-                // content for the capture, so it must be explicitly
-                // redrawn with whatever was ALREADY displayed, or the
-                // held highlight would just vanish instead of staying
-                // solid (defeating the entire point of this policy).
-                // Under capture exclusion, the window was never touched
-                // this tick, so there's nothing to redo.
-                if (!usingCaptureExclusion && _displayedSignature.Length > 0)
+                if (!isNewResultEmpty && newSignature == _displayedSignature)
                 {
+                    // REVIEW FIX (blocking, reviewer verdict on 62b3091):
+                    // "same signature" only means "same SET OF OCR-RELATIVE
+                    // ROW INDICES" (see HighlightSignature's own doc) — it
+                    // does NOT mean the pixel geometry is still accurate.
+                    // A scroll that happens to leave the SAME row index
+                    // zero-flagged is a genuinely DIFFERENT row now on
+                    // screen; redrawing the OLD frozen _displayed*Dip here
+                    // would silently point the highlight at the wrong row
+                    // indefinitely — a "stable but silently wrong" bug,
+                    // arguably worse than the flashing this policy exists
+                    // to fix. Always redraw with THIS TICK's freshly
+                    // computed geometry (already sitting right here in
+                    // redBoxesDip/catalogHighlights) whenever it's
+                    // non-empty and matches what's displayed, and refresh
+                    // the retained copy too, so a LATER empty-tick hold
+                    // (the branch below) redraws up-to-date geometry, not
+                    // a stale snapshot from further back.
+                    DrawAndShow(overlay, target.Value, scale, redBoxesDip, catalogHighlights);
+                    _displayedRedBoxesDip = redBoxesDip;
+                    _displayedCatalogHighlightsDip = catalogHighlights;
+                }
+                else if (!usingCaptureExclusion && _displayedSignature.Length > 0)
+                {
+                    // Either a genuinely EMPTY tick (no fresh geometry
+                    // exists to draw at all — the only case that legitimately
+                    // needs historical geometry), or a NEW-but-not-yet-
+                    // confirmed candidate (HighlightStabilityPolicy
+                    // deliberately withholds it until it repeats — see
+                    // RequiredConsecutiveTicksToAdoptChange; drawing ITS
+                    // fresh geometry here would silently adopt it a tick
+                    // early, defeating the debounce). Both legitimately
+                    // redraw the retained, already-displayed geometry.
+                    // Only needed in the fallback path, which already
+                    // cleared the window's content for the capture above.
                     DrawAndShow(overlay, target.Value, scale, _displayedRedBoxesDip, _displayedCatalogHighlightsDip);
                 }
                 break;
