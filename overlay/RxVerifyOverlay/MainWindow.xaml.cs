@@ -272,6 +272,14 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // mode) — Window.Close() doesn't require Show() to have been
         // called first, and still raises Closed either way.
         _integratedOverlay.CloseApplicationRequested += (_, _) => Close();
+        // Branch fix/feedback-from-ribbon: the control box's Feedback/
+        // update-dot buttons — same OpenFeedbackWindow/TriggerUpdate
+        // helpers this window's own Feedback button and Update banner
+        // button call (see OnFeedbackClick/OnUpdateClick below), so
+        // Integrated mode (where the ribbon, not this window, is the only
+        // visible surface) reaches the identical dialog/update path.
+        _integratedOverlay.FeedbackRequested += (_, _) => OpenFeedbackWindow();
+        _integratedOverlay.UpdateRequested += (_, _) => TriggerUpdate();
         // "Report error…" (verdict-tooltips-reports branch): the boxes
         // window's per-field context menu bubbles up through the
         // coordinator to here, the one place that knows how to build a
@@ -495,7 +503,16 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// stacking two Feedback windows (or one of each) is unsafe the way a
     /// stacked ReportErrorWindow was.
     /// </summary>
-    private void OnFeedbackClick(object sender, RoutedEventArgs e)
+    private void OnFeedbackClick(object sender, RoutedEventArgs e) => OpenFeedbackWindow();
+
+    /// <summary>
+    /// Branch fix/feedback-from-ribbon: extracted out of OnFeedbackClick
+    /// so the control box's own Feedback button (Integrated mode — see
+    /// _integratedOverlay.FeedbackRequested above) can open the exact
+    /// same dialog without duplicating the ContentRendered/Topmost-pulse
+    /// dance. Behavior unchanged from the original OnFeedbackClick body.
+    /// </summary>
+    private void OpenFeedbackWindow()
     {
         var dialog = new FeedbackWindow(ResolveEngineBuildString(), AppDiagnostics.GetCommitSha(), _settings);
         dialog.ContentRendered += (_, _) =>
@@ -522,10 +539,14 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         ApplyUpdateBannerState();
     }
 
-    /// <summary>Shows/hides UpdateBannerBorder to match _updateService.LastKnownUpdateAvailable — the one place that reads that property into the UI, so CheckForUpdateAsync (background) and OnUpdateClick (foreground, belt-and-suspenders after a click) both stay in sync with the same source of truth.</summary>
+    /// <summary>
+    /// Shows/hides UpdateBannerBorder to match _updateService.LastKnownUpdateAvailable — the one place that reads that property into the UI, so CheckForUpdateAsync (background) and OnUpdateClick (foreground, belt-and-suspenders after a click) both stay in sync with the same source of truth.
+    /// Branch fix/feedback-from-ribbon: also pushes the same value to _integratedOverlay.SetUpdateAvailable, so the control box's ribbon dot (the ONLY update surface visible in Integrated mode — see that method's own doc) can never drift from this banner.
+    /// </summary>
     private void ApplyUpdateBannerState()
     {
         UpdateBannerBorder.Visibility = _updateService.LastKnownUpdateAvailable ? Visibility.Visible : Visibility.Collapsed;
+        _integratedOverlay.SetUpdateAvailable(_updateService.LastKnownUpdateAvailable);
     }
 
     /// <summary>
@@ -539,7 +560,16 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// workstation that never had a report key configured updates exactly
     /// the same way it always could via the manual one-liner.
     /// </summary>
-    private void OnUpdateClick(object sender, RoutedEventArgs e)
+    private void OnUpdateClick(object sender, RoutedEventArgs e) => TriggerUpdate();
+
+    /// <summary>
+    /// Branch fix/feedback-from-ribbon: extracted out of OnUpdateClick so
+    /// the control box's own update dot (Integrated mode — see
+    /// _integratedOverlay.UpdateRequested above) can trigger the exact
+    /// same one-click update. Behavior unchanged from the original
+    /// OnUpdateClick body.
+    /// </summary>
+    private void TriggerUpdate()
     {
         try
         {

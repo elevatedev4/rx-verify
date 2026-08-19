@@ -7,7 +7,7 @@
         ShowInTaskbar="False"
         Topmost="True"
         WindowStartupLocation="Manual"
-        Width="420" Height="76"
+        Width="450" Height="76"
         Background="#FFF3F3F3"
         BorderBrush="#FFC8C8C8"
         BorderThickness="1"
@@ -35,14 +35,34 @@
 
         LAYOUT (round 9, owner: "rearrange the display to make it user
         friendly and minimal"): collapsed from 3 rows to 2 — row 1 is
-        status + icon-ish action buttons (Refresh/Full view/Copy logs),
-        row 2 is the Method/View toggle groups (visually grouped by a
-        thin border instead of "Source:"/"View:" text labels, which
-        just restated what the toggle content already says) plus the
-        Hide checkbox. Every control that was clickable before still
-        is — nothing here removes functionality, only chrome. Row 1
-        reserves right margin for CloseButton's corner overlay (below)
-        so the two never overlap.
+        status + icon-ish action buttons (Refresh/Feedback/Full view/
+        Copy logs), row 2 is the Method/View toggle groups (visually
+        grouped by a thin border instead of "Source:"/"View:" text
+        labels, which just restated what the toggle content already
+        says) plus the Hide checkbox. Every control that was clickable
+        before still is — nothing here removes functionality, only
+        chrome. Row 1 reserves right margin for CloseButton's corner
+        overlay (below) so the two never overlap.
+
+        FEEDBACK + UPDATE REACHABILITY (branch fix/feedback-from-ribbon,
+        Will verbatim: "I can't see anything on the overlay currently for
+        feedback"): MainWindow.xaml's Feedback button and Update-ready
+        banner are both invisible in Integrated mode — the pharmacist's
+        DEFAULT mode, where this ribbon (not MainWindow) is the only
+        surface up over PioneerRx. This window stays purely event-driven
+        (see the class doc above) for both additions: FeedbackButton
+        raises FeedbackRequested, UpdateDotButton raises UpdateRequested
+        — MainWindow.xaml.cs (via IntegratedOverlayCoordinator, same
+        relay pattern as every other *Requested event here) is what
+        actually opens Integrated/FeedbackWindow or launches the update,
+        reusing the exact same OpenFeedbackWindow/TriggerUpdate helpers
+        its own Feedback button and Update banner call. UpdateDotButton
+        is Collapsed by default and only takes up row-1 width when
+        UpdateService.LastKnownUpdateAvailable is actually true (see
+        code-behind SetUpdateAvailable) — Width grew 420 -> 450 (+30, the
+        minimum needed) to fit the new always-present FeedbackButton
+        icon without crowding StatusTimeText further; the dot itself
+        costs nothing extra day-to-day.
 
         REVIEW FIX (focus-stealing): ShowActivated="False" plus
         WS_EX_NOACTIVATE (applied in code-behind's OnSourceInitialized)
@@ -146,6 +166,41 @@
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                     <!-- Item 1: same Refresh action as the separate window's own Refresh button — icon-ish glyph, aligned/sized consistently with CloseButton's corner glyph below -->
                     <Button x:Name="RefreshButton" Content="&#8635;" FontSize="12" Padding="3,0" Margin="0,0,4,0" Click="OnRefreshClick" ToolTip="Refresh" />
+                    <!--
+                        Branch fix/feedback-from-ribbon: compact icon-only
+                        Feedback affordance (envelope glyph, same
+                        icon-button sizing as RefreshButton above) — this
+                        ribbon is the only surface Will sees in Integrated
+                        mode, so MainWindow's own Feedback button was
+                        unreachable. Opens the exact same
+                        Integrated/FeedbackWindow as MainWindow's button
+                        (see FeedbackRequested in the code-behind and
+                        MainWindow.xaml.cs's OpenFeedbackWindow helper).
+                    -->
+                    <Button x:Name="FeedbackButton" Content="&#9993;" FontSize="12" Padding="3,0" Margin="0,0,4,0" Click="OnFeedbackClick" ToolTip="Send feedback" />
+                    <!--
+                        Branch fix/feedback-from-ribbon: minimal update
+                        indicator — a small dot, Collapsed by default (see
+                        code-behind SetUpdateAvailable, driven by
+                        UpdateService.LastKnownUpdateAvailable via
+                        IntegratedOverlayCoordinator.SetUpdateAvailable)
+                        so it costs zero row width until an update is
+                        actually available. Click triggers the same
+                        one-click bootstrap-and-exit update as
+                        MainWindow's "Update ready" banner button (see
+                        UpdateRequested / MainWindow.xaml.cs's
+                        TriggerUpdate helper). Green fill matches the
+                        banner's own accent color for the same signal.
+                    -->
+                    <Button x:Name="UpdateDotButton" Width="10" Height="10" Padding="0" Margin="0,0,6,0"
+                            VerticalAlignment="Center" Click="OnUpdateDotClick" Cursor="Hand"
+                            ToolTip="Update ready — click to update" Visibility="Collapsed">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Ellipse Fill="#FF2E7D32" Stroke="#FF1B3A1E" StrokeThickness="1" />
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
                     <Button x:Name="OpenSeparateButton" Content="Full view" Margin="0,0,4,0" Click="OnOpenSeparateClick" ToolTip="Open full view" />
                     <!-- 2026-08-13 (RXVERIFY-TROUBLESHOOT): the PHI-including "Copy" button (CopyLogsButton, redactPatient: false) was removed per owner request; "Copy (safe)" below is the only copy action now. -->
                     <Button x:Name="CopyLogsNoHipaaButton" Content="Copy (safe)" Click="OnCopyLogsNoHipaaClick" ToolTip="Copy logs (no HIPAA)" />

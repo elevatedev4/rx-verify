@@ -156,6 +156,9 @@ public sealed class IntegratedOverlayCoordinator
     private bool _controlBoxShown;
     private bool _boxesShown;
 
+    /// <summary>Branch fix/feedback-from-ribbon: last value pushed via SetUpdateAvailable — kept here (not just in _controlBox) so EnsureControlBox can apply the current state to a box created AFTER an update was already discovered. See SetUpdateAvailable's own doc.</summary>
+    private bool _updateAvailable;
+
     /// <summary>
     /// REVIEW FIX (invisible-app trap): true while the separate window has
     /// been revealed as a FALLBACK because PioneerRx isn't attached at all
@@ -234,6 +237,12 @@ public sealed class IntegratedOverlayCoordinator
 
     /// <summary>Item 8: raised when the control box's corner X button is clicked — MainWindow.xaml.cs handles this by calling its own Close(), routing through its EXISTING Closed cleanup path rather than this coordinator duplicating any shutdown logic.</summary>
     public event EventHandler? CloseApplicationRequested;
+
+    /// <summary>Branch fix/feedback-from-ribbon: relays ControlBoxWindow.FeedbackRequested — MainWindow.xaml.cs subscribes to open Integrated/FeedbackWindow via its OpenFeedbackWindow helper, same dialog its own Feedback button opens.</summary>
+    public event EventHandler? FeedbackRequested;
+
+    /// <summary>Branch fix/feedback-from-ribbon: relays ControlBoxWindow.UpdateRequested — MainWindow.xaml.cs subscribes to launch the update via its TriggerUpdate helper, same one-click path as its own "Update ready" banner button.</summary>
+    public event EventHandler? UpdateRequested;
 
     /// <summary>Raised when the classic separate window (MainWindow) should become visible — either DisplayMode switched to Separate, or the control box's "Open full view" button was clicked (which does NOT change DisplayMode — see SetDisplayMode).</summary>
     public event EventHandler? ShowSeparateWindowRequested;
@@ -337,6 +346,23 @@ public sealed class IntegratedOverlayCoordinator
         // OrderAssist-related state this class ever touches.
         _controlBox?.SetOrderAssistState(_settings.OrderAssistEnabled);
         ToggleStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Branch fix/feedback-from-ribbon: mirrors _updateService.LastKnownUpdateAvailable
+    /// (owned by MainWindow.xaml.cs — this coordinator has no update-check
+    /// logic of its own, same "never touches things outside its own
+    /// layer" posture as everything else here) onto the control box's
+    /// UpdateDotButton. Called from MainWindow.xaml.cs's ApplyUpdateBannerState
+    /// every time that method runs, so the ribbon dot and the MainWindow
+    /// banner can never drift out of sync. Stores the value even when
+    /// _controlBox doesn't exist yet — see EnsureControlBox's own
+    /// SetUpdateAvailable call for why.
+    /// </summary>
+    public void SetUpdateAvailable(bool available)
+    {
+        _updateAvailable = available;
+        _controlBox?.SetUpdateAvailable(available);
     }
 
     /// <summary>
@@ -885,6 +911,8 @@ public sealed class IntegratedOverlayCoordinator
         _controlBox.RefreshRequested += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.CloseApplicationRequested += (_, _) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.OrderAssistToggleRequested += (_, enabled) => OrderAssistToggleRequested?.Invoke(this, enabled);
+        _controlBox.FeedbackRequested += (_, _) => FeedbackRequested?.Invoke(this, EventArgs.Empty);
+        _controlBox.UpdateRequested += (_, _) => UpdateRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.HideOverlayToggleRequested += (_, hidden) =>
         {
             // ITEM 2: update the session-only flag and re-evaluate
@@ -896,6 +924,14 @@ public sealed class IntegratedOverlayCoordinator
             Tick();
         };
         SyncToggles();
+        // Branch fix/feedback-from-ribbon: a freshly-created control box
+        // starts with UpdateDotButton Collapsed (its own XAML default) —
+        // push the coordinator's already-known state into it immediately,
+        // same "external sync on construction" posture as SyncToggles()
+        // just above, so an update discovered BEFORE the box was ever
+        // shown (e.g. CheckForUpdateAsync's startup call, which runs
+        // before Integrated mode's box is necessarily up) isn't lost.
+        _controlBox.SetUpdateAvailable(_updateAvailable);
         return _controlBox;
     }
 

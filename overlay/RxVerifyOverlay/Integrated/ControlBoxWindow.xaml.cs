@@ -107,6 +107,12 @@ public sealed partial class ControlBoxWindow : Window
     /// <summary>Item 8: the corner X button — MainWindow.xaml.cs handles this by calling its own Close(), routing through its EXISTING Closed cleanup (engine/watcher dispose, IntegratedOverlayCoordinator.Shutdown(), Application.Current.Shutdown()) rather than duplicating any of that here.</summary>
     public event EventHandler? CloseApplicationRequested;
 
+    /// <summary>Branch fix/feedback-from-ribbon: raised by FeedbackButton — MainWindow.xaml.cs (via IntegratedOverlayCoordinator's relay of the same name) opens Integrated/FeedbackWindow, the exact same dialog its own Feedback button opens (see MainWindow.xaml.cs's OpenFeedbackWindow helper). This window stays purely event-driven per the class doc — it never constructs FeedbackWindow itself.</summary>
+    public event EventHandler? FeedbackRequested;
+
+    /// <summary>Branch fix/feedback-from-ribbon: raised by UpdateDotButton (only visible/clickable while SetUpdateAvailable(true) — see that method) — MainWindow.xaml.cs (via IntegratedOverlayCoordinator's relay) launches the same one-click update as its own "Update ready" banner button (MainWindow.xaml.cs's TriggerUpdate helper).</summary>
+    public event EventHandler? UpdateRequested;
+
     /// <summary>
     /// Item 2: raised with the NEW hidden state whenever HideOverlayCheckBox
     /// is clicked directly, or the `\` hotkey fires (which flips the
@@ -370,6 +376,25 @@ public sealed partial class ControlBoxWindow : Window
 
     /// <summary>Item 1: same Refresh action as the separate window's own Refresh button — MainWindow.xaml.cs handles this identically (SafeRefreshAsync + SafeTickIntegratedOverlay) via _integratedOverlay.RefreshRequested.</summary>
     private void OnRefreshClick(object sender, RoutedEventArgs e) => RefreshRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>Branch fix/feedback-from-ribbon: see FeedbackRequested's own doc.</summary>
+    private void OnFeedbackClick(object sender, RoutedEventArgs e) => FeedbackRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>Branch fix/feedback-from-ribbon: see UpdateRequested's own doc.</summary>
+    private void OnUpdateDotClick(object sender, RoutedEventArgs e) => UpdateRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>
+    /// Branch fix/feedback-from-ribbon: shows/hides UpdateDotButton — the
+    /// ribbon's only reflection of UpdateService.LastKnownUpdateAvailable
+    /// (see IntegratedOverlayCoordinator.SetUpdateAvailable, which calls
+    /// this both on every CheckForUpdateAsync result and, defensively,
+    /// right after this window is constructed — same "external sync"
+    /// posture as SetToggleState/SetOrderAssistState above). Purely a
+    /// Visibility flip — no state owned here, matching the rest of this
+    /// window's event-driven design.
+    /// </summary>
+    public void SetUpdateAvailable(bool available) =>
+        UpdateDotButton.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>Item 2: a REAL pharmacist click on the checkbox (not the hotkey — see OnHotkeyPressed, and not SetToggleState-style programmatic sync, which none exists for this checkbox since there's only one UI surface for it).</summary>
     private void OnHideOverlayToggled(object sender, RoutedEventArgs e)
