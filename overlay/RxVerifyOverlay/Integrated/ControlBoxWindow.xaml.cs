@@ -264,10 +264,24 @@ public sealed partial class ControlBoxWindow : Window
     /// content at the SINK, not just rely on the SOURCE remembering to
     /// skip the call.
     /// </summary>
+    /// <summary>
+    /// 2026-08-19 (Will verbatim: "Just say 'waiting' instead of the long
+    /// string about waiting for a precheck. The current string is hiding
+    /// all the buttons."): displays a SHORTENED rendering of
+    /// <paramref name="statusText"/> (RibbonStatusTextShortener.Shorten —
+    /// see that class's own doc for the exact root cause this closes),
+    /// with the full, untouched text as this element's ToolTip so nothing
+    /// is actually lost, just not crowding the row. <paramref name="statusText"/>
+    /// itself is still the same full OverlayViewModel.StatusMessage
+    /// MainWindow.xaml's own (separate, much wider) status line binds to
+    /// directly and unshortened — this method is the ONLY place the
+    /// shortened version exists.
+    /// </summary>
     public void SetStatusMessage(string statusText)
     {
         if (_isOrderModeActive) return;
-        StatusTimeText.Text = statusText;
+        StatusTimeText.Text = RibbonStatusTextShortener.Shorten(statusText);
+        StatusTimeText.ToolTip = string.IsNullOrEmpty(statusText) ? null : statusText;
     }
 
     /// <summary>

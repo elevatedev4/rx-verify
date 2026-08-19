@@ -216,7 +216,25 @@
                     the counter) removed so it isn't left with a dangling
                     gap.
                 -->
-                <TextBlock x:Name="StatusTimeText" Text="" DockPanel.Dock="Left" Foreground="#FF777777" FontSize="9" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <!--
+                    2026-08-19 (Will verbatim: "Just say 'waiting' instead
+                    of the long string about waiting for a precheck. The
+                    current string is hiding all the buttons."): MaxWidth
+                    added here — TextTrimming="CharacterEllipsis" already
+                    existed but never actually did anything, since a
+                    Dock=Left child with no Width/MaxWidth in a
+                    LastChildFill="False" DockPanel just grows to fit its
+                    full text, pushing the Dock=Right icon buttons
+                    (Refresh/Feedback/Settings) past this window's own
+                    fixed 280px edge on a long string — exactly "hiding all
+                    the buttons". Code-behind's SetStatusMessage now also
+                    shortens the common status strings up front (see
+                    RibbonStatusTextShortener) so this MaxWidth is a
+                    belt-and-suspenders safety net for anything that
+                    mapping doesn't cover, not the only thing standing
+                    between a long string and the icon row.
+                -->
+                <TextBlock x:Name="StatusTimeText" Text="" DockPanel.Dock="Left" Foreground="#FF777777" FontSize="9" VerticalAlignment="Center" MaxWidth="90" TextTrimming="CharacterEllipsis" />
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                     <!-- Item 1: same Refresh action as the separate window's own Refresh button — icon-ish glyph, aligned/sized consistently with CloseButton's corner glyph below -->
                     <Button x:Name="RefreshButton" Content="&#8635;" FontSize="12" Padding="3,0" Margin="0,0,4,0" Click="OnRefreshClick" ToolTip="Refresh" />
