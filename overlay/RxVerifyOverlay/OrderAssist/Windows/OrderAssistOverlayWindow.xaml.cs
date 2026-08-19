@@ -72,6 +72,32 @@ public sealed partial class OrderAssistOverlayWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    /// <summary>
+    /// ROUND 2 (W-T85, Will verbatim: "the items are flashing a bunch
+    /// instead of staying solid") — same technique MainWindow.xaml.cs
+    /// already uses for the verify flow's own self-occlusion problem (see
+    /// that file's OnSourceInitialized/WdaExcludeFromCapture doc): asking
+    /// Windows itself to omit this window from any GDI screen capture,
+    /// instead of hiding/showing the actual window around every capture.
+    /// OrderAssistCoordinator.TickAsync previously did an UNCONDITIONAL
+    /// HideAndClear() + ~30ms-plus-OCR-latency delay + re-Show() EVERY
+    /// single ~1s tick (the self-occlusion guard — a red/green box left on
+    /// screen during a capture would get baked into the OCR'd pixels) —
+    /// that's a real, visible on/off pulse roughly once a second, which is
+    /// exactly what "flashing instead of staying solid" describes. Once
+    /// this exclusion is active, TickAsync skips that hide/show round
+    /// trip entirely (mirrors MainWindow.HideForCaptureAsync's own
+    /// early-return) and the window can just stay continuously visible.
+    /// </summary>
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+
+    /// <summary>Requires Windows 10 2004+ (build 19041) — same minimum this project already targets (see RxVerifyOverlay.csproj TargetFramework) and the same constant MainWindow.xaml.cs already uses.</summary>
+    private const uint WdaExcludeFromCapture = 0x00000011;
+
+    /// <summary>True once SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) has been applied and returned success — see IsExcludedFromCapture.</summary>
+    private bool _excludedFromCapture;
+
     // Filled (not just outlined) boxes at low opacity — legible at a
     // glance without obscuring the OCR'd text/numbers underneath. The
     // green row gets a solid border on top of its fill so it reads as
@@ -119,7 +145,27 @@ public sealed partial class OrderAssistOverlayWindow : Window
     {
         _hwnd = new WindowInteropHelper(this).Handle;
         ForceHitTestTransparent();
+
+        try
+        {
+            _excludedFromCapture = SetWindowDisplayAffinity(_hwnd, WdaExcludeFromCapture);
+        }
+        catch
+        {
+            _excludedFromCapture = false;
+        }
     }
+
+    /// <summary>
+    /// See SetWindowDisplayAffinity's own doc — OrderAssistCoordinator.
+    /// TickAsync checks this to decide whether it can skip the
+    /// hide-before-capture round trip entirely. False (the safe default)
+    /// until OnSourceInitialized has actually run and confirmed the call
+    /// succeeded — a caller checking this before the window's HWND exists,
+    /// or on an OS older than Windows 10 2004, correctly falls back to the
+    /// hide/show path.
+    /// </summary>
+    public bool IsExcludedFromCapture => _excludedFromCapture;
 
     /// <summary>Always click-through — see class doc. A no-op until the native HWND exists; called again right before every Show() (same belt-and-suspenders posture as IntegratedBoxesWindow.ForceHitTestTransparent) so this window can never surface non-transparent regardless of state history.</summary>
     public void ForceHitTestTransparent()
