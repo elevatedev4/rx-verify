@@ -49,7 +49,19 @@ namespace RxVerifyOverlay.OrderAssist;
 /// </summary>
 public sealed class OrderAssistCoordinator
 {
-    private const int TimerIntervalMs = 1000;
+    /// <summary>
+    /// ROUND 3 (Will verbatim: "Need to have a faster update time"). Was
+    /// 1000ms (round 1/2) — halved. A capture+OCR pass genuinely taking
+    /// longer than this just skips a tick (see SafeTickAsync's own
+    /// reentrancy-guard doc, unchanged), so this is safe to lower without
+    /// risking overlapping ticks; it only changes how often a fresh
+    /// attempt starts. Combined with HighlightStabilityPolicy's round-3
+    /// "clear immediately + Processing" redesign (2 ticks to confirm a
+    /// change, now 2 x 500ms = ~1s instead of 2 x 1000ms = ~2s), this is
+    /// the other half of "faster update time" — the debounce COUNT didn't
+    /// change, the WALL-CLOCK time it costs did.
+    /// </summary>
+    private const int TimerIntervalMs = 500;
 
     /// <summary>Same settle delay as the verify flow's own self-occlusion guard (Ocr/IOverlayVisibilityController.cs HideForCaptureAsync) — DWM composition isn't synchronous with a Hide() call.</summary>
     private const int CaptureSettleDelayMs = 30;
@@ -97,29 +109,34 @@ public sealed class OrderAssistCoordinator
 
     // ------------------------------------------------------------------
     // HIGHLIGHT STABILITY (ROUND 2, W-T85: "the items are flashing a
-    // bunch instead of staying solid") — see HighlightStabilityPolicy's
-    // own doc for the two jobs these fields back: holding a displayed
-    // result through a transient empty tick, and requiring a genuinely
-    // different result to repeat before adopting it. All reset together
-    // (ResetHighlightStability) whenever "the window changed" per the
-    // branch brief's own wording — target lost entirely, target KIND
-    // switched, or Order Assist toggled off — so a stale signature from a
-    // completely different screen can never suppress/delay a fresh
-    // result on a new one.
+    // bunch instead of staying solid"; ROUND 3, Will: "Make sure the
+    // highlighted items go away as soon as the screen is closed, or if
+    // the order changes. Need to have a faster update time. It's ok to
+    // clear it quickly and add a 'Processing' by the sorted by rebate
+    // notice if we're waiting on analysis.") — see HighlightStabilityPolicy's
+    // own doc for the CLEAR-then-confirm redesign these fields now back:
+    // a changed result is cleared from screen the SAME tick it's first
+    // noticed (no more holding stale content), and only re-adopted once
+    // it repeats. All reset together (ResetHighlightStability) whenever
+    // "the window changed" per the branch brief's own wording — target
+    // lost entirely, target KIND switched, or Order Assist toggled off —
+    // so a stale signature from a completely different screen can never
+    // suppress/delay a fresh result on a new one.
+    //
+    // Round 3 also DROPS the old _displayedRedBoxesDip/_displayedCatalogHighlightsDip
+    // retained-geometry fields entirely: round 2 needed them to redraw
+    // something after the self-occlusion hide/clear step even when a tick
+    // held its PREVIOUS answer; round 3 never holds a previous answer
+    // through an unconfirmed tick (Processing draws nothing but the
+    // indicator), so the self-occlusion fallback path's post-capture
+    // redraw always has THIS tick's own freshly computed geometry to use
+    // instead — see TickAsync's Display case.
     // ------------------------------------------------------------------
 
-    /// <summary>HighlightSignature of whatever is CURRENTLY displayed — "" means nothing is shown. See HighlightStabilityPolicy.Decide's own param docs.</summary>
+    /// <summary>HighlightSignature of whatever is CURRENTLY adopted/displayed — "" means nothing is shown. See HighlightStabilityPolicy.Decide's own param docs.</summary>
     private string _displayedSignature = "";
 
-    /// <summary>The actual DIP-space geometry currently displayed — retained so a KeepDisplayed decision can redraw it after the self-occlusion hide/clear step (only needed on the fallback path where OrderAssistOverlayWindow.IsExcludedFromCapture is false; see TickAsync).</summary>
-    private IReadOnlyList<DipRect> _displayedRedBoxesDip = Array.Empty<DipRect>();
-
-    private CatalogHighlights? _displayedCatalogHighlightsDip;
-
-    /// <summary>How many CONSECUTIVE ticks immediately before this one computed an empty result — see HighlightStabilityPolicy.Decide's own param doc.</summary>
-    private int _consecutiveEmptyTicks;
-
-    /// <summary>The signature most recently proposed as a REPLACEMENT for _displayedSignature (non-empty, different from it) — reset to "" the instant a tick proposes something else, or matches what's displayed.</summary>
+    /// <summary>The signature most recently proposed as a REPLACEMENT for _displayedSignature, still awaiting confirmation — see HighlightStabilityPolicy.Decide's own param docs. "" whenever nothing is pending.</summary>
     private string _pendingSignature = "";
 
     /// <summary>How many CONSECUTIVE ticks have now proposed _pendingSignature — see HighlightStabilityPolicy.Decide's own param doc.</summary>
@@ -302,17 +319,21 @@ public sealed class OrderAssistCoordinator
 
         using var bitmap = EscriptImageCapture.CaptureRegion(target.Value.Bounds);
 
-        // ROUND 2 (W-T85 bug 2, Will verbatim: "The analysis is also
-        // skipping whatever row is highlighted (usually the first row
-        // starts highlighted, as a dark blue)") — see
-        // SelectionRowColorDetector's own ROOT CAUSE doc. Normalizes
-        // white-on-selection-blue rows to normal dark-on-light contrast
-        // BEFORE OCR ever sees them, for BOTH target kinds (a no-op when
-        // no selection band is present this tick). Logging is best-effort
-        // and throttled the same "log on change" way as every other
-        // diagnostic in this class — see LogSelectionBandsIfChanged.
-        var selectionBands = SelectionRowNormalizer.NormalizeInPlace(bitmap);
-        LogSelectionBandsIfChanged(selectionBands);
+        // ROUND 3 (repeat complaint — see Ocr/RowHighlightColorDetector's
+        // own ROOT CAUSE doc: round 2's blue-only detector is replaced by a
+        // hue-agnostic one covering any genuinely colored row fill, not
+        // just one specific unverified blue). Binarizes any highlighted
+        // row band to normal dark-text-on-white contrast BEFORE OCR ever
+        // sees it, for BOTH target kinds (a no-op when no highlighted band
+        // is present this tick) — fixes the Catalog Substitution
+        // blue-first-row skip, a McKesson-yellow-flagged row skip, AND
+        // (same mechanism) a Create Recommended Orders row put into the
+        // same kind of selection/focus highlight while its Order Quantity
+        // cell is being edited. Logging is best-effort and throttled the
+        // same "log on change" way as every other diagnostic in this class
+        // — see LogSelectionBandsIfChanged.
+        var highlightBands = RowHighlightNormalizer.NormalizeInPlace(bitmap);
+        LogSelectionBandsIfChanged(highlightBands);
 
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
 
@@ -320,6 +341,7 @@ public sealed class OrderAssistCoordinator
 
         var redBoxesDip = new List<DipRect>();
         CatalogHighlights? catalogHighlights = null;
+        DipRect? processingAnchorDip = null;
         var newSignature = "";
 
         switch (target.Value.Kind)
@@ -336,6 +358,16 @@ public sealed class OrderAssistCoordinator
             case OrderAssistWindowKind.CatalogSubstitution:
                 var annotations = CatalogSubstitutionScanner.Analyze(ocrResult.Words);
                 catalogHighlights = ToDip(annotations, scale);
+                if (annotations.CostColumnHeaderAnchor is { } costAnchor)
+                {
+                    // Round 3's "Processing" indicator anchor — see
+                    // CatalogHighlights.ProcessingAnchorDip's own doc.
+                    // Deliberately computed from THIS tick's fresh
+                    // annotations regardless of the stability decision
+                    // below, so it's available even on a tick whose
+                    // SAVINGS analysis itself is still debouncing.
+                    processingAnchorDip = ToDip(costAnchor.Left, costAnchor.Top, costAnchor.Right, costAnchor.Top, scale);
+                }
                 newSignature = HighlightSignature.ForCatalogAnnotations(annotations);
                 break;
         }
@@ -351,115 +383,67 @@ public sealed class OrderAssistCoordinator
         // future tick left to correct it.
         if (!TickGenerationGate.IsStillCurrent(tickGeneration, _generation)) return;
 
-        // HIGHLIGHT STABILITY (ROUND 2, W-T85 bug 3: "the items are
-        // flashing a bunch instead of staying solid") — see
-        // HighlightStabilityPolicy's own doc for the full reasoning. This
-        // decision governs WHICH result actually reaches the overlay;
-        // note it never affects the diagnostic-logging path below, which
-        // still fires on every empty tick exactly as before.
-        var decision = HighlightStabilityPolicy.Decide(newSignature, _displayedSignature, _consecutiveEmptyTicks, _pendingChangeStreak);
+        // HIGHLIGHT STABILITY (ROUND 2, W-T85 bug 3; ROUND 3 CLEAR-then-
+        // confirm redesign — see HighlightStabilityPolicy's own doc for
+        // the full reasoning). This decision governs WHICH result actually
+        // reaches the overlay; note it never affects the diagnostic-
+        // logging path below, which still fires on every empty tick
+        // exactly as before.
+        var outcome = HighlightStabilityPolicy.Decide(newSignature, _displayedSignature, _pendingSignature, _pendingChangeStreak);
+        _pendingSignature = outcome.PendingSignature;
+        _pendingChangeStreak = outcome.PendingStreak;
         var isNewResultEmpty = string.IsNullOrEmpty(newSignature);
 
         if (isNewResultEmpty)
         {
-            _consecutiveEmptyTicks++;
-            _pendingSignature = "";
-            _pendingChangeStreak = 0;
-        }
-        else
-        {
-            _consecutiveEmptyTicks = 0;
-            if (newSignature == _displayedSignature)
-            {
-                _pendingSignature = "";
-                _pendingChangeStreak = 0;
-            }
-            else if (newSignature == _pendingSignature)
-            {
-                _pendingChangeStreak++;
-            }
-            else
-            {
-                _pendingSignature = newSignature;
-                _pendingChangeStreak = 1;
-            }
-        }
-
-        if (isNewResultEmpty)
-        {
             // Nothing NEW to highlight this tick (e.g. no zero
-            // quantities, or no substitution meets the 25% bar) — could
-            // ALSO mean column resolution itself failed (a bad/partial
-            // OCR capture, or the window's actual header text doesn't
-            // match what this app expects) — see LogColumnDiagnosticsIfNeeded,
-            // which tells the two apart and only logs the latter. Fires
-            // regardless of the stability decision below (KeepDisplayed
-            // vs. Clear) — this diagnostic is about what THIS tick's OCR
-            // pass found, independent of what's still on screen from a
-            // held previous result.
+            // quantities, or no substitution row is cheaper than
+            // McKesson) — could ALSO mean column resolution itself failed
+            // (a bad/partial OCR capture, or the window's actual header
+            // text doesn't match what this app expects) — see
+            // LogColumnDiagnosticsIfNeeded, which tells the two apart and
+            // only logs the latter. Fires regardless of the stability
+            // decision below — this diagnostic is about what THIS tick's
+            // OCR pass found, independent of what's still on screen.
             LogColumnDiagnosticsIfNeeded(target.Value.Kind, ocrResult.Words);
         }
 
-        switch (decision)
+        switch (outcome.Decision)
         {
             case HighlightStabilityPolicy.Decision.Clear:
                 HideOverlayIfShown();
                 _displayedSignature = "";
-                _displayedRedBoxesDip = Array.Empty<DipRect>();
-                _displayedCatalogHighlightsDip = null;
                 break;
 
             case HighlightStabilityPolicy.Decision.Display:
                 DrawAndShow(overlay, target.Value, scale, redBoxesDip, catalogHighlights);
                 _displayedSignature = newSignature;
-                _displayedRedBoxesDip = redBoxesDip;
-                _displayedCatalogHighlightsDip = catalogHighlights;
                 break;
 
-            case HighlightStabilityPolicy.Decision.KeepDisplayed:
-                if (!isNewResultEmpty && newSignature == _displayedSignature)
-                {
-                    // REVIEW FIX (blocking, reviewer verdict on 62b3091):
-                    // "same signature" only means "same SET OF OCR-RELATIVE
-                    // ROW INDICES" (see HighlightSignature's own doc) — it
-                    // does NOT mean the pixel geometry is still accurate.
-                    // A scroll that happens to leave the SAME row index
-                    // zero-flagged is a genuinely DIFFERENT row now on
-                    // screen; redrawing the OLD frozen _displayed*Dip here
-                    // would silently point the highlight at the wrong row
-                    // indefinitely — a "stable but silently wrong" bug,
-                    // arguably worse than the flashing this policy exists
-                    // to fix. Always redraw with THIS TICK's freshly
-                    // computed geometry (already sitting right here in
-                    // redBoxesDip/catalogHighlights) whenever it's
-                    // non-empty and matches what's displayed, and refresh
-                    // the retained copy too, so a LATER empty-tick hold
-                    // (the branch below) redraws up-to-date geometry, not
-                    // a stale snapshot from further back.
-                    DrawAndShow(overlay, target.Value, scale, redBoxesDip, catalogHighlights);
-                    _displayedRedBoxesDip = redBoxesDip;
-                    _displayedCatalogHighlightsDip = catalogHighlights;
-                }
-                else if (!usingCaptureExclusion && _displayedSignature.Length > 0)
-                {
-                    // Either a genuinely EMPTY tick (no fresh geometry
-                    // exists to draw at all — the only case that legitimately
-                    // needs historical geometry), or a NEW-but-not-yet-
-                    // confirmed candidate (HighlightStabilityPolicy
-                    // deliberately withholds it until it repeats — see
-                    // RequiredConsecutiveTicksToAdoptChange; drawing ITS
-                    // fresh geometry here would silently adopt it a tick
-                    // early, defeating the debounce). Both legitimately
-                    // redraw the retained, already-displayed geometry.
-                    // Only needed in the fallback path, which already
-                    // cleared the window's content for the capture above.
-                    DrawAndShow(overlay, target.Value, scale, _displayedRedBoxesDip, _displayedCatalogHighlightsDip);
-                }
+            case HighlightStabilityPolicy.Decision.Processing:
+                // ROUND 3 (Will: "It's ok to clear it quickly and add a
+                // 'Processing' by the sorted by rebate notice if we're
+                // waiting on analysis") — never redraw the PREVIOUS
+                // (possibly stale) result here; the overlay was already
+                // hidden/cleared above (self-occlusion guard) or is about
+                // to show only the Processing indicator, never old
+                // content. _displayedSignature is deliberately left
+                // unchanged (see HighlightStabilityPolicy.Outcome's own
+                // doc) — it still tracks the last ADOPTED result, which a
+                // later tick may re-confirm instantly (see that class's
+                // own "flicker back" case) even though nothing is drawn
+                // right now.
+                var processingHighlights = processingAnchorDip is { } anchor
+                    ? new CatalogHighlights(
+                        Array.Empty<SavingsBadgeDip>(), null, null, null, null, null, null, false,
+                        anchor)
+                    : null;
+                DrawAndShow(overlay, target.Value, scale, Array.Empty<DipRect>(), processingHighlights);
                 break;
         }
     }
 
-    /// <summary>Repositions the overlay to the target window's current bounds and draws exactly the given highlights — the ONE place TickAsync actually mutates the overlay's visible content, called either with this tick's freshly computed result (Decision.Display) or a retained previous one being redrawn after a fallback-path hide/clear (Decision.KeepDisplayed) — see HighlightStabilityPolicy's own doc.</summary>
+    /// <summary>Repositions the overlay to the target window's current bounds and draws exactly the given highlights — the ONE place TickAsync actually mutates the overlay's visible content, called either with this tick's freshly computed, CONFIRMED result (Decision.Display) or an empty/Processing-only payload while a change is still debouncing (Decision.Processing) — see HighlightStabilityPolicy's own doc.</summary>
     private void DrawAndShow(OrderAssistOverlayWindow overlay, OrderAssistWindowLocator.TargetWindow target, double scale, IReadOnlyList<DipRect> redBoxesDip, CatalogHighlights? catalogHighlights)
     {
         // See OrderModeBottomInsetDip's own doc — the highlight window
@@ -512,22 +496,17 @@ public sealed class OrderAssistCoordinator
     /// sort badge's anchor is a zero-height rect (Top used for both Y
     /// bounds) since only its own top edge and the column's horizontal
     /// extent matter for placement — see OrderAssistOverlayWindow.AddSortBadge.
+    /// ProcessingAnchorDip is DELIBERATELY left at its default (null) here
+    /// — TickAsync computes that separately from annotations.CostColumnHeaderAnchor
+    /// and only attaches it to a stripped-down CatalogHighlights on an
+    /// actual Decision.Processing tick (see that switch case's own doc) —
+    /// this conversion is only ever used for a real, confirmed Display.
     /// </summary>
     private static CatalogHighlights ToDip(CatalogSubstitutionScanner.CatalogAnnotations annotations, double scale)
     {
-        DipRect? greenRowDip = null;
-        string? savingsLabel = null;
-        if (annotations.GreenHighlight is { } green)
-        {
-            greenRowDip = ToDip(green.Left, green.Top, green.Right, green.Bottom, scale);
-            savingsLabel = green.SavingsDisplay;
-        }
-
-        DipRect? yellowRowDip = null;
-        if (annotations.YellowHighlight is { } yellow)
-        {
-            yellowRowDip = ToDip(yellow.Left, yellow.Top, yellow.Right, yellow.Bottom, scale);
-        }
+        var savingsBadgesDip = annotations.SavingsBadges
+            .Select(b => new SavingsBadgeDip(ToDip(b.Left, b.Top, b.Right, b.Bottom, scale), b.SavingsDisplay, b.MeetsThreshold))
+            .ToList();
 
         DipRect? bestLargeDip = null;
         string? bestLargeLabel = null;
@@ -556,8 +535,7 @@ public sealed class OrderAssistCoordinator
         }
 
         return new CatalogHighlights(
-            greenRowDip, savingsLabel,
-            yellowRowDip,
+            savingsBadgesDip,
             bestLargeDip, bestLargeLabel,
             bestSmallDip, bestSmallLabel,
             sortBadgeAnchorDip, sortBadgeText, sortBadgeIsSorted);
@@ -583,9 +561,6 @@ public sealed class OrderAssistCoordinator
     private void ResetHighlightStability()
     {
         _displayedSignature = "";
-        _displayedRedBoxesDip = Array.Empty<DipRect>();
-        _displayedCatalogHighlightsDip = null;
-        _consecutiveEmptyTicks = 0;
         _pendingSignature = "";
         _pendingChangeStreak = 0;
         _lastTickKind = null;
@@ -649,15 +624,17 @@ public sealed class OrderAssistCoordinator
     /// DIFFERENT bad capture (different bands) does.
     /// </summary>
     /// <summary>
-    /// ROUND 2 (W-T85 bug 2) — best-effort, throttled diagnostic for
-    /// SelectionRowNormalizer's own bitmap preprocessing (see that class's
-    /// and SelectionRowColorDetector's own doc for why this exists: the
-    /// exact color bounds are an UNVERIFIED estimate, and this is what
-    /// proves or disproves the detector actually firing on Will's real
-    /// screen without another live-diagnosis round). Logs only the Y-range
-    /// count/list — never any OCR'd text, never a screenshot — so there is
-    /// nothing PHI-adjacent here at all, unlike the window-title/column-band
-    /// diagnostics elsewhere in this class.
+    /// ROUND 2 (W-T85 bug 2), ROUND 3 GENERALIZED — best-effort, throttled
+    /// diagnostic for RowHighlightNormalizer's own bitmap preprocessing
+    /// (see that class's and RowHighlightColorDetector's own doc for why
+    /// this exists: the exact chroma/luminance bounds are still an
+    /// UNVERIFIED estimate, and this is what proves or disproves the
+    /// detector actually firing — on ANY highlight color now, not just
+    /// blue selection — on Will's real screen without another
+    /// live-diagnosis round). Logs only the Y-range count/list — never any
+    /// OCR'd text, never a screenshot — so there is nothing PHI-adjacent
+    /// here at all, unlike the window-title/column-band diagnostics
+    /// elsewhere in this class.
     /// </summary>
     private void LogSelectionBandsIfChanged(IReadOnlyList<(int Top, int Bottom)> bands)
     {
@@ -666,8 +643,8 @@ public sealed class OrderAssistCoordinator
         _lastLoggedSelectionBandsSignature = signature;
 
         OcrLogger.LogTiming(bands.Count == 0
-            ? "OrderAssist: selection-band normalizer found 0 bands this tick"
-            : $"OrderAssist: selection-band normalizer inverted {bands.Count} band(s) this tick: [{signature}]");
+            ? "OrderAssist: row-highlight normalizer found 0 bands this tick"
+            : $"OrderAssist: row-highlight normalizer binarized {bands.Count} band(s) this tick: [{signature}]");
     }
 
     /// <summary>

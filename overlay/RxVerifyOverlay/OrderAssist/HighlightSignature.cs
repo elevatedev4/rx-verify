@@ -21,22 +21,36 @@ public static class HighlightSignature
             ? ""
             : string.Join(",", highlights.Select(h => h.RowIndex).OrderBy(i => i));
 
-    /// <summary>Every independently-fail-closed field of CatalogAnnotations folded into one key — see that record's own doc for why each is optional.</summary>
+    /// <summary>
+    /// Every independently-fail-closed field of CatalogAnnotations folded
+    /// into one key — see that record's own doc for why each is optional.
+    /// CostColumnHeaderAnchor is DELIBERATELY excluded: it's a positioning
+    /// helper for OrderAssistCoordinator's own "Processing" indicator (see
+    /// that record's own doc), never a highlight, so it must never affect
+    /// whether HighlightStabilityPolicy treats two ticks as "the same
+    /// result" or drive a Display/Clear decision on its own.
+    /// </summary>
     public static string ForCatalogAnnotations(CatalogSubstitutionScanner.CatalogAnnotations annotations)
     {
-        var isEmpty = annotations.GreenHighlight is null &&
-                      annotations.YellowHighlight is null &&
+        var isEmpty = annotations.SavingsBadges.Count == 0 &&
                       annotations.BestLargePackageMarker is null &&
                       annotations.BestSmallPackageMarker is null &&
                       annotations.SortIndicatorBadge is null;
         if (isEmpty) return "";
 
-        var green = annotations.GreenHighlight is { } g ? $"G{g.RowIndex}:{g.SavingsDisplay}" : "G-";
-        var yellow = annotations.YellowHighlight is { } y ? $"Y{y.RowIndex}" : "Y-";
+        // Order-independent (sorted by RowIndex — already the case for
+        // SubstitutionRecommender.EvaluateSavings' own output, but sorted
+        // again here defensively) so a tick that finds the same badges in
+        // a different iteration order still compares equal.
+        var savings = annotations.SavingsBadges.Count == 0
+            ? "V-"
+            : string.Join("+", annotations.SavingsBadges
+                .OrderBy(b => b.RowIndex)
+                .Select(b => $"V{b.RowIndex}:{(b.MeetsThreshold ? "G" : "Y")}:{b.SavingsDisplay}"));
         var bestLarge = annotations.BestLargePackageMarker is { } bl ? $"L{bl.RowIndex}" : "L-";
         var bestSmall = annotations.BestSmallPackageMarker is { } bs ? $"S{bs.RowIndex}" : "S-";
         var sortBadge = annotations.SortIndicatorBadge is { } badge ? $"B{badge.Text}:{badge.IsSorted}" : "B-";
 
-        return string.Join("|", green, yellow, bestLarge, bestSmall, sortBadge);
+        return string.Join("|", savings, bestLarge, bestSmall, sortBadge);
     }
 }
