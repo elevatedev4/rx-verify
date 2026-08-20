@@ -150,8 +150,8 @@ public class OrderHeaderBandRegressionTests
     {
         var annotations = CatalogSubstitutionScanner.Analyze(CatalogSubstitutionWordsWithChromeAboveHeader());
 
-        Assert.NotNull(annotations.GreenHighlight);
-        Assert.Equal(0, annotations.GreenHighlight!.RowIndex); // ANDA row, cheapest
+        var badge = Assert.Single(annotations.SavingsBadges);
+        Assert.Equal(0, badge.RowIndex); // ANDA row, cheapest
     }
 
     // ---- ROUND 2 (W-T85 bug 1): a FILTER-ROW chrome line that itself

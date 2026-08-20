@@ -1,23 +1,61 @@
-using System;
 using System.Collections.Generic;
 using System.Linq;
 using RxVerifyOverlay.OrderAssist.Parsing;
 
 namespace RxVerifyOverlay.OrderAssist.Decisions;
 
-/// <summary>Whether SubstitutionRecommender.Evaluate found a secondary item worth ordering instead of McKesson — see SubstitutionResult.</summary>
-public enum SubstitutionRecommendation
+/// <summary>Whether one row's savings badge (see <see cref="RowSavings"/>) clears the owner's savings threshold — governs the badge's color (green vs. yellow), never whether the badge shows at all.</summary>
+public enum SavingsTier
 {
-    None,
-    RecommendSecondary
+    /// <summary>Savings percent &gt;= the threshold — green badge.</summary>
+    AboveThreshold,
+
+    /// <summary>Cheaper than McKesson, but by less than the threshold — still shown (round 3 design change, see class doc), yellow badge.</summary>
+    BelowThreshold
 }
 
 /// <summary>
-/// The owner's McKesson-vs-cheaper-secondary rule (spec verbatim): find
-/// the cheapest McKesson item by Rebate Cost Per Unit and the cheapest
-/// secondary item by the same column; if the secondary represents a
-/// savings of 25% or more, recommend it (green highlight + % savings
-/// label) instead of the McKesson default.
+/// ROUND 3 REDESIGN (Will verbatim, two combined asks):
+///   1. "Make sure if it is less than our savings threshold, it should
+///      still show the analysis and not use green, but yellow and still
+///      show the %."
+///   2. "Always Calculate the savings for each item cheaper than mckesson
+///      and display it at the end of the row. Below our threshold, show in
+///      yellow, above show green. Don't highlight the whole row, just show
+///      it at the end."
+///
+/// This REPLACES round 1/2's "pick ONE cheapest secondary, recommend it
+/// only if it clears 25%, highlight its whole row green" model
+/// (SubstitutionRecommendation/SubstitutionResult/Evaluate) with a per-row
+/// list: every non-McKesson row that is cheaper than the cheapest McKesson
+/// row on screen gets its own savings badge, tiered by the threshold — not
+/// just the single cheapest one, and never gated on clearing the threshold
+/// to be shown at all. CatalogSubstitutionScanner turns each entry into a
+/// small end-of-row badge (see RowMarker/RowBounds) instead of a full-row
+/// fill — see OrderAssistOverlayWindow.AddSavingsLabel.
+///
+/// EDGE CASES (deliberate, same fail-closed posture as round 1):
+///   - A row with unparseable/blank cost text is EXCLUDED entirely — never
+///     treated as free/zero, never crashes.
+///   - No McKesson row with a readable, positive cost at all -&gt; no badges
+///     at all (nothing to compare against — round 3 drops round 1's "no
+///     McKesson option -&gt; recommend cheapest secondary with n/a savings"
+///     special case, since "cheaper than McKesson" is now the literal,
+///     per-row gate and that requires an actual McKesson baseline to mean
+///     anything).
+///   - Cheapest McKesson cost is exactly 0 -&gt; no badges (a savings
+///     percentage against a zero baseline is undefined/divide-by-zero, and
+///     a real $0 rebate cost is far more likely OCR noise than an actual
+///     free item).
+///   - A non-McKesson row whose cost is NOT strictly cheaper than the
+///     cheapest McKesson cost gets no badge at all (nothing to show —
+///     McKesson is already as good or better).
+///   - The threshold boundary is INCLUSIVE ("savings of 25% or more" — the
+///     owner's own wording, unchanged from round 1): exactly 25.0% is
+///     AboveThreshold (green).
+///   - Results are returned in RowIndex order (top-to-bottom, matching the
+///     grid's own reading order) — no other ordering is meaningful once
+///     every qualifying row gets its own badge.
 /// </summary>
 public static class SubstitutionRecommender
 {
@@ -26,36 +64,11 @@ public static class SubstitutionRecommender
     /// <summary>One catalog row's Supplier + Rebate Cost Per Unit text, already extracted by Scanning/CatalogSubstitutionScanner via ColumnResolver/CellValueBucketizer — this class never touches OCR geometry itself.</summary>
     public sealed record CatalogRowInput(int RowIndex, string Supplier, string RebateCostPerUnitText);
 
-    public sealed record SubstitutionResult(SubstitutionRecommendation Recommendation, int? RecommendedRowIndex, decimal? SavingsPercent, string? SavingsDisplay)
-    {
-        public static readonly SubstitutionResult NoRecommendation = new(SubstitutionRecommendation.None, null, null, null);
-    }
+    /// <summary>One row's savings badge — see class doc. SavingsPercent is always &gt; 0 (a badge only ever exists for a row genuinely cheaper than McKesson's cheapest cost).</summary>
+    public sealed record RowSavings(int RowIndex, decimal SavingsPercent, string SavingsDisplay, SavingsTier Tier);
 
-    /// <summary>
-    /// EDGE CASES (all deliberate judgment calls — see the branch report):
-    ///   - A row with unparseable/blank cost text is EXCLUDED from both
-    ///     the McKesson and secondary candidate pools entirely — never
-    ///     treated as free/zero, never crashes.
-    ///   - No secondary rows with a readable cost at all -&gt; NoRecommendation
-    ///     (nothing cheaper exists to ever suggest).
-    ///   - No McKesson rows with a readable cost at all -&gt; still
-    ///     RECOMMENDS the cheapest secondary (better than recommending
-    ///     nothing when there's genuinely no primary-wholesaler option on
-    ///     this list), but SavingsPercent is null and SavingsDisplay reads
-    ///     "n/a (no McKesson option)" rather than fabricating a percentage
-    ///     with no baseline to compute it against.
-    ///   - Cheapest McKesson cost is exactly 0 -&gt; NoRecommendation (a
-    ///     savings percentage against a zero baseline is undefined/
-    ///     divide-by-zero, and a real $0 rebate cost is far more likely
-    ///     OCR noise than an actual free item).
-    ///   - The 25% threshold is INCLUSIVE ("savings of 25% or more" — the
-    ///     owner's own wording): exactly 25.0% recommends.
-    ///   - Ties among cheapest candidates (secondary or McKesson) resolve
-    ///     to the lowest RowIndex — i.e. whichever appears first in the
-    ///     catalog grid's own top-to-bottom order — a stable, deterministic
-    ///     choice with no other signal available to break it.
-    /// </summary>
-    public static SubstitutionResult Evaluate(IReadOnlyList<CatalogRowInput> rows, decimal thresholdPercent = DefaultThresholdPercent)
+    /// <summary>Empty (never null) if there's no valid McKesson baseline to compare against, or no row is actually cheaper than it — see class doc's edge cases.</summary>
+    public static IReadOnlyList<RowSavings> EvaluateSavings(IReadOnlyList<CatalogRowInput> rows, decimal thresholdPercent = DefaultThresholdPercent)
     {
         var parsed = rows
             .Select(r => new
@@ -66,36 +79,23 @@ public static class SubstitutionRecommender
             })
             .ToList();
 
-        var secondaryCandidates = parsed.Where(p => !p.IsMcKesson && p.Cost is not null).ToList();
-        if (secondaryCandidates.Count == 0) return SubstitutionResult.NoRecommendation;
-
-        var cheapestSecondary = secondaryCandidates.OrderBy(p => p.Cost!.Value).ThenBy(p => p.RowIndex).First();
-
         var mckessonCandidates = parsed.Where(p => p.IsMcKesson && p.Cost is not null).ToList();
-        if (mckessonCandidates.Count == 0)
-        {
-            return new SubstitutionResult(
-                SubstitutionRecommendation.RecommendSecondary,
-                cheapestSecondary.RowIndex,
-                SavingsPercent: null,
-                SavingsDisplay: "n/a (no McKesson option)");
-        }
+        if (mckessonCandidates.Count == 0) return System.Array.Empty<RowSavings>();
 
         var cheapestMcKesson = mckessonCandidates.OrderBy(p => p.Cost!.Value).ThenBy(p => p.RowIndex).First();
-        if (cheapestMcKesson.Cost!.Value <= 0m) return SubstitutionResult.NoRecommendation;
+        if (cheapestMcKesson.Cost!.Value <= 0m) return System.Array.Empty<RowSavings>();
 
-        var savingsPercent = (cheapestMcKesson.Cost.Value - cheapestSecondary.Cost!.Value) / cheapestMcKesson.Cost.Value * 100m;
-
-        if (savingsPercent >= thresholdPercent)
+        var results = new List<RowSavings>();
+        foreach (var p in parsed.Where(p => !p.IsMcKesson && p.Cost is not null))
         {
-            return new SubstitutionResult(
-                SubstitutionRecommendation.RecommendSecondary,
-                cheapestSecondary.RowIndex,
-                savingsPercent,
-                FormatSavings(savingsPercent));
+            if (p.Cost!.Value >= cheapestMcKesson.Cost.Value) continue; // not cheaper than McKesson -> no badge
+
+            var savingsPercent = (cheapestMcKesson.Cost.Value - p.Cost.Value) / cheapestMcKesson.Cost.Value * 100m;
+            var tier = savingsPercent >= thresholdPercent ? SavingsTier.AboveThreshold : SavingsTier.BelowThreshold;
+            results.Add(new RowSavings(p.RowIndex, savingsPercent, FormatSavings(savingsPercent), tier));
         }
 
-        return SubstitutionResult.NoRecommendation;
+        return results.OrderBy(r => r.RowIndex).ToList();
     }
 
     /// <summary>

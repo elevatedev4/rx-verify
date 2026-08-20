@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.OrderAssist.Scanning;
 using Xunit;
@@ -11,9 +12,8 @@ namespace RxVerifyOverlay.Tests.OrderAssist;
 /// Cost" column immediately before the real "Rebate Cost Per Unit"
 /// column (the same prefix-sharing shape as the Order Quantity trap,
 /// present on this window too — see ColumnResolver's class doc), proving
-/// the McKesson-vs-secondary recommendation reads the RIGHT column, not
-/// the decoy. All costs are small synthetic round numbers, not real
-/// pricing.
+/// the savings-badge analysis (round 3) reads the RIGHT column, not the
+/// decoy. All costs are small synthetic round numbers, not real pricing.
 /// </summary>
 public class CatalogSubstitutionScannerTests
 {
@@ -50,31 +50,35 @@ public class CatalogSubstitutionScannerTests
     }
 
     [Fact]
-    public void RecommendsTheCheapestSecondaryUsingTheRealColumnNotTheDecoy()
+    public void SavingsBadgeUsesTheRealColumnNotTheDecoy()
     {
-        var highlight = CatalogSubstitutionScanner.FindRecommendation(BuildWords());
+        var badges = CatalogSubstitutionScanner.Analyze(BuildWords()).SavingsBadges;
 
-        Assert.NotNull(highlight);
-        Assert.Equal(0, highlight!.RowIndex); // the ANDA row
-        Assert.Equal("30% savings", highlight.SavingsDisplay); // (10.00-7.00)/10.00 = 30%
+        var badge = Assert.Single(badges);
+        Assert.Equal(0, badge.RowIndex); // the ANDA row
+        Assert.Equal("30% savings", badge.SavingsDisplay); // (10.00-7.00)/10.00 = 30%
+        Assert.True(badge.MeetsThreshold);
     }
 
     [Fact]
-    public void RecommendedHighlightSpansTheFullRowNotJustTheCostCell()
+    public void SavingsBadgeAnchorSpansTheFullRowNotJustTheCostCell()
     {
-        var highlight = CatalogSubstitutionScanner.FindRecommendation(BuildWords());
+        var badges = CatalogSubstitutionScanner.Analyze(BuildWords()).SavingsBadges;
 
-        Assert.NotNull(highlight);
+        var badge = Assert.Single(badges);
         // Row 0's leftmost word is "ANDA" at x=10, rightmost is the real
         // Rebate Cost Per Unit value ending at x=400 (370+30) -- the
         // decoy cost cell (ending at 230) is NOT the rightmost.
-        Assert.Equal(10, highlight!.Left);
-        Assert.Equal(400, highlight.Right);
+        Assert.Equal(10, badge.Left);
+        Assert.Equal(400, badge.Right);
     }
 
     [Fact]
-    public void ReturnsNullWhenNoSecondaryMeetsTheSavingsBar()
+    public void BelowThresholdSavingsStillProducesABadgeButNotMeetingThreshold()
     {
+        // ROUND 3 (Will: "if it is less than our savings threshold, it
+        // should still show the analysis ... and still show the %") --
+        // round 1/2 would have returned nothing here at all.
         var words = new List<OcrWord>
         {
             Word("Supplier", 0, 0, 50),
@@ -90,13 +94,43 @@ public class CatalogSubstitutionScannerTests
             Word("9.00", 370, 60, 30), // only 10% cheaper -- below the 25% bar
         };
 
-        Assert.Null(CatalogSubstitutionScanner.FindRecommendation(words));
+        var badges = CatalogSubstitutionScanner.Analyze(words).SavingsBadges;
+
+        var badge = Assert.Single(badges);
+        Assert.Equal(1, badge.RowIndex);
+        Assert.False(badge.MeetsThreshold);
+        Assert.Contains("%", badge.SavingsDisplay);
     }
 
     [Fact]
-    public void ReturnsNullWhenTheColumnsCannotBeResolved()
+    public void ReturnsNoBadgesWhenTheColumnsCannotBeResolved()
     {
         var words = new List<OcrWord> { Word("999.95", 0, 0, 40) }; // no header at all
-        Assert.Null(CatalogSubstitutionScanner.FindRecommendation(words));
+        Assert.Empty(CatalogSubstitutionScanner.Analyze(words).SavingsBadges);
+        Assert.Null(CatalogSubstitutionScanner.Analyze(words).CostColumnHeaderAnchor);
+    }
+
+    [Fact]
+    public void CostColumnHeaderAnchorResolvesEvenAloneWhenSortBadgeCannotYet()
+    {
+        // Only one readable row -- not enough for SortOrderChecker (needs
+        // >= 2), but the column itself resolves fine, so the anchor round 3
+        // needs for the "Processing" indicator must still be present.
+        var words = new List<OcrWord>
+        {
+            Word("Supplier", 0, 0, 50),
+            Word("Rebate", 320, 0, 40),
+            Word("Cost", 363, 0, 30),
+            Word("Per", 396, 0, 20),
+            Word("Unit", 419, 0, 25),
+
+            Word("ANDA", 10, 40, 30),
+            Word("9.00", 370, 40, 30),
+        };
+
+        var annotations = CatalogSubstitutionScanner.Analyze(words);
+
+        Assert.Null(annotations.SortIndicatorBadge);
+        Assert.NotNull(annotations.CostColumnHeaderAnchor);
     }
 }

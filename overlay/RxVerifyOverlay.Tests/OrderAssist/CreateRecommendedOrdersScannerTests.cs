@@ -95,4 +95,38 @@ public class CreateRecommendedOrdersScannerTests
 
         Assert.Empty(CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(wordsWithNoRecognizableHeader));
     }
+
+    /// <summary>
+    /// ROUND 3 (Will, repeat complaint: "Changing qty to 0 doesn't
+    /// highlight anything still ... the app should monitor the Order
+    /// Quantity column for anything that says 0"). This pipeline is PURE
+    /// and stateless — FindZeroQuantityHighlights never caches or
+    /// memoizes anything between calls, so two calls with the SAME row but
+    /// a DIFFERENT Order Quantity value (simulating a live edit —
+    /// OrderAssistCoordinator re-runs this whole pipeline from a fresh OCR
+    /// capture every ~500ms tick, see that class's own doc) must produce
+    /// independent, correct results each time. This proves the "must react
+    /// to edits" requirement holds at the pure-logic layer; the actual
+    /// repeat-complaint root cause traced down to OCR read reliability on
+    /// a row put into a selection/focus highlight while being edited —
+    /// see Ocr/RowHighlightColorDetector's own root-cause doc — which is
+    /// untestable off-Windows (no System.Drawing.Bitmap support on macOS).
+    /// </summary>
+    [Fact]
+    public void CallingTwiceWithTheSameRowEditedToZeroDetectsTheEditIndependently()
+    {
+        var words = BuildWords();
+        var beforeEdit = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(words);
+        Assert.DoesNotContain(beforeEdit, h => h.RowIndex == 1); // row 1 starts at Order Quantity=2
+
+        // Simulate the pharmacist editing row 1's Order Quantity cell from
+        // "2" to "0" -- a brand-new word list, exactly what a fresh OCR
+        // capture on the next tick would produce, with no relationship to
+        // the previous call beyond covering the same logical row/screen.
+        var editedWords = words.Select(w => w.X == 130 && w.Y == 60 ? new OcrWord { Text = "0", X = w.X, Y = w.Y, W = w.W, H = w.H } : w).ToList();
+
+        var afterEdit = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(editedWords);
+
+        Assert.Contains(afterEdit, h => h.RowIndex == 1);
+    }
 }

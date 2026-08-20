@@ -67,26 +67,26 @@ public class HighlightSignatureTests
     }
 
     [Fact]
-    public void SameGreenPickProducesTheSameSignature()
+    public void SameSavingsBadgeProducesTheSameSignature()
     {
         var a = new CatalogSubstitutionScanner.CatalogAnnotations(
-            new CatalogSubstitutionScanner.SubstitutionHighlight(0, 10, 40, 400, 52, "30% savings"),
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "30% savings", true) },
             null, null, null, null);
         var b = new CatalogSubstitutionScanner.CatalogAnnotations(
-            new CatalogSubstitutionScanner.SubstitutionHighlight(0, 10.2, 40.1, 400.3, 52.0, "30% savings"),
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10.2, 40.1, 400.3, 52.0, "30% savings", true) },
             null, null, null, null);
 
         Assert.Equal(HighlightSignature.ForCatalogAnnotations(a), HighlightSignature.ForCatalogAnnotations(b));
     }
 
     [Fact]
-    public void ADifferentGreenPickRowProducesADifferentSignature()
+    public void ADifferentBadgeRowProducesADifferentSignature()
     {
         var a = new CatalogSubstitutionScanner.CatalogAnnotations(
-            new CatalogSubstitutionScanner.SubstitutionHighlight(0, 10, 40, 400, 52, "30% savings"),
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "30% savings", true) },
             null, null, null, null);
         var b = new CatalogSubstitutionScanner.CatalogAnnotations(
-            new CatalogSubstitutionScanner.SubstitutionHighlight(2, 10, 80, 400, 92, "30% savings"),
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(2, 10, 80, 400, 92, "30% savings", true) },
             null, null, null, null);
 
         Assert.NotEqual(HighlightSignature.ForCatalogAnnotations(a), HighlightSignature.ForCatalogAnnotations(b));
@@ -95,26 +95,68 @@ public class HighlightSignatureTests
     [Fact]
     public void ADifferentSavingsPercentOnTheSameRowProducesADifferentSignature()
     {
-        // A row staying "the green pick" but its computed savings changing
-        // (e.g. a price genuinely updated) is still a meaningful content
-        // change worth re-displaying, not just pixel jitter.
+        // A row staying badged but its computed savings changing (e.g. a
+        // price genuinely updated) is still a meaningful content change
+        // worth re-displaying, not just pixel jitter.
         var a = new CatalogSubstitutionScanner.CatalogAnnotations(
-            new CatalogSubstitutionScanner.SubstitutionHighlight(0, 10, 40, 400, 52, "30% savings"),
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "30% savings", true) },
             null, null, null, null);
         var b = new CatalogSubstitutionScanner.CatalogAnnotations(
-            new CatalogSubstitutionScanner.SubstitutionHighlight(0, 10, 40, 400, 52, "40% savings"),
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "40% savings", true) },
             null, null, null, null);
 
         Assert.NotEqual(HighlightSignature.ForCatalogAnnotations(a), HighlightSignature.ForCatalogAnnotations(b));
     }
 
     [Fact]
-    public void AddingAYellowHighlightToTheSameGreenPickProducesADifferentSignature()
+    public void SameRowCrossingTheThresholdTierProducesADifferentSignature()
     {
-        var green = new CatalogSubstitutionScanner.SubstitutionHighlight(0, 10, 40, 400, 52, "30% savings");
-        var a = new CatalogSubstitutionScanner.CatalogAnnotations(green, null, null, null, null);
-        var b = new CatalogSubstitutionScanner.CatalogAnnotations(green, new CatalogSubstitutionScanner.RowMarker(1, 10, 60, 400, 72, null), null, null, null);
+        // Same row, same percent text would be unusual in practice, but the
+        // tier (green vs. yellow) is itself part of what's displayed, so a
+        // tier flip alone must count as a real change.
+        var a = new CatalogSubstitutionScanner.CatalogAnnotations(
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "24% savings", false) },
+            null, null, null, null);
+        var b = new CatalogSubstitutionScanner.CatalogAnnotations(
+            new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "24% savings", true) },
+            null, null, null, null);
 
         Assert.NotEqual(HighlightSignature.ForCatalogAnnotations(a), HighlightSignature.ForCatalogAnnotations(b));
+    }
+
+    [Fact]
+    public void MultipleBadgesInDifferentOrderProduceTheSameSignature()
+    {
+        var badge0 = new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "30% savings", true);
+        var badge1 = new CatalogSubstitutionScanner.SavingsBadge(1, 10, 60, 400, 72, "10% savings", false);
+
+        var a = new CatalogSubstitutionScanner.CatalogAnnotations(new[] { badge0, badge1 }, null, null, null, null);
+        var b = new CatalogSubstitutionScanner.CatalogAnnotations(new[] { badge1, badge0 }, null, null, null, null);
+
+        Assert.Equal(HighlightSignature.ForCatalogAnnotations(a), HighlightSignature.ForCatalogAnnotations(b));
+    }
+
+    [Fact]
+    public void AddingAPackageMarkerToTheSameBadgesProducesADifferentSignature()
+    {
+        var badges = new[] { new CatalogSubstitutionScanner.SavingsBadge(0, 10, 40, 400, 52, "30% savings", true) };
+        var a = new CatalogSubstitutionScanner.CatalogAnnotations(badges, null, null, null, null);
+        var b = new CatalogSubstitutionScanner.CatalogAnnotations(badges, new CatalogSubstitutionScanner.RowMarker(1, 10, 60, 400, 72, "best large pkg"), null, null, null);
+
+        Assert.NotEqual(HighlightSignature.ForCatalogAnnotations(a), HighlightSignature.ForCatalogAnnotations(b));
+    }
+
+    [Fact]
+    public void CostColumnHeaderAnchorAloneNeverMakesTheSignatureNonEmpty()
+    {
+        // The anchor is a pure positioning helper for the "Processing"
+        // indicator (round 3) -- it must never, by itself, make
+        // HighlightStabilityPolicy think there's something new to display.
+        var annotations = new CatalogSubstitutionScanner.CatalogAnnotations(
+            System.Array.Empty<CatalogSubstitutionScanner.SavingsBadge>(),
+            null, null, null,
+            new CatalogSubstitutionScanner.ColumnAnchor(300, 400, 10));
+
+        Assert.Equal("", HighlightSignature.ForCatalogAnnotations(annotations));
     }
 }

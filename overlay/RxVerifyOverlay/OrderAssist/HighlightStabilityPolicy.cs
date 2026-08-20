@@ -1,35 +1,33 @@
 namespace RxVerifyOverlay.OrderAssist;
 
 /// <summary>
-/// ROUND 2 (W-T85, Will verbatim: "the items are flashing a bunch instead
-/// of staying solid") — pure hysteresis/debounce decision for what
-/// OrderAssistCoordinator.TickAsync should actually DISPLAY this tick,
-/// given what's currently on screen and what this tick's fresh OCR pass
-/// just computed. Two independent, complementary jobs:
+/// ROUND 3 REDESIGN (Will verbatim: "Make sure the highlighted items go
+/// away as soon as the screen is closed, or if the order changes. Need to
+/// have a faster update time. It's ok to clear it quickly and add a
+/// 'Processing' by the sorted by rebate notice if we're waiting on
+/// analysis.") — replaces round 2's HOLD-then-swap policy (which kept
+/// showing the OLD, possibly-stale highlight on screen while a NEW result
+/// was debouncing) with CLEAR-then-confirm: the instant this tick's result
+/// differs from what's displayed, the old result is dropped immediately
+/// (see Decision.Processing) and OrderAssistCoordinator shows a small
+/// "Processing" indicator instead — never a stale highlight sitting there
+/// unexplained. The new candidate is still required to repeat on
+/// <see cref="RequiredConsecutiveTicksToAdoptChange"/> consecutive ticks
+/// before actually being adopted (Decision.Display/Clear) — same
+/// single-tick-OCR-misread flicker guard round 2's policy existed for (W-T85
+/// bug 3: "the items are flashing a bunch instead of staying solid") — the
+/// only thing that changed is what's shown WHILE that confirmation is
+/// pending: nothing (+ "Processing"), never the previous tick's answer.
 ///
-///  1. Don't blank an already-displayed highlight the instant a single
-///     tick comes back empty (a transient OCR/column-resolution hiccup —
-///     see OrderAssistCoordinator.LogColumnDiagnosticsIfNeeded, which
-///     already distinguishes "genuinely nothing to flag" from "couldn't
-///     resolve columns this tick" but previously treated both the same
-///     way for display purposes: hold whatever's showing). Bounded by
-///     MaxConsecutiveEmptyTicksBeforeClearing so a highlight that's
-///     genuinely gone stale (the pharmacist actually fixed the row, or
-///     navigated to a different screen entirely) doesn't linger forever.
-///  2. Don't immediately swap to a DIFFERENT, non-empty result the first
-///     time it's computed — require it to repeat on
-///     RequiredConsecutiveTicksToAdoptChange consecutive ticks first. A
-///     one-tick OCR misread that momentarily makes a DIFFERENT row look
-///     like the right pick (e.g. bug 2's white-on-selection-blue row
-///     misread) would otherwise flash the wrong highlight in and back out
-///     a second later — exactly what "flashing" describes when it's not
-///     just the on/off pulse (2) above addresses.
+/// The empty ("nothing to flag") and non-empty ("here's a highlight") cases
+/// are now handled by the exact same debounce path — round 2 kept them
+/// separate (MaxConsecutiveEmptyTicksBeforeClearing vs.
+/// RequiredConsecutiveTicksToAdoptChange), which is no longer needed now
+/// that neither direction holds stale content while pending.
 ///
-/// The GEOMETRIC pixel-level self-occlusion hide/show pulse (bug 3's OTHER
-/// contributor) is a separate fix — see OrderAssist/Windows/
-/// OrderAssistOverlayWindow.xaml.cs's SetWindowDisplayAffinity doc; this
-/// class only ever governs WHICH result to draw, never how the drawing
-/// itself avoids self-occlusion.
+/// One exception, preserved from round 2: the very FIRST non-empty result
+/// ever computed (nothing currently displayed at all) shows immediately,
+/// no debounce -- there's no previous answer it could flicker against.
 ///
 /// Comparison is by SIGNATURE, not raw geometry — see HighlightSignature.
 /// Pixel coordinates jitter tick to tick even for the exact same logical
@@ -41,48 +39,62 @@ namespace RxVerifyOverlay.OrderAssist;
 public static class HighlightStabilityPolicy
 {
     public const int RequiredConsecutiveTicksToAdoptChange = 2;
-    public const int MaxConsecutiveEmptyTicksBeforeClearing = 3;
 
     public enum Decision
     {
-        /// <summary>Leave whatever's currently displayed exactly as it is (draw nothing new this tick).</summary>
-        KeepDisplayed,
+        /// <summary>Stop displaying anything — this tick's (confirmed) result is genuinely empty.</summary>
+        Clear,
 
         /// <summary>Draw this tick's freshly computed result, replacing whatever was displayed (or the first-ever result).</summary>
         Display,
 
-        /// <summary>Stop displaying anything — the empty-tick streak finally exceeded the hold budget.</summary>
-        Clear
+        /// <summary>
+        /// This tick's result differs from what's displayed but hasn't
+        /// repeated enough times yet to adopt — clear whatever was shown
+        /// immediately (Will: "ok to clear it quickly") and let the caller
+        /// show a "Processing" indicator instead of a stale answer.
+        /// </summary>
+        Processing
     }
 
+    /// <summary>One Decide call's full result — the Decision plus the caller's next pendingSignature/pendingStreak to pass into the NEXT tick's call (see the two params of the same name below).</summary>
+    public readonly record struct Outcome(Decision Decision, string PendingSignature, int PendingStreak);
+
     /// <param name="newSignature">HighlightSignature.For* of this tick's freshly computed result — "" means empty/nothing to flag.</param>
-    /// <param name="displayedSignature">The signature of whatever is CURRENTLY displayed — "" means nothing is currently shown.</param>
-    /// <param name="consecutiveEmptyTicksSoFar">How many ticks IMMEDIATELY BEFORE this one were empty (0 if the previous tick was non-empty or this is the first tick) — caller resets this to 0 whenever a tick is non-empty.</param>
-    /// <param name="pendingChangeStreak">How many CONSECUTIVE prior ticks already proposed the exact SAME new (non-empty, different-from-displayed) signature — caller resets this to 0 whenever the proposed signature changes or matches what's displayed.</param>
-    public static Decision Decide(
+    /// <param name="displayedSignature">The signature of whatever is CURRENTLY adopted/displayed — "" means nothing is currently shown. Only updated by the caller on a Display/Clear outcome (see Outcome's own doc) — a Processing outcome leaves it exactly as it was, since nothing new has been adopted yet.</param>
+    /// <param name="pendingSignature">The signature most recently proposed as a REPLACEMENT for displayedSignature (from the caller's own bookkeeping, i.e. this call's own previous Outcome.PendingSignature) — "" if nothing is currently pending.</param>
+    /// <param name="pendingStreak">How many CONSECUTIVE prior ticks already proposed pendingSignature — 0 if nothing is pending.</param>
+    public static Outcome Decide(
         string newSignature,
         string displayedSignature,
-        int consecutiveEmptyTicksSoFar,
-        int pendingChangeStreak)
+        string pendingSignature,
+        int pendingStreak)
     {
-        var isEmpty = string.IsNullOrEmpty(newSignature);
-        var hasSomethingDisplayed = !string.IsNullOrEmpty(displayedSignature);
-
-        if (isEmpty)
+        if (newSignature == displayedSignature)
         {
-            if (!hasSomethingDisplayed) return Decision.KeepDisplayed; // nothing shown, nothing to clear
-            return consecutiveEmptyTicksSoFar + 1 >= MaxConsecutiveEmptyTicksBeforeClearing
-                ? Decision.Clear
-                : Decision.KeepDisplayed;
+            // Literally unchanged (including "still nothing, nothing") --
+            // steady state, no pending candidate in flight.
+            return new Outcome(newSignature.Length == 0 ? Decision.Clear : Decision.Display, "", 0);
         }
 
-        if (!hasSomethingDisplayed) return Decision.Display; // first real result ever -- show immediately, no debounce needed
-        if (newSignature == displayedSignature) return Decision.KeepDisplayed; // literally unchanged
+        if (displayedSignature.Length == 0 && newSignature.Length > 0)
+        {
+            // Nothing currently shown -- the very first result ever (or the
+            // first since the last confirmed clear) shows immediately.
+            // There's nothing on screen it could flicker against, so the
+            // flicker guard below would only add latency for no safety
+            // benefit here.
+            return new Outcome(Decision.Display, "", 0);
+        }
 
-        // A genuinely different, non-empty candidate -- require it to
-        // repeat before adopting it (see class doc, job 2).
-        return pendingChangeStreak + 1 >= RequiredConsecutiveTicksToAdoptChange
-            ? Decision.Display
-            : Decision.KeepDisplayed;
+        var nextPendingSignature = newSignature;
+        var nextPendingStreak = newSignature == pendingSignature ? pendingStreak + 1 : 1;
+
+        if (nextPendingStreak >= RequiredConsecutiveTicksToAdoptChange)
+        {
+            return new Outcome(newSignature.Length == 0 ? Decision.Clear : Decision.Display, "", 0);
+        }
+
+        return new Outcome(Decision.Processing, nextPendingSignature, nextPendingStreak);
     }
 }

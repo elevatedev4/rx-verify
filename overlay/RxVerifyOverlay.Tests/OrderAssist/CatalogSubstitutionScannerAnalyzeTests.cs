@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.OrderAssist.Scanning;
 using Xunit;
@@ -7,13 +8,14 @@ namespace RxVerifyOverlay.Tests.OrderAssist;
 
 /// <summary>
 /// END-TO-END pure pipeline tests for CatalogSubstitutionScanner.Analyze —
-/// Will's round-2 additions (sort-order badge, best-large/best-small
-/// package markers, yellow McKesson contrast row) layered on top of the
-/// round-1 green pick, all from synthetic OCR word grids. All NDCs/
-/// prices/quantities are made up, never copied from a real screenshot.
-/// See CatalogSubstitutionScannerTests.cs for the round-1 green-pick-only
-/// coverage (decoy column trap, no-recommendation case, unresolved
-/// columns) — this file only adds round-2-specific scenarios.
+/// round 2's additions (sort-order badge, best-large/best-small package
+/// markers) plus round 3's per-row savings-badge redesign (replacing round
+/// 1/2's single green pick + yellow McKesson contrast row — see
+/// SubstitutionRecommender's own doc), all from synthetic OCR word grids.
+/// All NDCs/prices/quantities are made up, never copied from a real
+/// screenshot. See CatalogSubstitutionScannerTests.cs for the decoy-column
+/// trap + below-threshold coverage — this file only adds
+/// package-marker/sort-badge/multi-badge scenarios.
 /// </summary>
 public class CatalogSubstitutionScannerAnalyzeTests
 {
@@ -48,32 +50,90 @@ public class CatalogSubstitutionScannerAnalyzeTests
     }
 
     [Fact]
-    public void GreenYellowAndPackageMarkersAllCoexistWithoutCollidingRows()
+    public void SavingsBadgesAndPackageMarkersAllCoexist()
     {
         var words = new List<OcrWord>(ThreeColumnHeader());
-        words.AddRange(ThreeColumnRow(40, "ANDA", "30.0000", "6.00"));       // small, cheapest secondary -> green
-        words.AddRange(ThreeColumnRow(60, "McKesson", "500.0000", "10.00")); // large, cheapest McKesson -> yellow
-        words.AddRange(ThreeColumnRow(80, "IPC", "1000.0000", "9.00"));      // large, cheaper than the McKesson large row -> best-large marker
+        words.AddRange(ThreeColumnRow(40, "ANDA", "30.0000", "6.00"));       // small, cheapest secondary -> above-threshold badge
+        words.AddRange(ThreeColumnRow(60, "McKesson", "500.0000", "10.00")); // large, only/cheapest McKesson -> the baseline
+        words.AddRange(ThreeColumnRow(80, "IPC", "1000.0000", "9.00"));      // large, cheaper than McKesson but below threshold -> yellow badge + best-large marker
 
         var annotations = CatalogSubstitutionScanner.Analyze(words);
 
-        Assert.NotNull(annotations.GreenHighlight);
-        Assert.Equal(0, annotations.GreenHighlight!.RowIndex); // ANDA
-        Assert.Equal("40% savings", annotations.GreenHighlight.SavingsDisplay); // (10-6)/10
+        Assert.Equal(2, annotations.SavingsBadges.Count);
 
-        Assert.NotNull(annotations.YellowHighlight);
-        Assert.Equal(1, annotations.YellowHighlight!.RowIndex); // McKesson
+        var andaBadge = annotations.SavingsBadges.Single(b => b.RowIndex == 0);
+        Assert.Equal("40% savings", andaBadge.SavingsDisplay); // (10-6)/10
+        Assert.True(andaBadge.MeetsThreshold);
 
-        // Best SMALL is row 0 (30-count, cheapest small) -- but that's
-        // already the green pick, so no separate marker is drawn for it.
-        Assert.Null(annotations.BestSmallPackageMarker);
+        var ipcBadge = annotations.SavingsBadges.Single(b => b.RowIndex == 2);
+        Assert.Equal("10% savings", ipcBadge.SavingsDisplay); // (10-9)/10
+        Assert.False(ipcBadge.MeetsThreshold);
+
+        // Best SMALL is row 0 (30-count, cheapest/only small row) -- round
+        // 3 no longer excludes it just because it also has a savings badge
+        // (that exclusion existed only to avoid double-marking a full-row
+        // green fill, which round 3 no longer draws at all).
+        Assert.NotNull(annotations.BestSmallPackageMarker);
+        Assert.Equal(0, annotations.BestSmallPackageMarker!.RowIndex);
 
         // Best LARGE is row 2 (IPC, $9.00) not row 1 (McKesson, $10.00) --
         // package-class bests are picked across ALL suppliers, independent
-        // of the McKesson/secondary split.
+        // of the savings-badge split.
         Assert.NotNull(annotations.BestLargePackageMarker);
         Assert.Equal(2, annotations.BestLargePackageMarker!.RowIndex);
         Assert.Equal("best large pkg", annotations.BestLargePackageMarker.Label);
+    }
+
+    /// <summary>Same shape as ThreeColumnRow but with a caller-chosen word height, to simulate a row whose OCR happened to catch a taller/shorter cell than its neighbors.</summary>
+    private static List<OcrWord> ThreeColumnRowWithHeight(double y, double h, string supplier, string packageQuantity, string cost)
+    {
+        return new List<OcrWord>
+        {
+            Word(supplier, 10, y, 30, h),
+            Word("1", 110, y, 8, h),
+            Word("Stock", 125, y, 35, h),
+            Word("Package", 165, y, 50, h),
+            Word("with", 220, y, 25, h),
+            Word(packageQuantity, 250, y, 40, h),
+            Word(cost, 370, y, 30, h),
+        };
+    }
+
+    [Fact]
+    public void PackageMarkerRowRectsShareTheSameUniformHeightEvenWhenRawOcrHeightsDiffer()
+    {
+        // ROUND 3 (Will: "Make the height match the height of the row too
+        // (which should be the same for all rows)"). Rows below have
+        // DELIBERATELY different raw word heights (8 / 16 / 24 -- as if
+        // one row's OCR caught a taller cell than another's) at a fixed
+        // 60px row pitch; the canonical height is derived from that PITCH
+        // (row-to-row center spacing), never from an individual row's own
+        // word height, so every resulting badge/marker still ends up the
+        // exact same height despite the differing raw input.
+        var words = new List<OcrWord>(ThreeColumnHeader());
+        words.AddRange(ThreeColumnRowWithHeight(40, 8, "ANDA", "30.0000", "6.00"));
+        words.AddRange(ThreeColumnRowWithHeight(100, 16, "McKesson", "500.0000", "10.00"));
+        words.AddRange(ThreeColumnRowWithHeight(160, 24, "IPC", "1000.0000", "9.00"));
+
+        var annotations = CatalogSubstitutionScanner.Analyze(words);
+
+        var badgeHeights = annotations.SavingsBadges.Select(b => b.Bottom - b.Top).Distinct().ToList();
+        Assert.Single(badgeHeights);
+
+        Assert.NotNull(annotations.BestLargePackageMarker);
+        Assert.NotNull(annotations.BestSmallPackageMarker);
+        var largeHeight = annotations.BestLargePackageMarker!.Bottom - annotations.BestLargePackageMarker.Top;
+        var smallHeight = annotations.BestSmallPackageMarker!.Bottom - annotations.BestSmallPackageMarker.Top;
+        Assert.Equal(badgeHeights[0], largeHeight);
+        Assert.Equal(badgeHeights[0], smallHeight);
+
+        // The canonical height is the row-to-row CENTER pitch (64: rows
+        // start 60px apart at y=40/100/160, but each row's own increasing
+        // word height (8/16/24) shifts its center down by an extra 4px
+        // each step) -- not any individual row's own raw word height (8,
+        // 16, or 24), proving this isn't coincidentally equal to one of
+        // the raw per-row heights.
+        Assert.Equal(64, badgeHeights[0]);
     }
 
     [Fact]
@@ -122,8 +182,8 @@ public class CatalogSubstitutionScannerAnalyzeTests
     [Fact]
     public void PackageMarkersAreAbsentWhenShippingSizeColumnCannotBeResolvedButOtherAnnotationsStillWork()
     {
-        // Same shape as CatalogSubstitutionScannerTests' round-1 fixture --
-        // no Shipping Size column at all -- proving Analyze degrades
+        // Same shape as CatalogSubstitutionScannerTests' fixture -- no
+        // Shipping Size column at all -- proving Analyze degrades
         // gracefully rather than losing the whole tick over one missing
         // column.
         var words = new List<OcrWord>
@@ -143,41 +203,25 @@ public class CatalogSubstitutionScannerAnalyzeTests
 
         var annotations = CatalogSubstitutionScanner.Analyze(words);
 
-        Assert.NotNull(annotations.GreenHighlight);
-        Assert.Equal(0, annotations.GreenHighlight!.RowIndex);
-        Assert.NotNull(annotations.YellowHighlight);
-        Assert.Equal(1, annotations.YellowHighlight!.RowIndex);
+        var badge = Assert.Single(annotations.SavingsBadges);
+        Assert.Equal(0, badge.RowIndex);
+        Assert.True(badge.MeetsThreshold);
 
         Assert.Null(annotations.BestLargePackageMarker);
         Assert.Null(annotations.BestSmallPackageMarker);
     }
 
     [Fact]
-    public void AnalyzeReturnsAllNullAnnotationsWhenColumnsCannotBeResolved()
+    public void AnalyzeReturnsAllEmptyAnnotationsWhenColumnsCannotBeResolved()
     {
         var words = new List<OcrWord> { Word("999.95", 0, 0, 40) }; // no header at all
 
         var annotations = CatalogSubstitutionScanner.Analyze(words);
 
-        Assert.Null(annotations.GreenHighlight);
-        Assert.Null(annotations.YellowHighlight);
+        Assert.Empty(annotations.SavingsBadges);
         Assert.Null(annotations.BestLargePackageMarker);
         Assert.Null(annotations.BestSmallPackageMarker);
         Assert.Null(annotations.SortIndicatorBadge);
-    }
-
-    [Fact]
-    public void FindRecommendationRemainsEquivalentToAnalyzesGreenHighlight()
-    {
-        var words = new List<OcrWord>(ThreeColumnHeader());
-        words.AddRange(ThreeColumnRow(40, "ANDA", "30.0000", "6.00"));
-        words.AddRange(ThreeColumnRow(60, "McKesson", "500.0000", "10.00"));
-
-        var viaFindRecommendation = CatalogSubstitutionScanner.FindRecommendation(words);
-        var viaAnalyze = CatalogSubstitutionScanner.Analyze(words).GreenHighlight;
-
-        Assert.NotNull(viaFindRecommendation);
-        Assert.Equal(viaAnalyze!.RowIndex, viaFindRecommendation!.RowIndex);
-        Assert.Equal(viaAnalyze.SavingsDisplay, viaFindRecommendation.SavingsDisplay);
+        Assert.Null(annotations.CostColumnHeaderAnchor);
     }
 }

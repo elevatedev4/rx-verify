@@ -9,6 +9,9 @@ using RxVerifyOverlay.Integrated;
 
 namespace RxVerifyOverlay.OrderAssist.Windows;
 
+/// <summary>One savings badge, already converted to DIPs — round 3 replaces the old whole-row GreenRowDip/YellowRowDip fill with this small end-of-row tag (see CatalogHighlights' own doc and OrderAssistOverlayWindow.AddSavingsLabel).</summary>
+public sealed record SavingsBadgeDip(DipRect RowDip, string SavingsDisplay, bool MeetsThreshold);
+
 /// <summary>
 /// Everything Order Assist can draw for one tick of the Catalog Item
 /// Substitution window, already converted to DIPs by OrderAssistCoordinator
@@ -16,25 +19,34 @@ namespace RxVerifyOverlay.OrderAssist.Windows;
 /// independently nullable/optional for the same reason CatalogAnnotations'
 /// fields are — see that record's own doc — SetHighlights just draws
 /// whatever it's given and skips whatever it isn't.
+///
+/// ProcessingAnchorDip is round 3's addition (Will: "ok to clear it
+/// quickly and add a 'Processing' by the sorted by rebate notice if we're
+/// waiting on analysis") — OrderAssistCoordinator only ever populates it on
+/// a HighlightStabilityPolicy.Decision.Processing tick (see that class's
+/// own doc), positioned at the same column anchor the sort badge itself
+/// uses (CatalogSubstitutionScanner.CatalogAnnotations.CostColumnHeaderAnchor)
+/// so it reads as "right next to" that notice regardless of whether the
+/// sort badge itself is showing that tick.
 /// </summary>
 public sealed record CatalogHighlights(
-    DipRect? GreenRowDip,
-    string? SavingsLabel,
-    DipRect? YellowRowDip,
+    IReadOnlyList<SavingsBadgeDip> SavingsBadges,
     DipRect? BestLargePackageDip,
     string? BestLargePackageLabel,
     DipRect? BestSmallPackageDip,
     string? BestSmallPackageLabel,
     DipRect? SortBadgeAnchorDip,
     string? SortBadgeText,
-    bool SortBadgeIsSorted);
+    bool SortBadgeIsSorted,
+    DipRect? ProcessingAnchorDip = null);
 
 /// <summary>
 /// Order Assist's own click-through highlight layer — red boxes over
 /// zero-quantity cells (Create Recommended Orders window) OR the full set
-/// of CatalogHighlights (green pick, yellow McKesson contrast, best-large/
-/// best-small package markers, sort-order badge — Catalog Item
-/// Substitution Selection window). The two target windows are never open
+/// of CatalogHighlights (round 3: a per-row green/yellow savings badge at
+/// the end of each qualifying row, best-large/best-small package markers,
+/// sort-order badge, "Processing" indicator — Catalog Item Substitution
+/// Selection window). The two target windows are never open
 /// at the same time (see OrderAssistWindowClassifier), so in practice only
 /// one of those two modes is ever populated at once — but nothing here
 /// assumes that; SetHighlights just draws whatever it's given.
@@ -98,22 +110,19 @@ public sealed partial class OrderAssistOverlayWindow : Window
     /// <summary>True once SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) has been applied and returned success — see IsExcludedFromCapture.</summary>
     private bool _excludedFromCapture;
 
-    // Filled (not just outlined) boxes at low opacity — legible at a
-    // glance without obscuring the OCR'd text/numbers underneath. The
-    // green row gets a solid border on top of its fill so it reads as
-    // "this whole row" distinctly from a plain red cell fill.
+    // Filled (not just outlined) box at low opacity for the zero-quantity
+    // red cell — legible at a glance without obscuring the OCR'd digit
+    // underneath.
     private static readonly SolidColorBrush RedFillBrush = new(Color.FromArgb(0x55, 0xC6, 0x28, 0x28));
-    private static readonly SolidColorBrush GreenFillBrush = new(Color.FromArgb(0x33, 0x2E, 0x7D, 0x32));
-    private static readonly SolidColorBrush GreenBorderBrush = new(Color.FromRgb(0x2E, 0x7D, 0x32));
-    private const double GreenBorderThickness = 3;
 
-    // Round-2 "dual visibility": the McKesson contrast row gets its own
-    // amber fill+border, distinct from both green (the pick) and red
-    // (zero-quantity, the OTHER window) so all three read as different
-    // meanings at a glance.
-    private static readonly SolidColorBrush YellowFillBrush = new(Color.FromArgb(0x40, 0xF9, 0xA8, 0x25));
+    // ROUND 3 (Will: "Always Calculate the savings for each item cheaper
+    // than mckesson and display it at the end of the row ... Don't
+    // highlight the whole row, just show it at the end") — solid badge
+    // colors only now, no more whole-row translucent fill; reused as
+    // AddSavingsLabel's Border.Background per savings tier.
+    private static readonly SolidColorBrush GreenBorderBrush = new(Color.FromRgb(0x2E, 0x7D, 0x32));
     private static readonly SolidColorBrush YellowBorderBrush = new(Color.FromRgb(0xF9, 0xA8, 0x25));
-    private const double YellowBorderThickness = 3;
+    private const double GreenBorderThickness = 3;
 
     // Round-2 "best large vs best small package": an OUTLINE-only marker
     // (no fill) so it reads as a lighter/secondary signal that never
@@ -132,6 +141,14 @@ public sealed partial class OrderAssistOverlayWindow : Window
     private static readonly SolidColorBrush SortBadgeSortedBrush = new(Color.FromRgb(0x2E, 0x7D, 0x32));
     private static readonly SolidColorBrush SortBadgeUnsortedBrush = new(Color.FromRgb(0xC6, 0x28, 0x28));
     private const double SortBadgeHeightDip = 18;
+
+    // ROUND 3 (Will: "It's ok to clear it quickly and add a 'Processing'
+    // by the sorted by rebate notice if we're waiting on analysis") —
+    // deliberately neutral gray, distinct from every other badge color
+    // (red/green/yellow/blue all already mean something else), so
+    // "Processing" never reads as a verdict of its own.
+    private static readonly SolidColorBrush ProcessingBadgeBrush = new(Color.FromRgb(0x60, 0x60, 0x60));
+    private const double ProcessingBadgeGapDip = 6;
 
     private IntPtr _hwnd = IntPtr.Zero;
 
@@ -206,23 +223,14 @@ public sealed partial class OrderAssistOverlayWindow : Window
 
         if (catalog is null) return;
 
-        // Yellow drawn before green so green's own border always reads
-        // crisp on top — they're never the same row (see
-        // DualHighlightPlanner's fail-closed guard), so draw order here is
-        // just a visual-polish choice, not a correctness one.
-        if (catalog.YellowRowDip is { } yellowRow)
+        // ROUND 3 (Will: "Always Calculate the savings for each item
+        // cheaper than mckesson and display it at the end of the row.
+        // Below our threshold, show in yellow, above show green. Don't
+        // highlight the whole row, just show it at the end.") — one small
+        // end-of-row badge per qualifying row, no whole-row fill at all.
+        foreach (var badge in catalog.SavingsBadges)
         {
-            AddRect(yellowRow, YellowFillBrush, YellowBorderBrush, YellowBorderThickness);
-        }
-
-        if (catalog.GreenRowDip is { } greenRow)
-        {
-            AddRect(greenRow, GreenFillBrush, GreenBorderBrush, GreenBorderThickness);
-
-            if (!string.IsNullOrWhiteSpace(catalog.SavingsLabel))
-            {
-                AddSavingsLabel(greenRow, catalog.SavingsLabel!);
-            }
+            AddSavingsLabel(badge.RowDip, badge.SavingsDisplay, badge.MeetsThreshold ? GreenBorderBrush : YellowBorderBrush);
         }
 
         if (catalog.BestLargePackageDip is { } bestLarge && !string.IsNullOrWhiteSpace(catalog.BestLargePackageLabel))
@@ -238,6 +246,17 @@ public sealed partial class OrderAssistOverlayWindow : Window
         if (catalog.SortBadgeAnchorDip is { } anchor && !string.IsNullOrWhiteSpace(catalog.SortBadgeText))
         {
             AddSortBadge(anchor, catalog.SortBadgeText!, catalog.SortBadgeIsSorted);
+        }
+
+        // ROUND 3 (Will: "It's ok to clear it quickly and add a
+        // 'Processing' by the sorted by rebate notice if we're waiting on
+        // analysis") — OrderAssistCoordinator only ever sets this on a
+        // Decision.Processing tick, alongside every other field above left
+        // null/empty (see its own DrawAndShow doc), so this never competes
+        // visually with a real, confirmed result.
+        if (catalog.ProcessingAnchorDip is { } processingAnchor)
+        {
+            AddProcessingBadge(processingAnchor);
         }
     }
 
@@ -265,11 +284,21 @@ public sealed partial class OrderAssistOverlayWindow : Window
         HighlightCanvas.Children.Add(border);
     }
 
-    private void AddSavingsLabel(DipRect rowDip, string text)
+    /// <summary>
+    /// ROUND 3 (Will: "display it at the end of the row ... Don't
+    /// highlight the whole row, just show it at the end") — a small badge
+    /// anchored just to the right of the row's own (uniform-height, see
+    /// RowBounds.ComputeUniform) extent, vertically centered on it, colored
+    /// by <paramref name="backgroundBrush"/> (green above the savings
+    /// threshold, yellow below it — see CatalogSubstitutionScanner.SavingsBadge.MeetsThreshold).
+    /// No row fill/border drawn at all anymore — this badge IS the entire
+    /// visual signal for one row's savings.
+    /// </summary>
+    private void AddSavingsLabel(DipRect rowDip, string text, Brush backgroundBrush)
     {
         var label = new Border
         {
-            Background = GreenBorderBrush,
+            Background = backgroundBrush,
             Padding = new Thickness(4, 1, 4, 1),
             IsHitTestVisible = false,
             Child = new TextBlock
@@ -281,11 +310,39 @@ public sealed partial class OrderAssistOverlayWindow : Window
             }
         };
 
-        // A small badge anchored just to the right of the highlighted
-        // row, vertically centered on it — not another full-width bar.
         Canvas.SetLeft(label, rowDip.X + rowDip.Width + 4);
         Canvas.SetTop(label, rowDip.Y + Math.Max(0, (rowDip.Height - 16) / 2.0));
         HighlightCanvas.Children.Add(label);
+    }
+
+    /// <summary>
+    /// ROUND 3 (Will: "It's ok to clear it quickly and add a 'Processing'
+    /// by the sorted by rebate notice if we're waiting on analysis") — a
+    /// small neutral badge placed just past the same column anchor the
+    /// sort badge itself uses (see CatalogHighlights.ProcessingAnchorDip's
+    /// own doc), same vertical placement (just above the header) so it
+    /// reads as sitting right next to that notice.
+    /// </summary>
+    private void AddProcessingBadge(DipRect anchorDip)
+    {
+        var badge = new Border
+        {
+            Background = ProcessingBadgeBrush,
+            Padding = new Thickness(4, 1, 4, 1),
+            IsHitTestVisible = false,
+            Child = new TextBlock
+            {
+                Text = "Processing…",
+                Foreground = Brushes.White,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                FontStyle = FontStyles.Italic
+            }
+        };
+
+        Canvas.SetLeft(badge, anchorDip.X + anchorDip.Width + ProcessingBadgeGapDip);
+        Canvas.SetTop(badge, Math.Max(0, anchorDip.Y - SortBadgeHeightDip));
+        HighlightCanvas.Children.Add(badge);
     }
 
     /// <summary>
@@ -294,8 +351,8 @@ public sealed partial class OrderAssistOverlayWindow : Window
     /// small class-label tag anchored INSIDE the row's own top-left corner
     /// — deliberately not to the row's right like AddSavingsLabel, since
     /// up to two of these can be on screen at once (one per package
-    /// class) and must never collide with each other or with the green
-    /// pick's own savings label sitting off to its right.
+    /// class) and must never collide with each other or with a savings
+    /// badge sitting off to that row's own right.
     /// </summary>
     private void AddPackageMarker(DipRect dip, string label)
     {
