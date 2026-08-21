@@ -62,12 +62,20 @@ public class CatalogSubstitutionScannerAnalyzeTests
         Assert.Equal(2, annotations.SavingsBadges.Count);
 
         var andaBadge = annotations.SavingsBadges.Single(b => b.RowIndex == 0);
-        Assert.Equal("40% savings", andaBadge.SavingsDisplay); // (10-6)/10
+        // ROUND 4 (Will: "Leave off the word savings from there").
+        Assert.Equal("40%", andaBadge.SavingsDisplay); // (10-6)/10
         Assert.True(andaBadge.MeetsThreshold);
 
         var ipcBadge = annotations.SavingsBadges.Single(b => b.RowIndex == 2);
-        Assert.Equal("10% savings", ipcBadge.SavingsDisplay); // (10-9)/10
+        Assert.Equal("10%", ipcBadge.SavingsDisplay); // (10-9)/10
         Assert.False(ipcBadge.MeetsThreshold);
+
+        // ROUND 4 (Will: "also highlight the cheapest mckesson item that
+        // is being compared in some intuitive color") — row 1 is the
+        // only/cheapest McKesson row, so it's the baseline every badge's
+        // percentage above was computed against.
+        Assert.NotNull(annotations.McKessonBaselineMarker);
+        Assert.Equal(1, annotations.McKessonBaselineMarker!.RowIndex);
 
         // Best SMALL is row 0 (30-count, cheapest/only small row) -- round
         // 3 no longer excludes it just because it also has a savings badge
@@ -82,6 +90,61 @@ public class CatalogSubstitutionScannerAnalyzeTests
         Assert.NotNull(annotations.BestLargePackageMarker);
         Assert.Equal(2, annotations.BestLargePackageMarker!.RowIndex);
         Assert.Equal("best large pkg", annotations.BestLargePackageMarker.Label);
+    }
+
+    /// <summary>
+    /// ROUND 4 REGRESSION (Will verbatim: "Just make the % indicator show
+    /// the %, always at the right side (one is floating over due to AWP
+    /// and AWP per unit being empty)"). Builds a 4-column table (Supplier,
+    /// Rebate Cost Per Unit, then two TRAILING columns — "AWP"/"AWP Per
+    /// Unit" — that exist in the header but have NO OCR'd words in any
+    /// data row, exactly like the owner's screenshot) and proves the
+    /// savings badge/fill's Right edge lands at the FULL table's
+    /// rightmost resolved column (AWP Per Unit's own header extent), not
+    /// wherever the row's own (here, truncated) OCR'd word extent
+    /// happened to end -- which is what "floating over" the empty columns
+    /// looked like before this fix.
+    /// </summary>
+    [Fact]
+    public void SavingsBadgeRightEdgeIsPinnedToTheTablesFullWidthEvenWithEmptyTrailingColumns()
+    {
+        var words = new List<OcrWord>
+        {
+            Word("Supplier", 0, 0, 50),
+            Word("Rebate", 200, 0, 40),
+            Word("Cost", 243, 0, 30),
+            Word("Per", 276, 0, 20),
+            Word("Unit", 299, 0, 25),
+            Word("AWP", 400, 0, 30),           // trailing column, header only (x=400-430)
+            Word("AWP", 500, 0, 30),           // second trailing column (single line, 3 words: x=500-585)
+            Word("Per", 535, 0, 20),
+            Word("Unit", 560, 0, 25),
+
+            // Row 0: McKesson baseline -- has AWP/AWP Per Unit text (full row).
+            Word("McKesson", 5, 60, 60),
+            Word("10.00", 200, 60, 30),
+            Word("50.00", 400, 60, 30),
+            Word("5.00", 500, 60, 30),
+
+            // Row 1: ANDA, cheaper than McKesson -- AWP/AWP Per Unit columns are
+            // BLANK (no OCR'd words at all), same shape as the owner's report.
+            // The row's own OCR'd word extent therefore ends at x=230 (the
+            // "6.00" cost cell), well short of the table's real rightmost
+            // column (AWP Per Unit, extending to x=585).
+            Word("ANDA", 5, 90, 30),
+            Word("6.00", 200, 90, 30),
+        };
+
+        var annotations = CatalogSubstitutionScanner.Analyze(words);
+
+        var badge = Assert.Single(annotations.SavingsBadges);
+        Assert.Equal(1, badge.RowIndex);
+
+        // The table's own rightmost header band (AWP Per Unit) ends at
+        // x=585 (560 + 25 width) -- the badge/fill must reach that edge
+        // regardless of row 1's own blank AWP/AWP Per Unit cells.
+        Assert.Equal(585, badge.Right);
+        Assert.True(badge.Right > 230, "badge must not stop at the row's own truncated OCR extent (230)");
     }
 
     /// <summary>Same shape as ThreeColumnRow but with a caller-chosen word height, to simulate a row whose OCR happened to catch a taller/shorter cell than its neighbors.</summary>

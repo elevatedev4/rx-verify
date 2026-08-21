@@ -81,8 +81,30 @@ public static class RowHighlightColorDetector
     /// <summary>Luminance floor -- excludes near-black (ordinary dark text itself, never a row FILL).</summary>
     public const int MinLuminanceForHighlight = 40;
 
-    /// <summary>Luminance ceiling -- excludes near-white (the ordinary unhighlighted page background).</summary>
-    public const int MaxLuminanceForHighlight = 245;
+    /// <summary>
+    /// Luminance ceiling -- excludes near-white (the ordinary unhighlighted
+    /// page background).
+    ///
+    /// ROUND 4 (Will's THIRD repeat report on the same symptom — "the top
+    /// blue line of catalog item substitution is still not being
+    /// analyzed" — prompted re-measuring against a REAL screenshot instead
+    /// of another synthetic guess): the owner's own Create Recommended
+    /// Orders screenshot (order screen round 4 qty-0 report) contains a
+    /// row Pioneer itself tints pale yellow -- measured pixel-for-pixel
+    /// from that PNG at (255,255,179): chroma=76 (clears MinChromaForHighlight
+    /// easily) but luminance=246.3, which the OLD ceiling of 245 rejected
+    /// by a hair. Bumped to 250 to bring this real, measured Pioneer color
+    /// inside bounds with a small margin, rather than sitting on the exact
+    /// wrong side of a never-measured-before guess. (This specific row's
+    /// OCR readability was likely fine either way -- black text on a pale
+    /// fill has plenty of natural contrast without binarization -- but a
+    /// boundary a REAL Pioneer color sits 1.3 outside of is worth
+    /// correcting regardless; see RowHighlightColorDetectorTests' own
+    /// round-4 test for the exact measured value.) Still leaves a wide
+    /// margin below pure white (255) and comfortably above every "reject"
+    /// test case's luminance.
+    /// </summary>
+    public const int MaxLuminanceForHighlight = 250;
 
     /// <summary>Per-channel tolerance for "close enough to the row's own dominant/background color" -- used both to decide the majority-fill fraction and, in RowHighlightNormalizer, to binarize each pixel.</summary>
     public const int BackgroundColorTolerance = 40;

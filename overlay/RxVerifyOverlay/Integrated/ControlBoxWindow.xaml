@@ -400,9 +400,16 @@
             — same code path as picking "Mode: Verify" in the dropdown,
             see OnVerifyEscapeButtonClick — regardless of whether the
             ComboBox popup itself works.
+
+            ROUND 4 (Will: "Order mode overlay is not in a good spot,
+            it's overlapping things. Make it smaller and just right next
+            to color legend in a little rectangle.") — ModeComboBoxCompact
+            narrowed 120 -> 100dip to match IntegratedOverlayCoordinator's
+            smaller OrderModeControlBoxWidthDip (260 -> 160); still wide
+            enough for "Mode: Verify"/"Mode: Order" at this FontSize.
         -->
         <StackPanel x:Name="CompactOrderPanel" Visibility="Collapsed" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-            <ComboBox x:Name="ModeComboBoxCompact" Style="{StaticResource ModeComboBoxStyle}" Width="120" SelectionChanged="OnModeComboBoxChanged" ToolTip="Switch back to Verify mode to resume rx-verification highlights">
+            <ComboBox x:Name="ModeComboBoxCompact" Style="{StaticResource ModeComboBoxStyle}" Width="100" SelectionChanged="OnModeComboBoxChanged" ToolTip="Switch back to Verify mode to resume rx-verification highlights">
                 <ComboBoxItem Content="Mode: Verify" />
                 <ComboBoxItem Content="Mode: Order" />
             </ComboBox>

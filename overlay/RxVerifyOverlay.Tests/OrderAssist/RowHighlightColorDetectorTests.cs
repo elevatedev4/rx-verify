@@ -104,6 +104,17 @@ public class RowHighlightColorDetectorTests
     }
 
     [Fact]
+    public void RealPioneerPaleYellowFlagRowMeasuredFromWillsScreenshotIsAHighlightColor()
+    {
+        // ROUND 4: (255,255,179) is pixel-measured directly from the
+        // owner's own Create Recommended Orders screenshot (order screen
+        // round 4 qty-0 report) -- the row Pioneer itself tints to flag
+        // it. chroma=76, luminance=246.3 -- the OLD 245 ceiling rejected
+        // this by 1.3; see MaxLuminanceForHighlight's own round-4 doc.
+        Assert.True(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 255, g: 255, b: 179));
+    }
+
+    [Fact]
     public void DarkSaturatedColorBelowTheLuminanceFloorIsNotAHighlightColor()
     {
         // Chroma alone isn't enough -- a color can be strongly saturated

@@ -107,6 +107,20 @@ public sealed class OrderAssistCoordinator
     private bool _windowShown;
     private bool _tickInProgress;
 
+    /// <summary>
+    /// ROUND 4 (Will verbatim: "Updating is too slow. I close the window
+    /// and it takes 5+ seconds to clear.") — the HWND of whatever window
+    /// this coordinator most recently scanned/targeted, tracked purely so
+    /// FastCloseCheck can cheaply notice "that window is gone" on every
+    /// ~500ms timer tick WITHOUT waiting for a full capture+OCR pass to
+    /// run and complete first (see FastCloseCheck's own doc for the
+    /// latency this closes). IntPtr.Zero means "nothing currently
+    /// tracked" — cleared alongside every other piece of
+    /// per-target-window state (SetEnabled(false), the no-match branch of
+    /// TickAsync, FastCloseCheck itself once it fires).
+    /// </summary>
+    private IntPtr _currentTargetHandle = IntPtr.Zero;
+
     // ------------------------------------------------------------------
     // HIGHLIGHT STABILITY (ROUND 2, W-T85: "the items are flashing a
     // bunch instead of staying solid"; ROUND 3, Will: "Make sure the
@@ -179,6 +193,9 @@ public sealed class OrderAssistCoordinator
     /// <summary>Same de-dup pattern as _lastLoggedNoMatchTitlesSignature, for LogColumnDiagnosticsIfNeeded's "matched a target window but couldn't resolve its expected column(s)" case — keyed on the resolved header band labels actually seen that tick.</summary>
     private string? _lastLoggedColumnFailureSignature;
 
+    /// <summary>Same de-dup pattern, for LogOrderQuantityColumnCellsIfEmpty (round 4) — keyed on the actual cell-text list read that tick, so an unchanged capture never re-logs every ~500ms, but a genuinely different read (Will scrolled, edited a cell, or the OCR result itself changed) does.</summary>
+    private string? _lastLoggedOrderQuantityCellsSignature;
+
     /// <summary>Same de-dup pattern as _lastLoggedColumnFailureSignature, for LogSelectionBandsIfChanged (ROUND 2, W-T85 bug 2) — keyed on the actual band Y-range list, so a still-selected row never re-logs every ~1s tick, but a genuinely different capture (a different row now selected, or the selection cleared) does.</summary>
     private string? _lastLoggedSelectionBandsSignature;
 
@@ -187,7 +204,17 @@ public sealed class OrderAssistCoordinator
         _settings = settings;
         _ocrEngine = ocrEngine ?? new WindowsMediaOcrEngine();
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(TimerIntervalMs) };
-        _timer.Tick += async (_, _) => await SafeTickAsync();
+        _timer.Tick += async (_, _) =>
+        {
+            // ROUND 4 — see FastCloseCheck's own doc. Runs SYNCHRONOUSLY,
+            // before the await below, so it fires on EVERY timer tick even
+            // while a previous tick's slow capture+OCR pass is still in
+            // flight (SafeTickAsync's reentrancy guard would otherwise
+            // skip this tick entirely, delaying "the window is gone" by
+            // however long that in-flight OCR pass takes).
+            FastCloseCheck();
+            await SafeTickAsync();
+        };
     }
 
     /// <summary>
@@ -222,7 +249,51 @@ public sealed class OrderAssistCoordinator
             _timer.Stop();
             HideOverlayIfShown();
             ResetHighlightStability();
+            _currentTargetHandle = IntPtr.Zero;
         }
+    }
+
+    /// <summary>
+    /// ROUND 4 (Will verbatim: "Updating is too slow. I close the window
+    /// and it takes 5+ seconds to clear.") — ROOT CAUSE: TickAsync's own
+    /// "no target window matched" branch already clears immediately, but
+    /// it only ever runs at the START of a tick, via OrderAssistWindowLocator.Scan
+    /// (a full EnumWindows pass). If Pioneer's window closes WHILE a
+    /// capture+OCR pass from an EARLIER tick is still running (Windows.Media.Ocr
+    /// can genuinely take over a second — see WindowsMediaOcrEngine's own
+    /// OCR-duration doc), that in-flight tick doesn't notice at all: it
+    /// finishes its (now-stale) capture/OCR, and SafeTickAsync's reentrancy
+    /// guard (`if (_tickInProgress) return;`) skips every NEW tick that
+    /// would otherwise re-scan and catch the closed window sooner. Stacked
+    /// with HighlightStabilityPolicy's 2-tick confirmation window, the
+    /// worst case is: one slow OCR pass (1s+) PLUS up to
+    /// RequiredConsecutiveTicksToAdoptChange more ticks before "gone"
+    /// finally gets confirmed and cleared — comfortably enough to read as
+    /// "5+ seconds" to a pharmacist watching the screen.
+    ///
+    /// FIX: this is the ONE thing that needs to be cheap enough to run
+    /// every ~500ms regardless of what a slower, already-in-flight tick is
+    /// doing — two P/Invoke calls (see OrderAssistWindowLocator.IsWindowStillValid),
+    /// no capture, no OCR, no full EnumWindows pass. Runs synchronously
+    /// from the timer's own Tick handler, ahead of SafeTickAsync's
+    /// reentrancy guard, not gated by it. Bypasses HighlightStabilityPolicy's
+    /// confirmation debounce entirely on purpose ("gone" is never a false
+    /// positive worth debouncing against — a stale HWND can't un-close
+    /// itself) and bumps _generation so a slow tick that started against
+    /// the now-gone window can never redisplay its late result afterward
+    /// (see TickGenerationGate's own doc).
+    /// </summary>
+    private void FastCloseCheck()
+    {
+        if (!_windowShown) return;
+        if (OrderAssistWindowLocator.IsWindowStillValid(_currentTargetHandle)) return;
+
+        _generation++;
+        try { _tickCts?.Cancel(); } catch (ObjectDisposedException) { /* nothing in flight -- fine, same posture as SetEnabled */ }
+
+        HideOverlayIfShown();
+        ResetHighlightStability();
+        _currentTargetHandle = IntPtr.Zero;
     }
 
     /// <summary>Releases the highlight window on app shutdown — call from MainWindow's Closed handler alongside IntegratedOverlayCoordinator.Shutdown().</summary>
@@ -285,10 +356,12 @@ public sealed class OrderAssistCoordinator
             // has no business influencing a completely different (or
             // absent) screen once Pioneer navigates away.
             ResetHighlightStability();
+            _currentTargetHandle = IntPtr.Zero;
             return;
         }
 
         var target = scan.Target;
+        _currentTargetHandle = target.Value.Handle; // see FastCloseCheck's own doc
 
         // A held/pending signature only makes sense against the SAME
         // target kind it was computed against — Create Recommended
@@ -353,6 +426,21 @@ public sealed class OrderAssistCoordinator
                     redBoxesDip.Add(ToDip(highlight.Left, highlight.Top, highlight.Right, highlight.Bottom, scale));
                 }
                 newSignature = HighlightSignature.ForZeroQuantityHighlights(zeroHighlights);
+
+                // ROUND 4 (Will's SECOND repeat report on the same
+                // symptom, this time with a screenshot showing a genuine
+                // 0 in Order Quantity that never got flagged) — see
+                // LogOrderQuantityColumnCellsIfEmpty's own doc: neither
+                // existing diagnostic (LogNoMatchDiagnosticsIfNeeded,
+                // LogColumnDiagnosticsIfNeeded) tells the difference
+                // between "column resolved but every cell legitimately
+                // read non-zero" and "column resolved but OCR silently
+                // missed the one cell that actually said 0" — this fills
+                // that specific gap.
+                if (zeroHighlights.Count == 0)
+                {
+                    LogOrderQuantityColumnCellsIfEmpty(ocrResult.Words);
+                }
                 break;
 
             case OrderAssistWindowKind.CatalogSubstitution:
@@ -534,11 +622,21 @@ public sealed class OrderAssistCoordinator
             sortBadgeIsSorted = badge.IsSorted;
         }
 
+        DipRect? mckessonBaselineDip = null;
+        string? mckessonBaselineLabel = null;
+        if (annotations.McKessonBaselineMarker is { } mckessonBaseline)
+        {
+            mckessonBaselineDip = ToDip(mckessonBaseline.Left, mckessonBaseline.Top, mckessonBaseline.Right, mckessonBaseline.Bottom, scale);
+            mckessonBaselineLabel = mckessonBaseline.Label;
+        }
+
         return new CatalogHighlights(
             savingsBadgesDip,
             bestLargeDip, bestLargeLabel,
             bestSmallDip, bestSmallLabel,
-            sortBadgeAnchorDip, sortBadgeText, sortBadgeIsSorted);
+            sortBadgeAnchorDip, sortBadgeText, sortBadgeIsSorted,
+            ProcessingAnchorDip: null,
+            McKessonBaselineDip: mckessonBaselineDip, McKessonBaselineLabel: mckessonBaselineLabel);
     }
 
 
@@ -725,5 +823,64 @@ public sealed class OrderAssistCoordinator
             }));
 
         OcrLogger.LogTiming($"OrderAssist[{kind}]: column resolution failed for {missingDescription}. {candidates.Count} candidate row-window(s) scanned: {candidatesDisplay}");
+    }
+
+    /// <summary>
+    /// ROUND 4 (Will's SECOND repeat report on Order Quantity
+    /// zero-flagging, this time WITH a screenshot showing a genuine 0
+    /// that never got flagged) — fills a diagnostic gap neither existing
+    /// logger covers: an EMPTY zeroHighlights result is only a genuine
+    /// "nothing to flag" when every Order Quantity cell this tick
+    /// actually read a non-zero number. If OCR silently missed the ONE
+    /// cell that said "0" (a lone, single-character digit is
+    /// architecturally the hardest possible OCR target — see
+    /// WindowsMediaOcrEngine's own UPSCALE doc for the last time a
+    /// small-text OCR miss was diagnosed this exact way), that cell reads
+    /// back as "" (CellValueBucketizer's "blank cell -> Unknown, never
+    /// flagged" contract — see ZeroQuantityDetector), which is
+    /// INDISTINGUISHABLE from a legitimately empty tick anywhere else in
+    /// this pipeline. Logs the RAW per-row cell text this tick actually
+    /// read for the Order Quantity column — no PHI risk (drug/inventory
+    /// quantities only, same posture as every other Order Assist
+    /// diagnostic — see OrderAssistWindowLocator.ScanResult's own PHI
+    /// CAVEAT contrasting this with OTHER Pioneer windows) — so the NEXT
+    /// capture where Will sees a real, unflagged 0 on screen shows
+    /// definitively whether this app read "0" and failed to classify it
+    /// (a real bug elsewhere in this file) or read "" / something else
+    /// entirely (an OCR miss on that one glyph — the likelier explanation
+    /// given this round's header-gap/column-resolution re-measurement
+    /// against Will's own screenshot came back clean, see the branch
+    /// report). Re-runs the SAME row-grouping/header/column steps
+    /// CreateRecommendedOrdersScanner's own already-computed,
+    /// already-fail-safe result used — never second-guesses it, purely
+    /// for this extra logging. Silently does nothing if the column
+    /// itself didn't resolve this tick — LogColumnDiagnosticsIfNeeded
+    /// (called separately) already owns that failure shape.
+    /// </summary>
+    private void LogOrderQuantityColumnCellsIfEmpty(IReadOnlyList<OcrWord> words)
+    {
+        try
+        {
+            var rows = TableRowGrouper.GroupIntoRows(words);
+            var winner = HeaderRowWindowSelector.SelectBest(rows, new[] { CreateRecommendedOrdersScanner.OrderQuantityHeaderLabel });
+            if (winner is null) return; // LogColumnDiagnosticsIfNeeded already logs this failure shape
+
+            var orderQuantityColumn = ColumnResolver.ResolveExact(winner.Bands, CreateRecommendedOrdersScanner.OrderQuantityHeaderLabel);
+            if (orderQuantityColumn is null) return; // ditto
+
+            var bodyRows = rows.Skip(winner.StartRowIndex + winner.RowCount).ToList();
+            var cells = CellValueBucketizer.BucketColumn(bodyRows, orderQuantityColumn);
+            var cellTexts = cells.Select(c => string.IsNullOrWhiteSpace(c.Text) ? "(blank)" : c.Text).ToList();
+
+            var signature = string.Join("|", cellTexts);
+            if (signature == _lastLoggedOrderQuantityCellsSignature) return;
+            _lastLoggedOrderQuantityCellsSignature = signature;
+
+            OcrLogger.LogTiming($"OrderAssist[CreateRecommendedOrders]: 0 zero-quantity highlights this tick. Order Quantity column read {cellTexts.Count} row(s): [{string.Join(", ", cellTexts)}]");
+        }
+        catch
+        {
+            // Best-effort diagnostic only — see LogNoMatchDiagnosticsIfNeeded's posture.
+        }
     }
 }
