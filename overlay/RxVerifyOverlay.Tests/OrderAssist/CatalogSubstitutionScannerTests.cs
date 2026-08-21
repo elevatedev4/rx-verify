@@ -56,21 +56,35 @@ public class CatalogSubstitutionScannerTests
 
         var badge = Assert.Single(badges);
         Assert.Equal(0, badge.RowIndex); // the ANDA row
-        Assert.Equal("30% savings", badge.SavingsDisplay); // (10.00-7.00)/10.00 = 30%
+        // ROUND 4 (Will: "Leave off the word savings from there").
+        Assert.Equal("30%", badge.SavingsDisplay); // (10.00-7.00)/10.00 = 30%
         Assert.True(badge.MeetsThreshold);
     }
 
+    /// <summary>
+    /// ROUND 4 (Will verbatim: "make sure the green highlight covers the
+    /// whole row" + "the % indicator show the %, always at the right
+    /// side (one is floating over due to AWP and AWP per unit being
+    /// empty)") — REPLACES this test's round-3 assumption. Round 3
+    /// anchored a badge to the ROW's own OCR'd word extent (here, "ANDA"
+    /// at x=10 through the real cost cell ending at x=400); round 4
+    /// anchors it to the TABLE's own resolved column bands instead (see
+    /// CatalogSubstitutionScanner's own round-4 doc) so a row with blank
+    /// trailing cells still gets a full-width fill and a consistently
+    /// right-anchored badge. Left/Right below are the table's own
+    /// leftmost (Supplier, x=0) and rightmost (the REAL Rebate Cost Per
+    /// Unit column, x=444 = 419+25 — not the decoy, which ends at 223)
+    /// resolved header bands, independent of which words row 0 itself
+    /// happened to have.
+    /// </summary>
     [Fact]
-    public void SavingsBadgeAnchorSpansTheFullRowNotJustTheCostCell()
+    public void SavingsBadgeAnchorSpansTheTablesFullColumnWidthNotJustTheRowsOwnCells()
     {
         var badges = CatalogSubstitutionScanner.Analyze(BuildWords()).SavingsBadges;
 
         var badge = Assert.Single(badges);
-        // Row 0's leftmost word is "ANDA" at x=10, rightmost is the real
-        // Rebate Cost Per Unit value ending at x=400 (370+30) -- the
-        // decoy cost cell (ending at 230) is NOT the rightmost.
-        Assert.Equal(10, badge.Left);
-        Assert.Equal(400, badge.Right);
+        Assert.Equal(0, badge.Left);
+        Assert.Equal(444, badge.Right);
     }
 
     [Fact]

@@ -70,32 +70,51 @@ public static class SubstitutionRecommender
     /// <summary>Empty (never null) if there's no valid McKesson baseline to compare against, or no row is actually cheaper than it — see class doc's edge cases.</summary>
     public static IReadOnlyList<RowSavings> EvaluateSavings(IReadOnlyList<CatalogRowInput> rows, decimal thresholdPercent = DefaultThresholdPercent)
     {
-        var parsed = rows
-            .Select(r => new
-            {
-                r.RowIndex,
-                IsMcKesson = SupplierClassifier.IsMcKesson(r.Supplier),
-                Cost = CurrencyParser.Parse(r.RebateCostPerUnitText)
-            })
-            .ToList();
-
-        var mckessonCandidates = parsed.Where(p => p.IsMcKesson && p.Cost is not null).ToList();
-        if (mckessonCandidates.Count == 0) return System.Array.Empty<RowSavings>();
-
-        var cheapestMcKesson = mckessonCandidates.OrderBy(p => p.Cost!.Value).ThenBy(p => p.RowIndex).First();
-        if (cheapestMcKesson.Cost!.Value <= 0m) return System.Array.Empty<RowSavings>();
+        var parsed = ParseRows(rows);
+        var baseline = FindCheapestMcKessonBaseline(parsed);
+        if (baseline is null) return System.Array.Empty<RowSavings>();
 
         var results = new List<RowSavings>();
         foreach (var p in parsed.Where(p => !p.IsMcKesson && p.Cost is not null))
         {
-            if (p.Cost!.Value >= cheapestMcKesson.Cost.Value) continue; // not cheaper than McKesson -> no badge
+            if (p.Cost!.Value >= baseline.Value.Cost) continue; // not cheaper than McKesson -> no badge
 
-            var savingsPercent = (cheapestMcKesson.Cost.Value - p.Cost.Value) / cheapestMcKesson.Cost.Value * 100m;
+            var savingsPercent = (baseline.Value.Cost - p.Cost.Value) / baseline.Value.Cost * 100m;
             var tier = savingsPercent >= thresholdPercent ? SavingsTier.AboveThreshold : SavingsTier.BelowThreshold;
             results.Add(new RowSavings(p.RowIndex, savingsPercent, FormatSavings(savingsPercent), tier));
         }
 
         return results.OrderBy(r => r.RowIndex).ToList();
+    }
+
+    /// <summary>
+    /// ROUND 4 (Will: "highlight the cheapest mckesson item that is being
+    /// compared in some intuitive color") — exposes WHICH row
+    /// EvaluateSavings actually used as its McKesson baseline, so
+    /// CatalogSubstitutionScanner can draw a marker on that specific row.
+    /// Shares ParseRows/FindCheapestMcKessonBaseline with EvaluateSavings
+    /// itself (same cheapest-valid-McKesson-row selection, same $0-baseline
+    /// exclusion) so the two can never disagree about which row is "the"
+    /// baseline. Null under the exact same conditions EvaluateSavings
+    /// returns empty for baseline reasons (no McKesson row with a
+    /// readable, positive cost) — see class doc's edge cases.
+    /// </summary>
+    public static int? FindCheapestMcKessonRowIndex(IReadOnlyList<CatalogRowInput> rows) =>
+        FindCheapestMcKessonBaseline(ParseRows(rows))?.RowIndex;
+
+    private sealed record ParsedRow(int RowIndex, bool IsMcKesson, decimal? Cost);
+
+    private static List<ParsedRow> ParseRows(IReadOnlyList<CatalogRowInput> rows) =>
+        rows.Select(r => new ParsedRow(r.RowIndex, SupplierClassifier.IsMcKesson(r.Supplier), CurrencyParser.Parse(r.RebateCostPerUnitText))).ToList();
+
+    /// <summary>The cheapest McKesson row with a readable, POSITIVE cost — null if no McKesson row parses at all, or the cheapest one parses to exactly $0 (see class doc's zero-cost-baseline edge case: a real free item is far less likely than OCR noise, and a savings percentage against a $0 baseline is undefined anyway).</summary>
+    private static (int RowIndex, decimal Cost)? FindCheapestMcKessonBaseline(IReadOnlyList<ParsedRow> parsed)
+    {
+        var mckessonCandidates = parsed.Where(p => p.IsMcKesson && p.Cost is not null).ToList();
+        if (mckessonCandidates.Count == 0) return null;
+
+        var cheapest = mckessonCandidates.OrderBy(p => p.Cost!.Value).ThenBy(p => p.RowIndex).First();
+        return cheapest.Cost!.Value > 0m ? (cheapest.RowIndex, cheapest.Cost.Value) : null;
     }
 
     /// <summary>
@@ -106,6 +125,11 @@ public static class SubstitutionRecommender
     /// trailing zeros the arithmetic that produced it happened to carry
     /// (e.g. "25.00" instead of "25"), which is an implementation detail
     /// no caller should have to care about.
+    ///
+    /// ROUND 4 (Will verbatim: "Just make the % indicator show the % ...
+    /// Leave off the word savings from there") — dropped the trailing
+    /// " savings" this round 3 originally appended; the badge is now just
+    /// the number and a percent sign, nothing else.
     /// </summary>
-    private static string FormatSavings(decimal savingsPercent) => $"{savingsPercent:0.#}% savings";
+    private static string FormatSavings(decimal savingsPercent) => $"{savingsPercent:0.#}%";
 }

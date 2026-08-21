@@ -57,19 +57,21 @@ public static class CatalogSubstitutionScanner
     /// <summary>
     /// Every Order Assist annotation for one tick of this window, bundled
     /// together. SavingsBadges/BestLargePackageMarker/BestSmallPackageMarker/
-    /// SortIndicatorBadge are each independently fail-closed (see
-    /// SubstitutionRecommender, PackageClassifier, SortOrderChecker) — an
-    /// empty/null field means "this particular decision found nothing worth
-    /// drawing this tick", never a placeholder for a wrong guess.
+    /// SortIndicatorBadge/McKessonBaselineMarker are each independently
+    /// fail-closed (see SubstitutionRecommender, PackageClassifier,
+    /// SortOrderChecker) — an empty/null field means "this particular
+    /// decision found nothing worth drawing this tick", never a
+    /// placeholder for a wrong guess.
     /// </summary>
     public sealed record CatalogAnnotations(
         IReadOnlyList<SavingsBadge> SavingsBadges,
         RowMarker? BestLargePackageMarker,
         RowMarker? BestSmallPackageMarker,
         ColumnBadge? SortIndicatorBadge,
-        ColumnAnchor? CostColumnHeaderAnchor)
+        ColumnAnchor? CostColumnHeaderAnchor,
+        RowMarker? McKessonBaselineMarker = null)
     {
-        public static readonly CatalogAnnotations Empty = new(Array.Empty<SavingsBadge>(), null, null, null, null);
+        public static readonly CatalogAnnotations Empty = new(Array.Empty<SavingsBadge>(), null, null, null, null, null);
     }
 
     /// <summary>CatalogAnnotations.Empty if the Supplier or Rebate Cost Per Unit column can't be resolved at all (nothing further downstream can be computed without those two) — the Shipping Size column is resolved independently and its absence only suppresses the package markers, never the rest.</summary>
@@ -114,21 +116,65 @@ public static class CatalogSubstitutionScanner
         // own raw OCR'd word extent.
         var canonicalRowHeight = RowPitchEstimator.EstimateCanonicalHeight(bodyRows);
 
+        // ROUND 4 (Will verbatim, two combined asks that share one fix):
+        //   3. "Try highlighting the whole row in green ... make sure the
+        //      green highlight covers the whole row" -- a fill anchored to
+        //      each ROW's own OCR'd word extent (round 3's approach) only
+        //      covers whatever cells happened to have text that tick, not
+        //      "the whole row".
+        //   4. "the % indicator ... always at the right side (one is
+        //      floating over due to AWP and AWP per unit being empty" --
+        //      same root cause from the other side: the badge is anchored
+        //      at rowRect.Right, which shrinks whenever a trailing column
+        //      (AWP, AWP Per Unit, ...) has no OCR'd text that tick.
+        // FIX: anchor the badge/fill's LEFT/RIGHT to the table's own
+        // resolved column bands (bands.Left/Right are the header's real
+        // text extents, stable every tick regardless of which BODY cells
+        // happen to be blank) instead of the row's own matched-word
+        // extent. Top/Bottom still come from RowBounds.ComputeUniform
+        // (per-row, canonical height) -- only the horizontal extent
+        // changes. bandsLeftEdge/bandsRightEdge are null (falling back to
+        // the row's own raw extent) only if bands is somehow empty, which
+        // can't happen once winner is non-null (HeaderRowWindowSelector
+        // never returns a winner with zero bands).
+        var bandsLeftEdge = bands.Count > 0 ? bands.Min(b => b.Left) : (double?)null;
+        var bandsRightEdge = bands.Count > 0 ? bands.Max(b => b.Right) : (double?)null;
+
         // ROUND 3 REDESIGN (Will: "Always Calculate the savings for each
         // item cheaper than mckesson and display it at the end of the row.
-        // Below our threshold, show in yellow, above show green. Don't
-        // highlight the whole row, just show it at the end.") — one badge
-        // per qualifying row, anchored to that row's own (uniform-height)
-        // extent; OrderAssistCoordinator/OrderAssistOverlayWindow draw it
-        // as a small tag past the row's right edge, never a full-row fill.
+        // Below our threshold, show in yellow, above show green.") --
+        // ROUND 4 (Will: "highlighting the whole row in green" -- see
+        // above) restores a full-row fill alongside the % badge (never
+        // instead of it — OrderAssistOverlayWindow keeps drawing both).
+        // One entry per qualifying row.
         var savingsBadges = new List<SavingsBadge>();
         foreach (var savings in SubstitutionRecommender.EvaluateSavings(rowInputs))
         {
             if (RowBounds.ComputeUniform(bodyRows[savings.RowIndex], canonicalRowHeight) is not { } rowRect) continue;
 
+            var left = bandsLeftEdge ?? rowRect.Left;
+            var right = bandsRightEdge ?? rowRect.Right;
+
             savingsBadges.Add(new SavingsBadge(
-                savings.RowIndex, rowRect.Left, rowRect.Top, rowRect.Right, rowRect.Bottom,
+                savings.RowIndex, left, rowRect.Top, right, rowRect.Bottom,
                 savings.SavingsDisplay, savings.Tier == SavingsTier.AboveThreshold));
+        }
+
+        // ROUND 4 (Will: "also highlight the cheapest mckesson item that is
+        // being compared in some intuitive color") — the SAME row
+        // SubstitutionRecommender used as its baseline (see
+        // FindCheapestMcKessonRowIndex's own doc: shares selection logic
+        // with EvaluateSavings so the two can never disagree), drawn as a
+        // full-row marker like the package-class markers below. Null
+        // (nothing drawn) under the exact same conditions EvaluateSavings
+        // itself would produce no badges at all — see that method's doc.
+        RowMarker? mckessonBaselineMarker = null;
+        if (SubstitutionRecommender.FindCheapestMcKessonRowIndex(rowInputs) is { } baselineIdx &&
+            RowBounds.ComputeUniform(bodyRows[baselineIdx], canonicalRowHeight) is { } baselineRect)
+        {
+            var left = bandsLeftEdge ?? baselineRect.Left;
+            var right = bandsRightEdge ?? baselineRect.Right;
+            mckessonBaselineMarker = new RowMarker(baselineIdx, left, baselineRect.Top, right, baselineRect.Bottom, "McKesson (compared)");
         }
 
         RowMarker? bestLargeMarker = null;
@@ -171,6 +217,6 @@ public static class CatalogSubstitutionScanner
             sortBadge = new ColumnBadge(costColumn.Left, costColumn.Right, winner.Top, sortText, sortState == SortIndicatorState.Sorted);
         }
 
-        return new CatalogAnnotations(savingsBadges, bestLargeMarker, bestSmallMarker, sortBadge, costColumnHeaderAnchor);
+        return new CatalogAnnotations(savingsBadges, bestLargeMarker, bestSmallMarker, sortBadge, costColumnHeaderAnchor, mckessonBaselineMarker);
     }
 }

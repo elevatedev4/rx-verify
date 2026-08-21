@@ -177,6 +177,27 @@ public static class OrderAssistWindowLocator
         return isPioneer;
     }
 
+    /// <summary>
+    /// ROUND 4 (Will verbatim: "Updating is too slow. I close the window
+    /// and it takes 5+ seconds to clear.") — the cheapest possible "is
+    /// this still a real, visible window" check (two P/Invoke calls, no
+    /// process lookup, no capture, no OCR), for OrderAssistCoordinator to
+    /// run on EVERY ~500ms timer tick, INDEPENDENT of whether a slow
+    /// capture+OCR tick is already in flight (see that class's own
+    /// SafeTickAsync reentrancy-guard doc — a genuinely slow OCR pass can
+    /// take much longer than one tick interval, and the reentrancy guard
+    /// skips ticks rather than queuing them; a synchronous, pre-tick check
+    /// like this one is what stays cheap enough to run every single ~500ms
+    /// wake-up regardless). IsWindow alone would still return true for a
+    /// window that's technically alive but no longer visible (e.g. Pioneer
+    /// minimized it) — hidden should clear just as fast as closed, so this
+    /// also checks IsWindowVisible.
+    /// </summary>
+    public static bool IsWindowStillValid(IntPtr hwnd) => hwnd != IntPtr.Zero && IsWindow(hwnd) && IsWindowVisible(hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
     private static string? ReadWindowTitle(IntPtr hwnd)
     {
         try

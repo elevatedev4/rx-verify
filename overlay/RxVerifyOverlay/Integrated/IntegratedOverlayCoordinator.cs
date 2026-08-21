@@ -80,10 +80,33 @@ public sealed class IntegratedOverlayCoordinator
     // itself, covering Pioneer's own menu, precisely what the owner asked
     // to avoid. Corrected to 60 (Color Legend's own row). Re-measured and
     // confirmed independently against the same screenshot before this fix.
-    private const double OrderModeControlBoxRightInsetDip = 300; // box's LEFT edge this far in from the window's RIGHT edge — keeps clear of "Color Legend," which sits flush against the right edge itself
+    //
+    // ROUND 4 (Will, live pharmacy report re-pulling round 3: "Order mode
+    // overlay is not in a good spot, it's overlapping things. Make it
+    // smaller and just right next to color legend in a little
+    // rectangle.") — round 3's 260x34 box, while already much smaller
+    // than Verify mode's 280x36, was STILL big enough to overlap
+    // something on Will's real workstation. Shrunk again (260x34 ->
+    // 160x30 — ~46% less area; ComboBoxCompact itself also narrowed
+    // 120->100dip in ControlBoxWindow.xaml to fit) and RightInsetDip
+    // retuned so the box's own RIGHT edge stays anchored at the SAME
+    // 40dip-from-window-right position round 3 used (300-260=40,
+    // 200-160=40) — the one part of round 3's estimate this report
+    // doesn't contradict (Will said "overlapping," never "too far
+    // left/right"), so shrinking width/height without also re-guessing
+    // the anchor point is the narrowest fix that responds to exactly what
+    // he described. Height floor is NOT arbitrary: ControlBoxWindow.xaml's
+    // outer Grid has Margin="6" on every side (12dip vertical) around a
+    // MinHeight=18 ComboBox/Button row, so 30 is the smallest height that
+    // doesn't clip that row — shrinking further would cut off the very
+    // control this panel exists to show. Still NEEDS LIVE CONFIRMATION —
+    // no live Pioneer/Order-mode screenshot has been available on this
+    // Mac for any round so far; see this constant group's own doc
+    // history above.
+    private const double OrderModeControlBoxRightInsetDip = 200; // box's LEFT edge this far in from the window's RIGHT edge — 160 (new width) + 40dip clearance, same right-edge anchor point round 3 used, just a narrower box hanging off it
     private const double OrderModeControlBoxTopOffsetDip = 60;   // level with "Color Legend" itself, NOT the Actions/Tools/Search/Reports/Analysis menu row above it (see REVIEW FIX above) — NEEDS LIVE CONFIRMATION, see this constant group's own doc
-    private const double OrderModeControlBoxWidthDip = 260;      // must match ControlBoxWindow.xaml's CompactOrderPanel sizing — small enough to sit beside Color Legend, not over it
-    private const double OrderModeControlBoxHeightDip = 34;      // a single compact row — just the Mode dropdown, no toggles/buttons (see ControlBoxWindow.SetOrderAssistState)
+    private const double OrderModeControlBoxWidthDip = 160;      // must match ControlBoxWindow.xaml's CompactOrderPanel sizing — round 4: shrunk from 260 (Will: "make it smaller")
+    private const double OrderModeControlBoxHeightDip = 30;      // a single compact row — just the Mode dropdown, no toggles/buttons (see ControlBoxWindow.SetOrderAssistState) — round 4: shrunk from 34, floored at 30 to avoid clipping (see doc above)
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();

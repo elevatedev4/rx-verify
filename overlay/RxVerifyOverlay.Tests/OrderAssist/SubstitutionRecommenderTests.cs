@@ -35,7 +35,10 @@ public class SubstitutionRecommenderTests
         var badge = Assert.Single(badges);
         Assert.Equal(1, badge.RowIndex);
         Assert.Equal(25m, badge.SavingsPercent);
-        Assert.Equal("25% savings", badge.SavingsDisplay);
+        // ROUND 4 (Will: "Leave off the word savings from there") -- just
+        // the number and a percent sign now, never " savings".
+        Assert.Equal("25%", badge.SavingsDisplay);
+        Assert.DoesNotContain("savings", badge.SavingsDisplay);
         Assert.Equal(SavingsTier.AboveThreshold, badge.Tier);
     }
 
@@ -197,5 +200,65 @@ public class SubstitutionRecommenderTests
         var badge = Assert.Single(badges);
         Assert.Equal(2, badge.RowIndex);
         Assert.Equal(SavingsTier.BelowThreshold, badge.Tier);
+    }
+
+    // ---- FindCheapestMcKessonRowIndex (round 4) -----------------------
+
+    [Fact]
+    public void FindCheapestMcKessonRowIndexPicksTheCheapestMcKessonRow()
+    {
+        var rows = new List<CatalogRowInput>
+        {
+            new(0, "McKesson", "10.00"),
+            new(1, "McKesson", "6.00"), // cheapest -> the real baseline
+            new(2, "ANDA", "5.00"),
+        };
+
+        Assert.Equal(1, SubstitutionRecommender.FindCheapestMcKessonRowIndex(rows));
+    }
+
+    [Fact]
+    public void FindCheapestMcKessonRowIndexIsNullWithNoMcKessonRow()
+    {
+        var rows = new List<CatalogRowInput>
+        {
+            new(0, "ANDA", "5.00"),
+        };
+
+        Assert.Null(SubstitutionRecommender.FindCheapestMcKessonRowIndex(rows));
+    }
+
+    [Fact]
+    public void FindCheapestMcKessonRowIndexIsNullWhenCheapestMcKessonCostIsZero()
+    {
+        // Same $0-baseline exclusion as EvaluateSavings -- see that
+        // method's own doc.
+        var rows = new List<CatalogRowInput>
+        {
+            new(0, "McKesson", "0.00"),
+            new(1, "ANDA", "1.00"),
+        };
+
+        Assert.Null(SubstitutionRecommender.FindCheapestMcKessonRowIndex(rows));
+    }
+
+    [Fact]
+    public void FindCheapestMcKessonRowIndexAgreesWithEvaluateSavingsBaseline()
+    {
+        // The two methods must never pick a different baseline row --
+        // EvaluateSavings' percentages are only meaningful relative to
+        // whichever row FindCheapestMcKessonRowIndex says is the marker.
+        var rows = new List<CatalogRowInput>
+        {
+            new(0, "McKesson", "10.00"),
+            new(1, "McKesson", "6.00"),
+            new(2, "ANDA", "5.00"), // (6-5)/6 = 16.67%
+        };
+
+        var baselineIndex = SubstitutionRecommender.FindCheapestMcKessonRowIndex(rows);
+        var badge = Assert.Single(SubstitutionRecommender.EvaluateSavings(rows));
+
+        Assert.Equal(1, baselineIndex);
+        Assert.NotEqual(baselineIndex, badge.RowIndex);
     }
 }

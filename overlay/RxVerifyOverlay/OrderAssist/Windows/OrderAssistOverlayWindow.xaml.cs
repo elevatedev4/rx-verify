@@ -38,7 +38,14 @@ public sealed record CatalogHighlights(
     DipRect? SortBadgeAnchorDip,
     string? SortBadgeText,
     bool SortBadgeIsSorted,
-    DipRect? ProcessingAnchorDip = null);
+    DipRect? ProcessingAnchorDip = null,
+    // ROUND 4 (Will: "also highlight the cheapest mckesson item that is
+    // being compared in some intuitive color") — the McKesson row
+    // SubstitutionRecommender used as its savings baseline, see
+    // CatalogSubstitutionScanner.CatalogAnnotations.McKessonBaselineMarker's
+    // own doc.
+    DipRect? McKessonBaselineDip = null,
+    string? McKessonBaselineLabel = null);
 
 /// <summary>
 /// Order Assist's own click-through highlight layer — red boxes over
@@ -123,6 +130,36 @@ public sealed partial class OrderAssistOverlayWindow : Window
     private static readonly SolidColorBrush GreenBorderBrush = new(Color.FromRgb(0x2E, 0x7D, 0x32));
     private static readonly SolidColorBrush YellowBorderBrush = new(Color.FromRgb(0xF9, 0xA8, 0x25));
     private const double GreenBorderThickness = 3;
+
+    // ROUND 4 (Will verbatim: "Try highlighting the whole row in green ...
+    // make sure the green highlight covers the whole row and is fairly
+    // transparent so it doesn't impede reading") — restores a full-row
+    // FILL alongside (never instead of) the round-3 end-of-row % badge.
+    // Low alpha (0x30 of 0xFF, ~19%) is the "fairly transparent" part —
+    // dark text underneath stays fully legible. Same green/yellow hues as
+    // the badge borders above (GreenBorderBrush/YellowBorderBrush), just
+    // translucent, so the fill and the badge always read as the same
+    // decision rather than two different color systems.
+    private static readonly SolidColorBrush GreenRowFillBrush = new(Color.FromArgb(0x30, 0x2E, 0x7D, 0x32));
+    private static readonly SolidColorBrush YellowRowFillBrush = new(Color.FromArgb(0x30, 0xF9, 0xA8, 0x25));
+
+    // ROUND 4 (Will: "also highlight the cheapest mckesson item that is
+    // being compared in some intuitive color") — a THIRD hue, distinct
+    // from green/yellow/red (all already mean a verdict) and from the
+    // existing PackageMarkerBorderBrush blue (already means "best
+    // large/small package", a different signal). Indigo/violet reads as
+    // informational ("this is what everything else is being measured
+    // against"), not a verdict of its own.
+    private static readonly SolidColorBrush McKessonBaselineFillBrush = new(Color.FromArgb(0x28, 0x5E, 0x35, 0xB1));
+    private static readonly SolidColorBrush McKessonBaselineBorderBrush = new(Color.FromRgb(0x5E, 0x35, 0xB1));
+    private const double McKessonBaselineBorderThickness = 2;
+
+    // ROUND 4 (Will: "If it doesn't meet the threshold to show good
+    // savings, recommend ordering from McKesson by showing an 'Order from
+    // McKesson' indicator") — deliberately a muted blue-gray, distinct
+    // from every verdict color above; this is guidance ("stick with
+    // McKesson"), not a savings result of its own.
+    private static readonly SolidColorBrush OrderFromMcKessonBrush = new(Color.FromRgb(0x54, 0x6E, 0x7A));
 
     // Round-2 "best large vs best small package": an OUTLINE-only marker
     // (no fill) so it reads as a lighter/secondary signal that never
@@ -225,12 +262,31 @@ public sealed partial class OrderAssistOverlayWindow : Window
 
         // ROUND 3 (Will: "Always Calculate the savings for each item
         // cheaper than mckesson and display it at the end of the row.
-        // Below our threshold, show in yellow, above show green. Don't
-        // highlight the whole row, just show it at the end.") — one small
-        // end-of-row badge per qualifying row, no whole-row fill at all.
+        // Below our threshold, show in yellow, above show green.") —
+        // ROUND 4 (Will: "Try highlighting the whole row in green ...
+        // make sure the green highlight covers the whole row and is
+        // fairly transparent" + "the % indicator show the %, always at
+        // the right side") — restores a full-row translucent fill
+        // alongside the % badge (RowDip now spans the table's own
+        // resolved column bands, not just whatever cells had OCR'd text
+        // that tick — see CatalogSubstitutionScanner's own round-4 doc —
+        // so both the fill and the badge anchor are stable regardless of
+        // empty trailing columns). Below-threshold rows also get a small
+        // "Order from McKesson" tag (Will, item 6).
         foreach (var badge in catalog.SavingsBadges)
         {
+            AddRect(badge.RowDip, badge.MeetsThreshold ? GreenRowFillBrush : YellowRowFillBrush, borderBrush: null);
             AddSavingsLabel(badge.RowDip, badge.SavingsDisplay, badge.MeetsThreshold ? GreenBorderBrush : YellowBorderBrush);
+
+            if (!badge.MeetsThreshold)
+            {
+                AddOrderFromMcKessonTag(badge.RowDip);
+            }
+        }
+
+        if (catalog.McKessonBaselineDip is { } mckessonBaseline && !string.IsNullOrWhiteSpace(catalog.McKessonBaselineLabel))
+        {
+            AddMcKessonBaselineMarker(mckessonBaseline, catalog.McKessonBaselineLabel!);
         }
 
         if (catalog.BestLargePackageDip is { } bestLarge && !string.IsNullOrWhiteSpace(catalog.BestLargePackageLabel))
@@ -343,6 +399,67 @@ public sealed partial class OrderAssistOverlayWindow : Window
         Canvas.SetLeft(badge, anchorDip.X + anchorDip.Width + ProcessingBadgeGapDip);
         Canvas.SetTop(badge, Math.Max(0, anchorDip.Y - SortBadgeHeightDip));
         HighlightCanvas.Children.Add(badge);
+    }
+
+    /// <summary>
+    /// ROUND 4 (Will: "If it doesn't meet the threshold to show good
+    /// savings, recommend ordering from McKesson by showing an 'Order
+    /// from McKesson' indicator") — a small tag stacked just BELOW the
+    /// row's own extent (never to the right, like AddSavingsLabel — that
+    /// spot is already taken by the % badge, and this tag's own text
+    /// width isn't known ahead of layout) at the same X anchor the %
+    /// badge itself uses, so the two visually read as one group.
+    /// </summary>
+    private void AddOrderFromMcKessonTag(DipRect rowDip)
+    {
+        var tag = new Border
+        {
+            Background = OrderFromMcKessonBrush,
+            Padding = new Thickness(4, 1, 4, 1),
+            IsHitTestVisible = false,
+            Child = new TextBlock
+            {
+                Text = "Order from McKesson",
+                Foreground = Brushes.White,
+                FontSize = 9,
+                FontWeight = FontWeights.SemiBold
+            }
+        };
+
+        Canvas.SetLeft(tag, rowDip.X + rowDip.Width + 4);
+        Canvas.SetTop(tag, rowDip.Y + rowDip.Height + 2);
+        HighlightCanvas.Children.Add(tag);
+    }
+
+    /// <summary>
+    /// ROUND 4 (Will: "also highlight the cheapest mckesson item that is
+    /// being compared in some intuitive color") — a translucent full-row
+    /// fill (same "fairly transparent, doesn't impede reading" posture as
+    /// the green/yellow savings fills) plus an outline and a small label,
+    /// in a THIRD hue distinct from every verdict color already in use —
+    /// see McKessonBaselineFillBrush's own doc.
+    /// </summary>
+    private void AddMcKessonBaselineMarker(DipRect dip, string label)
+    {
+        AddRect(dip, McKessonBaselineFillBrush, McKessonBaselineBorderBrush, McKessonBaselineBorderThickness);
+
+        var tag = new Border
+        {
+            Background = McKessonBaselineBorderBrush,
+            Padding = new Thickness(4, 1, 4, 1),
+            IsHitTestVisible = false,
+            Child = new TextBlock
+            {
+                Text = label,
+                Foreground = Brushes.White,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold
+            }
+        };
+
+        Canvas.SetLeft(tag, dip.X + 2);
+        Canvas.SetTop(tag, Math.Max(0, dip.Y - PackageMarkerLabelOffsetDip));
+        HighlightCanvas.Children.Add(tag);
     }
 
     /// <summary>
