@@ -42,19 +42,40 @@ namespace RxVerifyOverlay.OrderAssist.Ocr;
 public static class RowHighlightNormalizer
 {
     /// <summary>
+    /// ROUND 5 diagnostic-only record for a scanline band that was NOT
+    /// accepted as a highlight but whose dominant color still cleared
+    /// RowHighlightColorDetector.MinChromaForDiagnosticCandidate -- i.e. a
+    /// "near miss" worth reporting, not an ordinary plain-white/black-text
+    /// row. Carries the measured chroma/luminance/fill-fraction of the
+    /// band's OPENING scanline (a representative sample, not an average --
+    /// kept simple on purpose) so Will's next report on a still-unread
+    /// colored row pinpoints the exact values RowHighlightColorDetector saw,
+    /// instead of another guess.
+    /// </summary>
+    public readonly record struct RejectedHighlightCandidate(int Top, int Bottom, int Chroma, double Luminance, double Fraction);
+
+    /// <summary>Result of one NormalizeInPlace call -- the accepted (binarized) bands plus, for diagnostics only, every rejected near-miss band. See RejectedHighlightCandidate's own doc.</summary>
+    public readonly record struct NormalizeResult(
+        IReadOnlyList<(int Top, int Bottom)> AcceptedBands,
+        IReadOnlyList<RejectedHighlightCandidate> RejectedCandidates);
+
+    private static readonly NormalizeResult EmptyResult = new(Array.Empty<(int, int)>(), Array.Empty<RejectedHighlightCandidate>());
+
+    /// <summary>
     /// Binarizes every highlighted scanline of <paramref name="bitmap"/> in
     /// place. Returns the Y-ranges (inclusive top, exclusive bottom, in the
-    /// bitmap's own pixel coordinates) of every band actually touched --
-    /// purely for OrderAssistCoordinator's own local diagnostic logging
-    /// (same posture as round 2: since the exact chroma/luminance bounds
-    /// are still an estimate, this is what proves or disproves the
-    /// heuristic firing at all on Will's next real capture, without
-    /// needing another live-diagnosis round). Never throws outward: any
-    /// failure degrades to "did nothing this tick" (returns an empty list,
-    /// bitmap left unmodified) rather than blocking the capture the caller
-    /// already has in hand.
+    /// bitmap's own pixel coordinates) of every band actually touched, PLUS
+    /// (ROUND 5) every rejected near-miss band -- purely for
+    /// OrderAssistCoordinator's own local diagnostic logging (same posture
+    /// as round 2: since the exact chroma/luminance bounds are still an
+    /// estimate, this is what proves or disproves the heuristic firing at
+    /// all on Will's next real capture, without needing another
+    /// live-diagnosis round). Never throws outward: any failure degrades to
+    /// "did nothing this tick" (returns an empty result, bitmap left
+    /// unmodified) rather than blocking the capture the caller already has
+    /// in hand.
     /// </summary>
-    public static IReadOnlyList<(int Top, int Bottom)> NormalizeInPlace(Bitmap bitmap)
+    public static NormalizeResult NormalizeInPlace(Bitmap bitmap)
     {
         try
         {
@@ -62,19 +83,20 @@ public static class RowHighlightNormalizer
         }
         catch
         {
-            return Array.Empty<(int, int)>();
+            return EmptyResult;
         }
     }
 
-    private static IReadOnlyList<(int Top, int Bottom)> NormalizeInPlaceCore(Bitmap bitmap)
+    private static NormalizeResult NormalizeInPlaceCore(Bitmap bitmap)
     {
         var width = bitmap.Width;
         var height = bitmap.Height;
-        if (width <= 0 || height <= 0) return Array.Empty<(int, int)>();
+        if (width <= 0 || height <= 0) return EmptyResult;
 
         var rect = new Rectangle(0, 0, width, height);
         var data = bitmap.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
         var bands = new List<(int Top, int Bottom)>();
+        var candidates = new List<RejectedHighlightCandidate>();
 
         try
         {
@@ -84,6 +106,10 @@ public static class RowHighlightNormalizer
 
             var pixelsInRow = new (byte R, byte G, byte B)[width];
             var bandOpenAt = -1;
+            var candidateOpenAt = -1;
+            var candidateChroma = 0;
+            var candidateLuminance = 0.0;
+            var candidateFraction = 0.0;
 
             for (var y = 0; y < height; y++)
             {
@@ -125,15 +151,55 @@ public static class RowHighlightNormalizer
                     }
 
                     if (bandOpenAt < 0) bandOpenAt = y;
+
+                    // An accepted scanline can't also be a rejected
+                    // candidate -- close out any candidate band that was
+                    // open going into this row.
+                    if (candidateOpenAt >= 0)
+                    {
+                        candidates.Add(new RejectedHighlightCandidate(candidateOpenAt, y, candidateChroma, candidateLuminance, candidateFraction));
+                        candidateOpenAt = -1;
+                    }
                 }
-                else if (bandOpenAt >= 0)
+                else
                 {
-                    bands.Add((bandOpenAt, y));
-                    bandOpenAt = -1;
+                    if (bandOpenAt >= 0)
+                    {
+                        bands.Add((bandOpenAt, y));
+                        bandOpenAt = -1;
+                    }
+
+                    // ROUND 5 diagnostic: not accepted, but is it a near
+                    // miss worth logging (some real tint), or just an
+                    // ordinary plain-background row (chroma ~0)?
+                    var dominant = RowHighlightColorDetector.EstimateDominantColor(pixelsInRow);
+                    var (chroma, luminance) = RowHighlightColorDetector.MeasureColor(dominant.R, dominant.G, dominant.B);
+
+                    if (chroma >= RowHighlightColorDetector.MinChromaForDiagnosticCandidate)
+                    {
+                        if (candidateOpenAt < 0)
+                        {
+                            candidateOpenAt = y;
+                            candidateChroma = chroma;
+                            candidateLuminance = luminance;
+                            var matchCount = 0;
+                            foreach (var px in pixelsInRow)
+                            {
+                                if (RowHighlightColorDetector.IsCloseToColor(px.R, px.G, px.B, dominant)) matchCount++;
+                            }
+                            candidateFraction = pixelsInRow.Length == 0 ? 0.0 : (double)matchCount / pixelsInRow.Length;
+                        }
+                    }
+                    else if (candidateOpenAt >= 0)
+                    {
+                        candidates.Add(new RejectedHighlightCandidate(candidateOpenAt, y, candidateChroma, candidateLuminance, candidateFraction));
+                        candidateOpenAt = -1;
+                    }
                 }
             }
 
             if (bandOpenAt >= 0) bands.Add((bandOpenAt, height));
+            if (candidateOpenAt >= 0) candidates.Add(new RejectedHighlightCandidate(candidateOpenAt, height, candidateChroma, candidateLuminance, candidateFraction));
 
             Marshal.Copy(buffer, 0, data.Scan0, buffer.Length);
         }
@@ -142,6 +208,6 @@ public static class RowHighlightNormalizer
             bitmap.UnlockBits(data);
         }
 
-        return bands;
+        return new NormalizeResult(bands, candidates);
     }
 }

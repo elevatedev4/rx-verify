@@ -62,21 +62,49 @@ namespace RxVerifyOverlay.OrderAssist.Ocr;
 /// ordinary row, since ordinary body-text rows are >90% plain background
 /// pixels by area and their per-row dominant/median color stays low-chroma
 /// by construction.
+///
+/// ROUND 5 (Will, verbatim: "Order is still not reading the colored rows.
+/// It's only reading the white ones. But the yellow and blue colored rows
+/// are valid."): round 3/4's framing above was backwards on one point --
+/// "pale green/yellow row-banding tints" are NOT always inert decoration to
+/// exclude; Will's PALE yellow and PALE/light blue rows are genuine
+/// highlights that must be detected same as a saturated one. The 60-chroma
+/// floor rejected them outright (pale yellow ~50, light blue ~57, pale
+/// header blue ~45 -- all under 60), so those rows never got binarized and
+/// OCR silently skipped them exactly as reported. See
+/// MinChromaForHighlight's own doc for the corrected floor (30) and why it
+/// still keeps plain white/near-white/light-gray rows AND the one
+/// remaining genuinely-neutral pale tint (pale green banding, chroma=25)
+/// out.
 /// </summary>
 public static class RowHighlightColorDetector
 {
     /// <summary>
     /// Minimum chroma (max(R,G,B) - min(R,G,B)) for a color to count as a
-    /// genuine highlight FILL rather than plain white/near-white or one of
-    /// the existing pale green/yellow row-banding tints. Pale tints
-    /// measured/estimated in round 2's own test fixtures top out around
-    /// chroma 25-57 (e.g. (210,235,210) chroma=25, (250,245,200) chroma=50,
-    /// (173,216,230) chroma=57); a genuine selection/flag fill (e.g.
-    /// (20,90,170) chroma=150, or pure highlight yellow (255,255,0)
-    /// chroma=255) sits well above that. 60 leaves clear margin on both
-    /// sides.
+    /// genuine highlight FILL rather than plain white/near-white/light-gray.
+    ///
+    /// ROUND 5 (Will: "Order is still not reading the colored rows. It's
+    /// only reading the white ones. But the yellow and blue colored rows
+    /// are valid."): round 3/4's 60 floor was calibrated on the WRONG
+    /// assumption that pale yellow/light-blue tints are inert row-banding
+    /// to be excluded -- Will's report says the opposite: PALE colored rows
+    /// (a light yellow flag, a light blue selection/header tint) are
+    /// legitimate highlights that must be detected, not banding to ignore.
+    /// Those exact pale tints measure: (250,245,200) pale yellow chroma=50,
+    /// (173,216,230) light blue chroma=57, (200,220,245) pale header blue
+    /// chroma=45 -- all BELOW the old 60 floor, so round 3/4 silently
+    /// skipped every one of them, matching the bug report exactly (pale
+    /// rows never binarized -> OCR only ever reads the white ones).
+    ///
+    /// Lowered to 30. Still well clear of plain white/near-white/light-gray
+    /// rows, which stay at chroma=0 (every channel equal) plus a few points
+    /// of anti-aliasing noise (typically &lt;15) -- and clear of the one
+    /// pale-but-genuinely-neutral tint this detector must keep rejecting,
+    /// (210,235,210) pale green banding at chroma=25. 30 sits above that
+    /// with a 5-point margin and below the lowest now-required pale color
+    /// (45) with a 15-point margin.
     /// </summary>
-    public const int MinChromaForHighlight = 60;
+    public const int MinChromaForHighlight = 30;
 
     /// <summary>Luminance floor -- excludes near-black (ordinary dark text itself, never a row FILL).</summary>
     public const int MinLuminanceForHighlight = 40;
@@ -112,8 +140,29 @@ public static class RowHighlightColorDetector
     /// <summary>Default fraction of a scanline's pixels that must be background-colored for the WHOLE scanline to count as a highlighted band -- same "reject a thin stroke of colored text, only accept a genuine full-width fill" safety margin round 2's detector used.</summary>
     public const double DefaultMinHighlightFraction = 0.6;
 
+    /// <summary>
+    /// ROUND 5 diagnostic-only floor -- NOT part of the accept/reject
+    /// decision. A scanline whose dominant chroma clears this (but not the
+    /// real <see cref="MinChromaForHighlight"/> floor, or fails the
+    /// luminance band / fill-fraction check) is a "near miss" worth logging
+    /// so Will's next report carries the exact measured values instead of
+    /// another guess -- see OrderAssistCoordinator.LogSelectionBandsIfChanged.
+    /// Set low enough to skip ordinary anti-aliased white/black text edges
+    /// (typically chroma &lt;15) but still catch anything with deliberate,
+    /// visible tint.
+    /// </summary>
+    public const int MinChromaForDiagnosticCandidate = 15;
+
     /// <summary>ITU-R BT.601 luma -- the standard, simple RGB-to-perceived-brightness weighting; good enough here since this only needs to separate "roughly dark" from "roughly light", not calibrated photometric accuracy.</summary>
     private static double Luminance(byte r, byte g, byte b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+    /// <summary>Chroma (max(R,G,B) - min(R,G,B)) and luminance for one color -- the two raw measurements every accept/reject/diagnostic decision in this class is built from. Exposed publicly (ROUND 5) so callers -- currently just the normalizer's rejected-candidate diagnostic logging -- can report the exact measured values without duplicating this math.</summary>
+    public static (int Chroma, double Luminance) MeasureColor(byte r, byte g, byte b)
+    {
+        var max = Math.Max(r, Math.Max(g, b));
+        var min = Math.Min(r, Math.Min(g, b));
+        return (max - min, Luminance(r, g, b));
+    }
 
     /// <summary>
     /// True for a color that looks like a genuine highlight/flag/selection
@@ -125,10 +174,7 @@ public static class RowHighlightColorDetector
     /// </summary>
     public static bool IsHighlightedBackgroundColor(byte r, byte g, byte b)
     {
-        var max = Math.Max(r, Math.Max(g, b));
-        var min = Math.Min(r, Math.Min(g, b));
-        var chroma = max - min;
-        var luminance = Luminance(r, g, b);
+        var (chroma, luminance) = MeasureColor(r, g, b);
 
         return chroma >= MinChromaForHighlight &&
                luminance >= MinLuminanceForHighlight &&

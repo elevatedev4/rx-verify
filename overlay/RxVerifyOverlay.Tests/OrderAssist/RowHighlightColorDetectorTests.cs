@@ -69,26 +69,60 @@ public class RowHighlightColorDetectorTests
     public void PaleGreenRowTintIsNotAHighlightColor()
     {
         // Ordinary alternating-row banding must stay untouched — low chroma
-        // (pastel), unlike a genuine flag/selection fill.
+        // (pastel), unlike a genuine flag/selection fill. chroma=25, below
+        // ROUND 5's 30 floor with a 5-point margin.
         Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 210, g: 235, b: 210));
     }
 
     [Fact]
-    public void PaleYellowRowTintIsNotAHighlightColor()
+    public void PaleYellowRowTintIsAHighlightColor()
     {
-        Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 250, g: 245, b: 200));
+        // ROUND 5 (Will: "the yellow and blue colored rows are valid" but
+        // "it's only reading the white ones"): round 3/4 wrongly treated
+        // this as inert row-banding to exclude. chroma=50, now above the
+        // corrected 30 floor -- this is exactly the pale-yellow-row symptom
+        // Will reported.
+        Assert.True(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 250, g: 245, b: 200));
     }
 
     [Fact]
-    public void ClassicLightBlueHeaderTintIsNotAHighlightColor()
+    public void ClassicLightBlueHeaderTintIsAHighlightColor()
     {
-        Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 173, g: 216, b: 230));
+        // ROUND 5: chroma=57, above the corrected 30 floor -- one of Will's
+        // reported "blue colored rows are valid" cases.
+        Assert.True(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 173, g: 216, b: 230));
     }
 
     [Fact]
-    public void PaleHeaderTintBlueIsNotAHighlightColor()
+    public void PaleHeaderTintBlueIsAHighlightColor()
     {
-        Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 200, g: 220, b: 245));
+        // ROUND 5: chroma=45, above the corrected 30 floor.
+        Assert.True(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 200, g: 220, b: 245));
+    }
+
+    [Fact]
+    public void PlainWhiteIsNotAHighlightColor()
+    {
+        // ROUND 5 regression guard: chroma=0 -- must never trip the lowered
+        // floor just because it's uniformly light.
+        Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 255, g: 255, b: 255));
+    }
+
+    [Fact]
+    public void LightGrayIsNotAHighlightColor()
+    {
+        // ROUND 5 regression guard: chroma=0 (equal channels) -- a neutral
+        // gray must never be mistaken for a colored fill regardless of how
+        // low the chroma floor goes.
+        Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 240, g: 240, b: 240));
+    }
+
+    [Fact]
+    public void NearWhiteRowIsNotAHighlightColor()
+    {
+        // ROUND 5 regression guard: chroma=0, distinct from the existing
+        // (250,250,250) near-white case above.
+        Assert.False(RowHighlightColorDetector.IsHighlightedBackgroundColor(r: 245, g: 245, b: 245));
     }
 
     [Fact]
@@ -228,5 +262,94 @@ public class RowHighlightColorDetectorTests
     public void EmptyScanlineIsNeverAHighlightScanline()
     {
         Assert.False(RowHighlightColorDetector.IsHighlightScanline(new List<(byte, byte, byte)>()));
+    }
+
+    // ---- ROUND 5: pale-row full pipeline + binarization readability -------
+
+    [Fact]
+    public void ScanlineMajorityFilledWithPaleYellowWithDarkTextIsAHighlightScanline()
+    {
+        // Confirms the 0.6 dominant-fraction still holds for a pale row
+        // with a minority of dark text pixels (task 1's "verify the 0.6
+        // fraction still holds for pale rows with dark text" check) --
+        // matches Will's reported "pale yellow row is valid" case end to
+        // end, not just the single-color IsHighlightedBackgroundColor unit.
+        var paleYellow = ((byte)250, (byte)245, (byte)200);
+        var darkText = ((byte)20, (byte)20, (byte)20);
+
+        var pixels = new List<(byte, byte, byte)>();
+        for (var i = 0; i < 80; i++) pixels.Add(paleYellow);
+        for (var i = 0; i < 20; i++) pixels.Add(darkText);
+
+        Assert.True(RowHighlightColorDetector.IsHighlightScanline(pixels));
+    }
+
+    [Fact]
+    public void ScanlineMajorityFilledWithLightBlueWithDarkTextIsAHighlightScanline()
+    {
+        var lightBlue = ((byte)173, (byte)216, (byte)230);
+        var darkText = ((byte)15, (byte)15, (byte)60);
+
+        var pixels = new List<(byte, byte, byte)>();
+        for (var i = 0; i < 80; i++) pixels.Add(lightBlue);
+        for (var i = 0; i < 20; i++) pixels.Add(darkText);
+
+        Assert.True(RowHighlightColorDetector.IsHighlightScanline(pixels));
+    }
+
+    [Fact]
+    public void PaleYellowRowBinarizesTextDistinctlyFromBackground()
+    {
+        // Task 2: confirm the binarization decision (IsCloseToColor against
+        // the row's own dominant color -- the same test
+        // RowHighlightNormalizer.NormalizeInPlaceCore applies per pixel)
+        // does NOT collapse a pale background to all-white by also pulling
+        // in the dark text. Not testable through the normalizer itself on
+        // this Mac (System.Drawing.Common blocks real Bitmap pixel access
+        // outside Windows -- see that class's own doc) so this exercises
+        // the exact same per-pixel decision it delegates to.
+        var pixels = new List<(byte R, byte G, byte B)>();
+        for (var i = 0; i < 80; i++) pixels.Add((250, 245, 200)); // pale yellow fill
+        for (var i = 0; i < 20; i++) pixels.Add((20, 20, 20));    // dark text
+
+        var dominant = RowHighlightColorDetector.EstimateDominantColor(pixels);
+
+        // Background pixels binarize to white (close to dominant)...
+        Assert.True(RowHighlightColorDetector.IsCloseToColor(250, 245, 200, dominant));
+        // ...and text pixels binarize to black (NOT close to dominant) --
+        // i.e. this is NOT the all-white failure mode task 2 warns about.
+        Assert.False(RowHighlightColorDetector.IsCloseToColor(20, 20, 20, dominant));
+    }
+
+    [Fact]
+    public void LightBlueRowBinarizesTextDistinctlyFromBackground()
+    {
+        var pixels = new List<(byte R, byte G, byte B)>();
+        for (var i = 0; i < 80; i++) pixels.Add((173, 216, 230)); // light blue fill
+        for (var i = 0; i < 20; i++) pixels.Add((10, 10, 10));    // dark text
+
+        var dominant = RowHighlightColorDetector.EstimateDominantColor(pixels);
+
+        Assert.True(RowHighlightColorDetector.IsCloseToColor(173, 216, 230, dominant));
+        Assert.False(RowHighlightColorDetector.IsCloseToColor(10, 10, 10, dominant));
+    }
+
+    // ---- MeasureColor (ROUND 5 diagnostic helper) --------------------------
+
+    [Fact]
+    public void MeasureColorReportsChromaAndLuminanceMatchingIsHighlightedBackgroundColor()
+    {
+        var (chroma, luminance) = RowHighlightColorDetector.MeasureColor(r: 250, g: 245, b: 200);
+
+        Assert.Equal(50, chroma);
+        Assert.True(luminance is > 240 and < 242);
+    }
+
+    [Fact]
+    public void MeasureColorOfNeutralGrayHasZeroChroma()
+    {
+        var (chroma, _) = RowHighlightColorDetector.MeasureColor(r: 240, g: 240, b: 240);
+
+        Assert.Equal(0, chroma);
     }
 }

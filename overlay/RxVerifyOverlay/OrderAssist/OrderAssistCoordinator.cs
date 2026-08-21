@@ -405,8 +405,8 @@ public sealed class OrderAssistCoordinator
         // cell is being edited. Logging is best-effort and throttled the
         // same "log on change" way as every other diagnostic in this class
         // — see LogSelectionBandsIfChanged.
-        var highlightBands = RowHighlightNormalizer.NormalizeInPlace(bitmap);
-        LogSelectionBandsIfChanged(highlightBands);
+        var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap);
+        LogSelectionBandsIfChanged(highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
 
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
 
@@ -733,16 +733,45 @@ public sealed class OrderAssistCoordinator
     /// OCR'd text, never a screenshot — so there is nothing PHI-adjacent
     /// here at all, unlike the window-title/column-band diagnostics
     /// elsewhere in this class.
+    ///
+    /// ROUND 5: also logs the REJECTED near-miss bands (measured dominant
+    /// chroma/luminance/fill-fraction only — same non-PHI posture, still
+    /// never any OCR'd text or pixel data itself) so a still-unread colored
+    /// row's next report carries the exact values this detector saw
+    /// instead of another guess. See
+    /// RowHighlightNormalizer.RejectedHighlightCandidate's own doc.
     /// </summary>
-    private void LogSelectionBandsIfChanged(IReadOnlyList<(int Top, int Bottom)> bands)
+    private void LogSelectionBandsIfChanged(
+        IReadOnlyList<(int Top, int Bottom)> bands,
+        IReadOnlyList<RowHighlightNormalizer.RejectedHighlightCandidate> rejectedCandidates)
     {
         var signature = bands.Count == 0 ? "" : string.Join(",", bands.Select(b => $"{b.Top}-{b.Bottom}"));
-        if (signature == _lastLoggedSelectionBandsSignature) return;
-        _lastLoggedSelectionBandsSignature = signature;
+
+        // ROUND 5: fold the rejected near-miss bands into the same
+        // change-signature/throttle so a still-unread pale/colored row logs
+        // its measured chroma/luminance/fraction once per distinct
+        // capture, not every ~1s tick -- same "log on change" posture as
+        // the accepted-band signature above. See
+        // RowHighlightNormalizer.RejectedHighlightCandidate's own doc for
+        // why this exists (Will's next report on a row that's STILL not
+        // reading pinpoints the exact values instead of another guess).
+        var candidateSignature = rejectedCandidates.Count == 0
+            ? ""
+            : string.Join(",", rejectedCandidates.Select(c =>
+                $"{c.Top}-{c.Bottom}:chroma={c.Chroma},lum={c.Luminance:F0},frac={c.Fraction:F2}"));
+
+        var combinedSignature = signature + "|" + candidateSignature;
+        if (combinedSignature == _lastLoggedSelectionBandsSignature) return;
+        _lastLoggedSelectionBandsSignature = combinedSignature;
 
         OcrLogger.LogTiming(bands.Count == 0
             ? "OrderAssist: row-highlight normalizer found 0 bands this tick"
             : $"OrderAssist: row-highlight normalizer binarized {bands.Count} band(s) this tick: [{signature}]");
+
+        if (rejectedCandidates.Count > 0)
+        {
+            OcrLogger.LogTiming($"OrderAssist: row-highlight normalizer rejected {rejectedCandidates.Count} near-miss band(s) this tick (measured dominant color, not detected as highlight): [{candidateSignature}]");
+        }
     }
 
     /// <summary>
