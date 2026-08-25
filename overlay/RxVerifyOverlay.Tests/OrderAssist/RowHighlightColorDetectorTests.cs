@@ -264,6 +264,51 @@ public class RowHighlightColorDetectorTests
         Assert.False(RowHighlightColorDetector.IsHighlightScanline(new List<(byte, byte, byte)>()));
     }
 
+    [Fact]
+    public void ScanlineWithFiftyFivePercentFillNowCountsAfterTheRound5FractionLowering()
+    {
+        // ROUND 5 (Will, still after the chroma-30 fix: "Order is still not
+        // reading the colored rows" -- Catalog Substitution specifically).
+        // See DefaultMinHighlightFraction's own doc: the captured region is
+        // the WHOLE target window, so a real highlighted row's fill can be
+        // diluted below the old 0.6 floor by non-grid chrome/margin pixels
+        // on the same scanline. 55% would have FAILED under round 3/4's 0.6
+        // default; the round-5 default of 0.5 now accepts it.
+        var selectionBlue = ((byte)20, (byte)90, (byte)170);
+        var chrome = ((byte)245, (byte)245, (byte)245);
+
+        var pixels = new List<(byte, byte, byte)>();
+        for (var i = 0; i < 55; i++) pixels.Add(selectionBlue);
+        for (var i = 0; i < 45; i++) pixels.Add(chrome);
+
+        Assert.True(RowHighlightColorDetector.IsHighlightScanline(pixels));
+    }
+
+    [Fact]
+    public void ScanlineWellBelowHalfFillStillNeverCountsRegardlessOfTheRound5Lowering()
+    {
+        // Regression guard: the round-5 lowering (0.6 -> 0.5) still rejects
+        // a scanline where the highlight color is a genuine MINORITY, not
+        // just "not quite 60%" -- same "reject a thin colored stroke"
+        // property the fraction check exists for at all.
+        var selectionBlue = ((byte)20, (byte)90, (byte)170);
+        var chrome = ((byte)245, (byte)245, (byte)245);
+
+        var pixels = new List<(byte, byte, byte)>();
+        for (var i = 0; i < 35; i++) pixels.Add(selectionBlue);
+        for (var i = 0; i < 65; i++) pixels.Add(chrome);
+
+        Assert.False(RowHighlightColorDetector.IsHighlightScanline(pixels));
+    }
+
+    [Fact]
+    public void DefaultMinHighlightFractionMatchesDocumentedRound5Value()
+    {
+        // Pins the actual default so a future accidental tuning change
+        // shows up as a failing test, not silent drift.
+        Assert.Equal(0.5, RowHighlightColorDetector.DefaultMinHighlightFraction);
+    }
+
     // ---- ROUND 5: pale-row full pipeline + binarization readability -------
 
     [Fact]

@@ -54,11 +54,86 @@ public static class CreateRecommendedOrdersScanner
         var highlights = new List<ZeroCellHighlight>();
         foreach (var cell in cells)
         {
-            if (cell.Bounds is not { } bounds) continue; // blank/unreadable cell -> Unknown, never flagged (see ZeroQuantityDetector doc)
-            if (ZeroQuantityDetector.Classify(cell.Text) == ZeroCellState.Zero)
+            if (cell.Bounds is { } bounds)
             {
-                highlights.Add(new ZeroCellHighlight(cell.RowIndex, bounds.Left, bounds.Top, bounds.Right, bounds.Bottom));
+                if (ZeroQuantityDetector.Classify(cell.Text) == ZeroCellState.Zero)
+                {
+                    highlights.Add(new ZeroCellHighlight(cell.RowIndex, bounds.Left, bounds.Top, bounds.Right, bounds.Bottom));
+                }
+                continue;
             }
+
+            // ROUND 5 (Will's SECOND repeat report on this exact symptom,
+            // with a screenshot showing a genuine unflagged 0 — see
+            // OrderAssistCoordinator.LogOrderQuantityColumnCellsIfEmpty's
+            // own doc for the confirmed root cause: Windows.Media.Ocr
+            // architecturally struggles with a single, context-free digit,
+            // and a lone "0" is exactly that — it can silently produce NO
+            // word at all rather than misreading it, which is
+            // INDISTINGUISHABLE at this point from a genuinely blank cell.
+            //
+            // Evaluated against the branch brief's two options: (i) a
+            // targeted second OCR pass over just this column, more
+            // aggressively upscaled, was the brief's stated preference, but
+            // would add a full extra Windows.Media.Ocr call to EVERY tick
+            // that has a blank cell here — directly working against track
+            // 1's own "too slow" complaint on this same branch, and its
+            // crop/coordinate-remapping math couldn't be verified end-to-end
+            // without a real Windows build (not available in this
+            // environment — see branch report). Chose (ii) instead, exactly
+            // as the brief allows ("gate it behind row-quality checks and
+            // flag it clearly in your report").
+            //
+            // GATE (the "row-quality check" — deliberately stronger than
+            // just "the row has SOME other word"): TableRowGrouper never
+            // produces a row with zero words at all (see that class's own
+            // doc), so a row existing at all is a low bar that would barely
+            // filter anything. Instead this reuses HeaderBandLocator.IsDataRow
+            // — the SAME "does any word in this row look like a decimal-
+            // formatted number" heuristic HeaderRowWindowSelector already
+            // trusts elsewhere in this exact pipeline to tell a real grid
+            // data row apart from chrome/noise — as the corroborating
+            // signal. A genuine Create Recommended Orders row always
+            // carries at least one decimal-formatted numeric column (Cost
+            // Per Unit, per that class's own doc); requiring one here means
+            // a blank Order Quantity cell only turns into a highlight when
+            // the REST of its row independently proves this tick's OCR
+            // pass actually read a real table row, not a garbage/partial
+            // capture — the exact distinction Geometry/CellValue.cs's own
+            // "never coerce blank to zero" contract warns callers to
+            // preserve. This gate is intentionally narrow (this method
+            // only, never CellValueBucketizer/CellValue itself, which keep
+            // their existing "blank -> Unknown" contract for every other
+            // caller, e.g. CatalogSubstitutionScanner).
+            var row = bodyRows[cell.RowIndex];
+            if (!HeaderBandLocator.IsDataRow(row)) continue; // no corroborating numeric content -- stay silent per ZeroQuantityDetector's own "don't guess" posture
+
+            // BOUNDS APPROXIMATION: no OCR word exists to give an exact
+            // rect, so the highlight uses the Order Quantity column's own
+            // header-text extent (Left/Right — not the wider partition,
+            // which would spill into a neighboring column's territory) for
+            // the horizontal span, and the row's OTHER words' own Y-range
+            // for the vertical span (that IS this row, wherever its other
+            // cells sit).
+            var otherWordsInRow = row
+                .Where(w => !string.IsNullOrWhiteSpace(w.Text))
+                .Where(w => !CellValueBucketizer.IsCenterWithinPartition(w, orderQuantityColumn))
+                .ToList();
+
+            // Can't actually be empty here: cell.Bounds is null means no
+            // word in `row` matched the partition, and TableRowGrouper
+            // guarantees `row` itself is never empty (see that class's own
+            // doc) — so every one of row's words is, by construction,
+            // "other". Guarded anyway rather than assumed, since there's no
+            // sane rect to draw without at least one word's own Y-range.
+            if (otherWordsInRow.Count == 0) continue;
+
+            highlights.Add(new ZeroCellHighlight(
+                cell.RowIndex,
+                orderQuantityColumn.Left,
+                otherWordsInRow.Min(w => w.Y),
+                orderQuantityColumn.Right,
+                otherWordsInRow.Max(w => w.Y + w.H)));
         }
 
         return highlights;
