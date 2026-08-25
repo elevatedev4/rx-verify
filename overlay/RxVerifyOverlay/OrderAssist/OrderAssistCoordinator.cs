@@ -108,6 +108,25 @@ public sealed class OrderAssistCoordinator
     private bool _tickInProgress;
 
     /// <summary>
+    /// ROUND 5 (Will verbatim: "needs to be more responsive when the
+    /// screen changes") — set by TickAsync the instant it notices a
+    /// genuine screen change (the target window's KIND switched, or a
+    /// brand-new target HWND appeared where none/a different one was
+    /// tracked before — see the two set sites in TickAsync). Consumed by
+    /// the timer's own Tick handler AFTER SafeTickAsync's reentrancy guard
+    /// has already cleared (_tickInProgress back to false in its finally
+    /// block) — "a trigger-now path through the reentrancy guard safely":
+    /// this never calls SafeTickAsync from INSIDE an in-flight tick (that
+    /// would just no-op against the guard), only right after one finishes,
+    /// so a screen change gets a SECOND capture+OCR pass immediately
+    /// instead of waiting up to another full TimerIntervalMs for the
+    /// scheduled tick. Self-limiting: the follow-up pass only sets this
+    /// again if IT ALSO sees a fresh kind/handle change, which a settled
+    /// screen won't, so this can't runaway-loop.
+    /// </summary>
+    private bool _immediateRescanRequested;
+
+    /// <summary>
     /// ROUND 4 (Will verbatim: "Updating is too slow. I close the window
     /// and it takes 5+ seconds to clear.") — the HWND of whatever window
     /// this coordinator most recently scanned/targeted, tracked purely so
@@ -214,6 +233,20 @@ public sealed class OrderAssistCoordinator
             // however long that in-flight OCR pass takes).
             FastCloseCheck();
             await SafeTickAsync();
+
+            // ROUND 5 — see _immediateRescanRequested's own doc: this runs
+            // strictly AFTER SafeTickAsync's finally block has already
+            // reset _tickInProgress back to false, so the follow-up call
+            // below is never blocked by the reentrancy guard it just
+            // passed through. Loop (not just one extra pass) so a chain of
+            // fast screen changes (e.g. a kind switch immediately followed
+            // by another) each still get their own immediate follow-up,
+            // while a settled screen naturally stops requesting more.
+            while (_immediateRescanRequested)
+            {
+                _immediateRescanRequested = false;
+                await SafeTickAsync();
+            }
         };
     }
 
@@ -265,11 +298,13 @@ public sealed class OrderAssistCoordinator
     /// finishes its (now-stale) capture/OCR, and SafeTickAsync's reentrancy
     /// guard (`if (_tickInProgress) return;`) skips every NEW tick that
     /// would otherwise re-scan and catch the closed window sooner. Stacked
-    /// with HighlightStabilityPolicy's 2-tick confirmation window, the
-    /// worst case is: one slow OCR pass (1s+) PLUS up to
-    /// RequiredConsecutiveTicksToAdoptChange more ticks before "gone"
-    /// finally gets confirmed and cleared — comfortably enough to read as
-    /// "5+ seconds" to a pharmacist watching the screen.
+    /// with HighlightStabilityPolicy's confirmation window (2 ticks in the
+    /// clearing direction — see HighlightStabilityPolicy.RequiredConsecutiveTicksToClear's
+    /// own round-5 doc for why clearing/showing are no longer symmetric),
+    /// the worst case is: one slow OCR pass (1s+) PLUS up to
+    /// RequiredConsecutiveTicksToClear more ticks before "gone" finally
+    /// gets confirmed and cleared — comfortably enough to read as "5+
+    /// seconds" to a pharmacist watching the screen.
     ///
     /// FIX: this is the ONE thing that needs to be cheap enough to run
     /// every ~500ms regardless of what a slower, already-in-flight tick is
@@ -361,6 +396,16 @@ public sealed class OrderAssistCoordinator
         }
 
         var target = scan.Target;
+
+        // ROUND 5 — see _immediateRescanRequested's own doc. Captured
+        // BEFORE _currentTargetHandle is overwritten below: a brand-new
+        // target HWND (Pioneer just opened this popup, or switched from
+        // one target window straight to the other with no in-between
+        // no-match tick) is exactly the "new order window appearing" case
+        // the branch brief calls out — don't make the pharmacist wait for
+        // the next scheduled ~500ms tick to get a fresh, settled read of
+        // it.
+        var isNewTargetWindow = target.Value.Handle != _currentTargetHandle;
         _currentTargetHandle = target.Value.Handle; // see FastCloseCheck's own doc
 
         // A held/pending signature only makes sense against the SAME
@@ -368,11 +413,17 @@ public sealed class OrderAssistCoordinator
         // Orders' row-index signatures and Catalog Substitution's are not
         // comparable at all, so a kind switch resets exactly like losing
         // the target entirely does.
-        if (_lastTickKind is not null && _lastTickKind != target.Value.Kind)
+        var isKindSwitch = _lastTickKind is not null && _lastTickKind != target.Value.Kind;
+        if (isKindSwitch)
         {
             ResetHighlightStability();
         }
         _lastTickKind = target.Value.Kind;
+
+        if (isNewTargetWindow || isKindSwitch)
+        {
+            _immediateRescanRequested = true;
+        }
 
         var overlay = EnsureOverlayWindow();
 
@@ -406,7 +457,7 @@ public sealed class OrderAssistCoordinator
         // same "log on change" way as every other diagnostic in this class
         // — see LogSelectionBandsIfChanged.
         var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap);
-        LogSelectionBandsIfChanged(highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
+        LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
 
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
 
@@ -742,6 +793,7 @@ public sealed class OrderAssistCoordinator
     /// RowHighlightNormalizer.RejectedHighlightCandidate's own doc.
     /// </summary>
     private void LogSelectionBandsIfChanged(
+        OrderAssistWindowKind kind,
         IReadOnlyList<(int Top, int Bottom)> bands,
         IReadOnlyList<RowHighlightNormalizer.RejectedHighlightCandidate> rejectedCandidates)
     {
@@ -760,17 +812,24 @@ public sealed class OrderAssistCoordinator
             : string.Join(",", rejectedCandidates.Select(c =>
                 $"{c.Top}-{c.Bottom}:chroma={c.Chroma},lum={c.Luminance:F0},frac={c.Fraction:F2}"));
 
-        var combinedSignature = signature + "|" + candidateSignature;
+        // ROUND 5: kind folded into the dedup signature too (not just the
+        // log text below) — Will flipping between the two target windows
+        // (e.g. Create Recommended Orders with 0 bands, then Catalog
+        // Substitution ALSO with 0 bands) must still log once per screen,
+        // not have the second screen's identical-looking "0 bands" silently
+        // swallowed as "unchanged" just because the PREVIOUS tick (a
+        // different screen) happened to log the same shape.
+        var combinedSignature = $"{kind}|{signature}|{candidateSignature}";
         if (combinedSignature == _lastLoggedSelectionBandsSignature) return;
         _lastLoggedSelectionBandsSignature = combinedSignature;
 
         OcrLogger.LogTiming(bands.Count == 0
-            ? "OrderAssist: row-highlight normalizer found 0 bands this tick"
-            : $"OrderAssist: row-highlight normalizer binarized {bands.Count} band(s) this tick: [{signature}]");
+            ? $"OrderAssist[{kind}]: row-highlight normalizer found 0 bands this tick"
+            : $"OrderAssist[{kind}]: row-highlight normalizer binarized {bands.Count} band(s) this tick: [{signature}]");
 
         if (rejectedCandidates.Count > 0)
         {
-            OcrLogger.LogTiming($"OrderAssist: row-highlight normalizer rejected {rejectedCandidates.Count} near-miss band(s) this tick (measured dominant color, not detected as highlight): [{candidateSignature}]");
+            OcrLogger.LogTiming($"OrderAssist[{kind}]: row-highlight normalizer rejected {rejectedCandidates.Count} near-miss band(s) this tick (measured dominant color, not detected as highlight): [{candidateSignature}]");
         }
     }
 

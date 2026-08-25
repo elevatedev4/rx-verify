@@ -129,4 +129,101 @@ public class CreateRecommendedOrdersScannerTests
 
         Assert.Contains(afterEdit, h => h.RowIndex == 1);
     }
+
+    // ---- ROUND 5: blank-cell candidate-zero (OCR silently missed a lone "0") ----
+
+    /// <summary>
+    /// ROUND 5 (Will's SECOND repeat report, this time with a screenshot
+    /// showing a genuine, unflagged 0 — see FindZeroQuantityHighlights'
+    /// own doc for the confirmed root cause and the option-(i)-vs-(ii)
+    /// trade-off). A row whose Order Quantity cell produced NO OCR word at
+    /// all (CellValueBucketizer's documented "blank -> Bounds=null"
+    /// contract) but whose OTHER cells on that same row read fine must
+    /// still be flagged — this is exactly what a missed lone "0" glyph
+    /// looks like from the OCR word list's own point of view.
+    /// </summary>
+    [Fact]
+    public void BlankOrderQuantityCellWithOtherRowContentIsFlaggedAsCandidateZero()
+    {
+        var words = BuildWords();
+
+        // Body row 3: Cost Per Unit = 8.00 and Suggested Order Qty = 4 both
+        // read fine -- proves the row itself was captured/OCR'd -- but NO
+        // word at all exists in the Order Quantity column's own X range
+        // (130ish), simulating OCR silently dropping the lone "0" glyph.
+        words.Add(Word("8.00", 10, 100, 30));
+        words.Add(Word("4", 250, 100, 10));
+
+        var highlights = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(words);
+
+        Assert.Contains(highlights, h => h.RowIndex == 3);
+    }
+
+    [Fact]
+    public void BlankOrderQuantityCellWithNoCorroboratingNumericContentIsNotFlagged()
+    {
+        // Regression guard for the "never coerce blank to zero" contract
+        // (Geometry/CellValue.cs): the round-5 gate is deliberately
+        // stronger than "the row has SOME other word" (TableRowGrouper
+        // guarantees that trivially -- see that class's own doc, and
+        // FindZeroQuantityHighlights' own doc for why a bare word-count
+        // check would barely filter anything). It requires
+        // HeaderBandLocator.IsDataRow -- at least one decimal-formatted
+        // number elsewhere in the row, same signal HeaderRowWindowSelector
+        // already trusts to spot a genuine grid data row. Here the only
+        // other word in the row ("Backorder") isn't numeric at all, so this
+        // must stay silent rather than guess.
+        var words = new List<OcrWord>
+        {
+            Word("Cost", 0, 0, 20),
+            Word("Per", 24, 0, 15),
+            Word("Unit", 41, 0, 20),
+            Word("Order", 90, 0, 30),
+            Word("Quantity", 124, 0, 50),
+
+            // A genuine, fully-legible data row immediately after the
+            // header -- gives HeaderRowWindowSelector a real IsDataRow row
+            // right after the header so it can't greedily fold the row
+            // below (the one this test actually cares about) into what it
+            // treats as the header window (see the round-5 test's own
+            // history/comment in this file for why an all-text row sitting
+            // directly under a single-line header is otherwise ambiguous).
+            Word("5.00", 10, 40, 30),
+            Word("3", 130, 40, 10),
+
+            // The row under test: Order Quantity cell blank (nothing lands
+            // in its partition), and its only other content ("Backorder")
+            // isn't decimal-formatted -- not corroborated as real numeric
+            // table data.
+            Word("Backorder", 300, 60, 60),
+        };
+
+        var highlights = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(words);
+
+        Assert.Empty(highlights);
+    }
+
+    [Fact]
+    public void CandidateZeroHighlightBoundsSpanTheOrderQuantityColumnAndTheRowsOtherContent()
+    {
+        var words = BuildWords();
+        words.Add(Word("8.00", 10, 100, 30, h: 14));
+        words.Add(Word("4", 250, 100, 10, h: 14));
+
+        var highlights = CreateRecommendedOrdersScanner.FindZeroQuantityHighlights(words);
+
+        var highlight = Assert.Single(highlights, h => h.RowIndex == 3);
+
+        // Horizontal span is the Order Quantity header CLUSTER's own extent
+        // (90..174 -- "Order" at x=90 w=30 and "Quantity" at x=124 w=50
+        // cluster into one column band, see BuildWords' header row 0) --
+        // never the wider partition (which would spill toward the
+        // neighboring Suggested Order Qty column).
+        Assert.Equal(90, highlight.Left);
+        Assert.Equal(174, highlight.Right);
+
+        // Vertical span comes from the row's OTHER words (y=100..114).
+        Assert.Equal(100, highlight.Top);
+        Assert.Equal(114, highlight.Bottom);
+    }
 }

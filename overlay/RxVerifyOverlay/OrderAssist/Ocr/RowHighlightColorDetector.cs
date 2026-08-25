@@ -137,8 +137,41 @@ public static class RowHighlightColorDetector
     /// <summary>Per-channel tolerance for "close enough to the row's own dominant/background color" -- used both to decide the majority-fill fraction and, in RowHighlightNormalizer, to binarize each pixel.</summary>
     public const int BackgroundColorTolerance = 40;
 
-    /// <summary>Default fraction of a scanline's pixels that must be background-colored for the WHOLE scanline to count as a highlighted band -- same "reject a thin stroke of colored text, only accept a genuine full-width fill" safety margin round 2's detector used.</summary>
-    public const double DefaultMinHighlightFraction = 0.6;
+    /// <summary>
+    /// Default fraction of a scanline's pixels that must be background-colored
+    /// for the WHOLE scanline to count as a highlighted band -- same "reject
+    /// a thin stroke of colored text, only accept a genuine full-width fill"
+    /// safety margin round 2's detector used.
+    ///
+    /// ROUND 5 (Will, still after the chroma-30 fix: "Order is still not
+    /// reading the colored rows" on Catalog Substitution specifically):
+    /// EscriptImageCapture.CaptureRegion captures the ENTIRE target window
+    /// (OrderAssistCoordinator.TickAsync's target.Value.Bounds is the whole
+    /// GetWindowRect, not a crop of just the grid), so a highlighted TABLE
+    /// row's scanline also includes whatever window chrome/margin pixels
+    /// sit outside the grid on that same Y — a scrollbar track, a filter
+    /// column, or side padding, all of which stay a plain neutral color.
+    /// Catalog Substitution's own chrome is documented elsewhere in this
+    /// module (HeaderRowWindowSelector's ROOT CAUSE doc) as having MORE
+    /// non-grid chrome than Create Recommended Orders (an extra filter/
+    /// toolbar row) — a plausible, screen-specific reason a real
+    /// highlighted row's colored-pixel fraction sits lower on THIS screen
+    /// even though the same color already clears MinChromaForHighlight/the
+    /// luminance band (verified against every color in Will's report --
+    /// see RowHighlightColorDetectorTests' round-5 cases, all of which pass
+    /// the color check at 80% fill; the 0.6 floor was never actually
+    /// exercised against anything narrower). Lowered to 0.5: still a full
+    /// majority of the scanline, so an ordinary plain row (background is
+    /// ~95%+ of the row by construction -- see class doc) is nowhere close
+    /// to tripping this, but leaves 10 more points of headroom for
+    /// non-grid chrome/margin dilution on a real captured window. STILL AN
+    /// ESTIMATE (same posture as every other bound in this class) -- not
+    /// measured from a real Catalog Substitution capture, which remains
+    /// impossible from this Mac; see LogSelectionBandsIfChanged's own
+    /// round-5 kind-tagging addition for how Will's NEXT report proves or
+    /// disproves this specific theory instead of requiring another guess.
+    /// </summary>
+    public const double DefaultMinHighlightFraction = 0.5;
 
     /// <summary>
     /// ROUND 5 diagnostic-only floor -- NOT part of the accept/reject

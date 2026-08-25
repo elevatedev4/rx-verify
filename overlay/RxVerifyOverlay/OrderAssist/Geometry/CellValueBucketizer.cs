@@ -47,7 +47,17 @@ public static class CellValueBucketizer
         return results;
     }
 
-    private static bool IsCenterWithinPartition(OcrWord word, ColumnBand band)
+    /// <summary>
+    /// True if <paramref name="word"/>'s horizontal CENTER falls inside
+    /// <paramref name="band"/>'s partition -- the same column-membership
+    /// test <see cref="BucketColumn"/> uses per word. Exposed (ROUND 5,
+    /// was private) so CreateRecommendedOrdersScanner's blank-cell
+    /// candidate-zero path (see that class's own doc) can ask "does this
+    /// row have content OUTSIDE the Order Quantity column" using the exact
+    /// same partition test, rather than re-deriving a slightly different
+    /// one.
+    /// </summary>
+    public static bool IsCenterWithinPartition(OcrWord word, ColumnBand band)
     {
         var center = word.X + word.W / 2.0;
         return center >= band.PartitionLeft && center < band.PartitionRight;
