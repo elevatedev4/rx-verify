@@ -70,43 +70,6 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
     private const float UpscaleFactor = 2.0f;
 
     /// <summary>
-    /// ROUND 6 SPEED (Will, verbatim: "We also need the OCR to speed up
-    /// as much as possible. There is quite a delay right now.") —
-    /// JUDGMENT CALL, not yet exercised: Order Assist's own capture now
-    /// runs through RowHighlightNormalizer.NormalizeInPlace UNCONDITIONALLY
-    /// (round 6 — see that class's doc) before it ever reaches this
-    /// engine, so every Order Assist bitmap arriving here is ALREADY pure
-    /// binary black/white by the time Upscale() runs on it. HighQualityBicubic
-    /// exists to preserve smooth gradient detail while resampling — a
-    /// property a binary image doesn't have any of, so in principle a
-    /// cheaper mode (InterpolationMode.Bilinear, or even NearestNeighbor,
-    /// which would actually PRESERVE hard binarized edges better than any
-    /// smoothing filter) could upscale that specific case faster with no
-    /// accuracy loss.
-    ///
-    /// LEFT AT HighQualityBicubic (unchanged) rather than flipped, for two
-    /// reasons: (1) this same Upscale() call is also used by the verify
-    /// flow's OCR path (Uia/OcrFieldReader.cs), whose captured bitmaps are
-    /// NOT pre-binarized — those still have real anti-aliased/grayscale
-    /// detail a cheaper mode WOULD degrade, so this constant can't be
-    /// flipped for Order Assist alone without either duplicating Upscale()
-    /// or adding a per-caller mode parameter; (2) even for the
-    /// now-always-binarized Order Assist case, there is no live Windows box
-    /// available to this branch to actually measure whether a cheaper mode
-    /// changes OCR accuracy at all — the same "flagged, not measured" risk
-    /// posture as UpscaleFactor's own doc above. Guessing wrong here
-    /// trades a speed win for a NEW accuracy regression, which is a worse
-    /// outcome than the current, already-tunable latency.
-    ///
-    /// Wired as its own named constant specifically so a follow-up round
-    /// with real field timing data (see OrderAssistCoordinator.LogTickTimings)
-    /// can flip ONE value here (and, if adopted for Order Assist only,
-    /// thread a mode parameter through Upscale()/RecognizeAsync) instead of
-    /// re-deriving this reasoning from scratch.
-    /// </summary>
-    private const InterpolationMode UpscaleInterpolationMode = InterpolationMode.HighQualityBicubic;
-
-    /// <summary>
     /// Recognizes text in a GDI+ Bitmap (as produced by
     /// EscriptImageCapture.CaptureRegion) by converting it to a WinRT
     /// SoftwareBitmap and running Windows.Media.Ocr.OcrEngine over it.
@@ -181,11 +144,10 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
 
     /// <summary>
     /// Upscales <paramref name="source"/> by (approximately)
-    /// <paramref name="factor"/> using <see cref="UpscaleInterpolationMode"/>
-    /// (HighQualityBicubic by default — see that constant's own doc for
-    /// the round-6 case for/against a cheaper mode) — the standard GDI+
-    /// mitigation for small-text OCR misses (see UpscaleFactor's doc).
-    /// Caller owns and must dispose the returned Bitmap.
+    /// <paramref name="factor"/> using high-quality bicubic
+    /// interpolation — the standard GDI+ mitigation for small-text OCR
+    /// misses (see UpscaleFactor's doc). Caller owns and must dispose
+    /// the returned Bitmap.
     ///
     /// <paramref name="scaleX"/>/<paramref name="scaleY"/> are the
     /// ACTUAL ratios applied (scaled dimension / source dimension), NOT
@@ -204,7 +166,7 @@ public sealed class WindowsMediaOcrEngine : IOcrEngine
         var scaled = new Bitmap(scaledWidth, scaledHeight, PixelFormat.Format32bppArgb);
         using (var graphics = Graphics.FromImage(scaled))
         {
-            graphics.InterpolationMode = UpscaleInterpolationMode;
+            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
             graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
             graphics.DrawImage(source, 0, 0, scaledWidth, scaledHeight);
         }

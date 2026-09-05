@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -442,45 +441,25 @@ public sealed class OrderAssistCoordinator
             await Task.Delay(CaptureSettleDelayMs, cts.Token);
         }
 
-        // ROUND 6 SPEED (Will: "the OCR to speed up as much as possible" —
-        // see LogTickTimings' own doc): every stage of this tick's
-        // capture/normalize/OCR/scan pipeline is now individually timed so
-        // Will's next report carries real per-stage numbers instead of a
-        // single "it feels slow" impression. Stopwatch.StartNew per stage
-        // (same pattern as Uia/OcrFieldReader.cs's own timing) — cheap
-        // enough (a handful of ticks-since-boot reads) to leave on
-        // unconditionally, unlike the OCR/capture work itself.
-        var captureStopwatch = Stopwatch.StartNew();
         using var bitmap = EscriptImageCapture.CaptureRegion(target.Value.Bounds);
-        var captureMs = captureStopwatch.ElapsedMilliseconds;
 
-        // ROUND 6 (Will, verbatim: "The blue and yellow lines need to be
-        // read too, just as if they are white regular lines. Currently
-        // they are being skipped.") — replaces round 3-5's
-        // detect-then-binarize gate (three rounds of retuned thresholds
-        // that never stopped real colored rows from being skipped — see
-        // RowHighlightColorDetector's own class doc for the full history)
-        // with UNCONDITIONAL per-scanline binarization: every scanline in
-        // the capture is normalized to dark-text-on-white contrast the
-        // same way, for BOTH target kinds, regardless of whether that row
-        // happens to be plain white or a blue/yellow highlight fill. Fixes
-        // the Catalog Substitution blue-first-row skip, a
-        // McKesson-yellow-flagged row skip, AND (same mechanism) a Create
-        // Recommended Orders row put into the same kind of selection/focus
-        // highlight while its Order Quantity cell is being edited — with
-        // no detection step left to mistune. Logging is best-effort and
-        // throttled the same "log on change" way as every other diagnostic
-        // in this class — see LogSelectionBandsIfChanged.
-        var normalizeStopwatch = Stopwatch.StartNew();
+        // ROUND 3 (repeat complaint — see Ocr/RowHighlightColorDetector's
+        // own ROOT CAUSE doc: round 2's blue-only detector is replaced by a
+        // hue-agnostic one covering any genuinely colored row fill, not
+        // just one specific unverified blue). Binarizes any highlighted
+        // row band to normal dark-text-on-white contrast BEFORE OCR ever
+        // sees it, for BOTH target kinds (a no-op when no highlighted band
+        // is present this tick) — fixes the Catalog Substitution
+        // blue-first-row skip, a McKesson-yellow-flagged row skip, AND
+        // (same mechanism) a Create Recommended Orders row put into the
+        // same kind of selection/focus highlight while its Order Quantity
+        // cell is being edited. Logging is best-effort and throttled the
+        // same "log on change" way as every other diagnostic in this class
+        // — see LogSelectionBandsIfChanged.
         var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap);
-        var normalizeMs = normalizeStopwatch.ElapsedMilliseconds;
-        LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.ColoredScanlineCount, highlightResult.ColoredBands);
+        LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
 
-        var ocrStopwatch = Stopwatch.StartNew();
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
-        var ocrMs = ocrStopwatch.ElapsedMilliseconds;
-
-        var scanStopwatch = Stopwatch.StartNew();
 
         var scale = DpiScaleFor(target.Value.Handle);
 
@@ -531,15 +510,6 @@ public sealed class OrderAssistCoordinator
                 newSignature = HighlightSignature.ForCatalogAnnotations(annotations);
                 break;
         }
-
-        var scanMs = scanStopwatch.ElapsedMilliseconds;
-
-        // ROUND 6 SPEED — logged regardless of TickGenerationGate below:
-        // the capture/normalize/OCR/scan work already happened and
-        // consumed real wall-clock time even if this particular tick's
-        // RESULT gets discarded as stale, so the timing numbers are still
-        // real data about pipeline latency Will should see.
-        LogTickTimings(target.Value.Kind, captureMs, normalizeMs, ocrMs, scanMs);
 
         // REVIEW FIX (blocking): the actual fix — see TickAsync's own doc
         // above and TickGenerationGate's doc. Everything above this point
@@ -803,70 +773,64 @@ public sealed class OrderAssistCoordinator
     /// DIFFERENT bad capture (different bands) does.
     /// </summary>
     /// <summary>
-    /// ROUND 2 (W-T85 bug 2), ROUND 3 GENERALIZED, ROUND 6 REPURPOSED —
-    /// best-effort, throttled diagnostic for RowHighlightNormalizer's own
-    /// bitmap preprocessing. Round 6 deleted the old accept/reject GATE
-    /// (see RowHighlightColorDetector's own class doc for why three rounds
-    /// of retuned thresholds never stopped real colored rows from being
-    /// skipped) — normalization is now unconditional on every scanline, so
-    /// this log no longer reports a DECISION ("N bands accepted, M
-    /// rejected as near-misses"). It reports what the capture LOOKED like:
-    /// how many scanlines this tick had a genuinely colored (non-near-
-    /// white) dominant background, i.e. real blue/yellow row fills the
-    /// unconditional pass just binarized identically to every plain white
-    /// row. This is the proof Will's next field report needs that the
-    /// fix actually ran against his real screen, without needing another
-    /// live-diagnosis round. Logs only Y-ranges/counts and measured
-    /// chroma/luminance — never any OCR'd text, never a screenshot — so
-    /// there is nothing PHI-adjacent here at all, unlike the window-title/
-    /// column-band diagnostics elsewhere in this class.
+    /// ROUND 2 (W-T85 bug 2), ROUND 3 GENERALIZED — best-effort, throttled
+    /// diagnostic for RowHighlightNormalizer's own bitmap preprocessing
+    /// (see that class's and RowHighlightColorDetector's own doc for why
+    /// this exists: the exact chroma/luminance bounds are still an
+    /// UNVERIFIED estimate, and this is what proves or disproves the
+    /// detector actually firing — on ANY highlight color now, not just
+    /// blue selection — on Will's real screen without another
+    /// live-diagnosis round). Logs only the Y-range count/list — never any
+    /// OCR'd text, never a screenshot — so there is nothing PHI-adjacent
+    /// here at all, unlike the window-title/column-band diagnostics
+    /// elsewhere in this class.
+    ///
+    /// ROUND 5: also logs the REJECTED near-miss bands (measured dominant
+    /// chroma/luminance/fill-fraction only — same non-PHI posture, still
+    /// never any OCR'd text or pixel data itself) so a still-unread colored
+    /// row's next report carries the exact values this detector saw
+    /// instead of another guess. See
+    /// RowHighlightNormalizer.RejectedHighlightCandidate's own doc.
     /// </summary>
     private void LogSelectionBandsIfChanged(
         OrderAssistWindowKind kind,
-        int coloredScanlineCount,
-        IReadOnlyList<RowHighlightNormalizer.ColoredScanlineBand> coloredBands)
+        IReadOnlyList<(int Top, int Bottom)> bands,
+        IReadOnlyList<RowHighlightNormalizer.RejectedHighlightCandidate> rejectedCandidates)
     {
-        var signature = coloredBands.Count == 0
-            ? ""
-            : string.Join(",", coloredBands.Select(b =>
-                $"{b.Top}-{b.Bottom}:chroma={b.Chroma},lum={b.Luminance:F0}"));
+        var signature = bands.Count == 0 ? "" : string.Join(",", bands.Select(b => $"{b.Top}-{b.Bottom}"));
 
-        // Kind folded into the dedup signature too (not just the log text
-        // below) — Will flipping between the two target windows (e.g.
-        // Create Recommended Orders with 0 colored rows, then Catalog
-        // Substitution ALSO with 0) must still log once per screen, not
-        // have the second screen's identical-looking "0 colored rows"
-        // silently swallowed as "unchanged" just because the PREVIOUS tick
-        // (a different screen) happened to log the same shape.
-        var combinedSignature = $"{kind}|{coloredScanlineCount}|{signature}";
+        // ROUND 5: fold the rejected near-miss bands into the same
+        // change-signature/throttle so a still-unread pale/colored row logs
+        // its measured chroma/luminance/fraction once per distinct
+        // capture, not every ~1s tick -- same "log on change" posture as
+        // the accepted-band signature above. See
+        // RowHighlightNormalizer.RejectedHighlightCandidate's own doc for
+        // why this exists (Will's next report on a row that's STILL not
+        // reading pinpoints the exact values instead of another guess).
+        var candidateSignature = rejectedCandidates.Count == 0
+            ? ""
+            : string.Join(",", rejectedCandidates.Select(c =>
+                $"{c.Top}-{c.Bottom}:chroma={c.Chroma},lum={c.Luminance:F0},frac={c.Fraction:F2}"));
+
+        // ROUND 5: kind folded into the dedup signature too (not just the
+        // log text below) — Will flipping between the two target windows
+        // (e.g. Create Recommended Orders with 0 bands, then Catalog
+        // Substitution ALSO with 0 bands) must still log once per screen,
+        // not have the second screen's identical-looking "0 bands" silently
+        // swallowed as "unchanged" just because the PREVIOUS tick (a
+        // different screen) happened to log the same shape.
+        var combinedSignature = $"{kind}|{signature}|{candidateSignature}";
         if (combinedSignature == _lastLoggedSelectionBandsSignature) return;
         _lastLoggedSelectionBandsSignature = combinedSignature;
 
-        OcrLogger.LogTiming(coloredBands.Count == 0
-            ? $"OrderAssist[{kind}]: row-highlight normalizer found 0 colored scanlines this tick (every scanline still binarized unconditionally)"
-            : $"OrderAssist[{kind}]: row-highlight normalizer saw {coloredScanlineCount} colored scanline(s) across {coloredBands.Count} band(s) this tick, all binarized the same as every other row: [{signature}]");
-    }
+        OcrLogger.LogTiming(bands.Count == 0
+            ? $"OrderAssist[{kind}]: row-highlight normalizer found 0 bands this tick"
+            : $"OrderAssist[{kind}]: row-highlight normalizer binarized {bands.Count} band(s) this tick: [{signature}]");
 
-    /// <summary>
-    /// ROUND 6 SPEED (Will, verbatim: "We also need the OCR to speed up as
-    /// much as possible. There is quite a delay right now.") — logs the
-    /// per-stage Stopwatch timings TickAsync now records for every tick
-    /// (capture, row-highlight normalize, OCR, scan/highlight-computation),
-    /// unconditionally rather than throttled on change like the other
-    /// diagnostics in this class: latency varies tick to tick even when
-    /// the on-screen CONTENT doesn't, so a "log on change" throttle here
-    /// would hide exactly the variance Will's next report needs to show.
-    /// Same non-PHI posture as LogSelectionBandsIfChanged — millisecond
-    /// counts only, never OCR'd text. Bounded the same way every other
-    /// OcrLogger.LogTiming call already is (see that class's own SIZE CAP
-    /// doc) — an unthrottled line every ~500ms while Order Assist is
-    /// enabled is the same trade-off the verify flow's own per-refresh
-    /// timing line (OcrFieldReader/OverlayViewModel) already makes.
-    /// </summary>
-    private void LogTickTimings(OrderAssistWindowKind kind, long captureMs, long normalizeMs, long ocrMs, long scanMs)
-    {
-        var totalMs = captureMs + normalizeMs + ocrMs + scanMs;
-        OcrLogger.LogTiming($"OrderAssist[{kind}]: tick timing capture={captureMs}ms normalize={normalizeMs}ms ocr={ocrMs}ms scan={scanMs}ms total={totalMs}ms");
+        if (rejectedCandidates.Count > 0)
+        {
+            OcrLogger.LogTiming($"OrderAssist[{kind}]: row-highlight normalizer rejected {rejectedCandidates.Count} near-miss band(s) this tick (measured dominant color, not detected as highlight): [{candidateSignature}]");
+        }
     }
 
     /// <summary>
