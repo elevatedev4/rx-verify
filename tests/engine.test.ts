@@ -1,23 +1,27 @@
 import { describe, it, expect } from 'vitest';
-import { verify, PENDING_DRUG_LOOKUP_REASON_CODE } from '../src/engine/index.js';
+import { verify, PENDING_DRUG_LOOKUP_REASON_CODE, DISABLED_FIELDS } from '../src/engine/index.js';
 import { FixtureProvider } from '../src/drug/index.js';
 import { FIELD_ORDER } from '../src/types.js';
 
 const provider = new FixtureProvider();
 
 describe('verify engine', () => {
-  it('always returns verdicts in FIELD_ORDER (minus the conditional availableDate slot, absent here since source has none)', () => {
+  it('always returns verdicts in FIELD_ORDER (minus the conditional availableDate slot and any DISABLED_FIELDS)', () => {
     const result = verify({}, {}, provider);
     // Round 5 fix 3: 'availableDate' is a CONDITIONAL slot in FIELD_ORDER
     // (only rendered when source.availableDate is set — see its doc,
-    // types.ts) — every other field is unconditional, so the remaining
-    // 13 still appear in FIELD_ORDER's exact relative order.
-    expect(result.verdicts.map((v) => v.field)).toEqual(FIELD_ORDER.filter((f) => f !== 'availableDate'));
+    // types.ts). Will 2026-09-11: 'patientAddress' is temporarily in
+    // DISABLED_FIELDS (see engine/index.ts) and is never emitted either.
+    // Every other field is unconditional, so the remainder still appears
+    // in FIELD_ORDER's exact relative order.
+    expect(result.verdicts.map((v) => v.field)).toEqual(
+      FIELD_ORDER.filter((f) => f !== 'availableDate' && !DISABLED_FIELDS.has(f))
+    );
   });
 
-  it('renders the conditional availableDate verdict, in FIELD_ORDER position, only when source.availableDate is set', () => {
+  it('renders the conditional availableDate verdict, in FIELD_ORDER position, only when source.availableDate is set — but never patientAddress while it is disabled', () => {
     const result = verify({ availableDate: '07/19/2026' }, {}, provider);
-    expect(result.verdicts.map((v) => v.field)).toEqual([...FIELD_ORDER]);
+    expect(result.verdicts.map((v) => v.field)).toEqual(FIELD_ORDER.filter((f) => !DISABLED_FIELDS.has(f)));
   });
 
   // NON-BLOCKING HARDENING (reviewer, round 5 fix 3 follow-up): the
@@ -25,27 +29,29 @@ describe('verify engine', () => {
   // longer catches a mandatory field silently DROPPED from the verdicts
   // array — a shorter subsequence is still a valid subsequence. verify()
   // now also asserts verdicts.length === FIELD_ORDER.length minus
-  // exactly the conditional fields absent (today: just 'availableDate').
-  // These two pin that exact completeness invariant directly, for both
-  // states of the one existing conditional field — a fail-fast guard
-  // that would throw immediately if a future edit ever dropped e.g.
-  // 'quantity' from the array literal in engine/index.ts.
-  describe('completeness assertion (verdicts.length matches FIELD_ORDER.length minus conditional fields)', () => {
-    it('verdicts.length === FIELD_ORDER.length - 1 when availableDate is absent', () => {
+  // exactly the conditional fields absent (availableDate) and any
+  // DISABLED_FIELDS (patientAddress, for now). These two pin that exact
+  // completeness invariant directly, for both states of the one existing
+  // conditional field — a fail-fast guard that would throw immediately
+  // if a future edit ever dropped e.g. 'quantity' from the array literal
+  // in engine/index.ts.
+  describe('completeness assertion (verdicts.length matches FIELD_ORDER.length minus conditional fields minus DISABLED_FIELDS)', () => {
+    it('verdicts.length === FIELD_ORDER.length - 1 (availableDate) - DISABLED_FIELDS.size when availableDate is absent', () => {
       const result = verify({}, {}, provider);
-      expect(result.verdicts.length).toBe(FIELD_ORDER.length - 1);
+      expect(result.verdicts.length).toBe(FIELD_ORDER.length - 1 - DISABLED_FIELDS.size);
     });
 
-    it('verdicts.length === FIELD_ORDER.length when availableDate is present', () => {
+    it('verdicts.length === FIELD_ORDER.length - DISABLED_FIELDS.size when availableDate is present', () => {
       const result = verify({ availableDate: '07/19/2026' }, {}, provider);
-      expect(result.verdicts.length).toBe(FIELD_ORDER.length);
+      expect(result.verdicts.length).toBe(FIELD_ORDER.length - DISABLED_FIELDS.size);
     });
   });
 
   it('every field is yellow not_provided when both sides are entirely empty', () => {
     const result = verify({}, {}, provider);
     expect(result.verdicts.every((v) => v.status === 'yellow')).toBe(true);
-    expect(result.summary).toEqual({ green: 0, yellow: 13, red: 0, total: 13 });
+    // 13 unconditional fields minus 1 disabled (patientAddress) = 12.
+    expect(result.summary).toEqual({ green: 0, yellow: 12, red: 0, total: 12 });
   });
 
   it('produces a summary that adds up to the verdict count', () => {
@@ -56,7 +62,38 @@ describe('verify engine', () => {
     );
     const { green, yellow, red, total } = result.summary;
     expect(green + yellow + red).toBe(total);
-    expect(total).toBe(13);
+    expect(total).toBe(12);
+  });
+
+  describe('DISABLED_FIELDS (Will 2026-09-11: patient address verification off for now)', () => {
+    it('a mismatched patient address produces NO verdict at all — no yellow/red flag, not counted in the summary', () => {
+      const result = verify(
+        { patientAddress: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' } },
+        { patientAddress: { street: '999 Totally Different Ave', city: 'Other City', state: 'KS', zip: '11111' } as any },
+        provider
+      );
+      expect(result.verdicts.find((v) => v.field === 'patientAddress')).toBeUndefined();
+      expect(result.verdicts.some((v) => v.field === 'patientAddress')).toBe(false);
+    });
+
+    it('prescriberAddress still verifies normally while patientAddress is disabled', () => {
+      const result = verify(
+        {
+          patientAddress: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' },
+          prescriber: { address: { street: '1 Clinic Way', city: 'Sampletown', state: 'KS', zip: '12345' } }
+        },
+        {
+          patientAddress: { street: '999 Totally Different Ave', city: 'Other City', state: 'KS', zip: '11111' } as any,
+          prescriber: { address: { street: '999 Totally Different Ave', city: 'Other City', state: 'KS', zip: '11111' } as any }
+        },
+        provider
+      );
+      const prescriberAddress = result.verdicts.find((v) => v.field === 'prescriberAddress')!;
+      expect(prescriberAddress).toBeDefined();
+      // Real mismatch on the prescriber side must still be flagged.
+      expect(['yellow', 'red']).toContain(prescriberAddress.status);
+      expect(result.verdicts.find((v) => v.field === 'patientAddress')).toBeUndefined();
+    });
   });
 
   describe('skipDrugLookup (responsiveness: overlay renders every other field immediately, drug row updates in place)', () => {
@@ -150,7 +187,7 @@ describe('verify engine', () => {
   });
 
   describe('display values are always clean text, never raw JSON (bug 1 regression)', () => {
-    it('renders patientAddress/prescriberAddress as one human-readable line on both sides, never JSON', () => {
+    it('renders prescriberAddress as one human-readable line on both sides, never JSON (patientAddress verdict is absent — DISABLED_FIELDS)', () => {
       const result = verify(
         {
           patientAddress: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' },
@@ -167,21 +204,18 @@ describe('verify engine', () => {
         },
         provider
       );
-      const patientAddress = result.verdicts.find((v) => v.field === 'patientAddress')!;
+      // patientAddress is disabled (Will 2026-09-11) — no verdict emitted.
+      expect(result.verdicts.find((v) => v.field === 'patientAddress')).toBeUndefined();
+
       const prescriberAddress = result.verdicts.find((v) => v.field === 'prescriberAddress')!;
 
-      for (const value of [
-        patientAddress.sourceValue,
-        patientAddress.enteredValue,
-        prescriberAddress.sourceValue,
-        prescriberAddress.enteredValue
-      ]) {
+      for (const value of [prescriberAddress.sourceValue, prescriberAddress.enteredValue]) {
         expect(value).not.toBeNull();
         expect(value).not.toMatch(/^\{/); // never raw JSON
         expect(typeof value).toBe('string');
       }
-      expect(patientAddress.sourceValue).toBe('123 Main St, Testville, KS 54321');
-      expect(patientAddress.enteredValue).toBe('123 Main St Testville, KS 54321');
+      expect(prescriberAddress.sourceValue).toBe('1 Clinic Way Ste A, Sampletown, KS 12345');
+      expect(prescriberAddress.enteredValue).toBe('1 Clinic Way Ste A Sampletown, KS 12345');
     });
 
     it('renders drug as name only (never NDC, never JSON) even when ndc is explicitly null', () => {
@@ -211,21 +245,21 @@ describe('verify engine', () => {
     it('address and drug survive the JSON.stringify/parse subprocess boundary as plain strings, never objects', () => {
       const result = verify(
         {
-          patientAddress: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' },
+          prescriber: { address: { street: '123 Main St', city: 'Testville', state: 'KS', zip: '54321' } },
           drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: '12345-6789-01' }
         },
         {
-          patientAddress: { street: '123 Main St Testville, KS 54321' } as any,
+          prescriber: { address: { street: '123 Main St Testville, KS 54321' } as any },
           drug: { name: 'Clindamycin Phosp 1% Lotion', ndc: null } as any
         },
         provider
       );
 
       const roundTripped = JSON.parse(JSON.stringify(result)) as typeof result;
-      const patientAddress = roundTripped.verdicts.find((v) => v.field === 'patientAddress')!;
+      const prescriberAddress = roundTripped.verdicts.find((v) => v.field === 'prescriberAddress')!;
       const drug = roundTripped.verdicts.find((v) => v.field === 'drug')!;
 
-      for (const value of [patientAddress.sourceValue, patientAddress.enteredValue, drug.sourceValue, drug.enteredValue]) {
+      for (const value of [prescriberAddress.sourceValue, prescriberAddress.enteredValue, drug.sourceValue, drug.enteredValue]) {
         expect(typeof value).toBe('string');
         expect(value).not.toBeInstanceOf(Object);
       }

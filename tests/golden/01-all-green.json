@@ -70,11 +70,6 @@
       "reasonCode": "exact_match"
     },
     {
-      "field": "patientAddress",
-      "status": "green",
-      "reasonCode": "exact_match"
-    },
-    {
       "field": "prescriberName",
       "status": "green",
       "reasonCode": "exact_match"
@@ -126,9 +121,9 @@
     }
   ],
   "expectedSummary": {
-    "green": 12,
+    "green": 11,
     "yellow": 1,
     "red": 0,
-    "total": 13
+    "total": 12
   }
 }

@@ -10,6 +10,7 @@ import {
   FIELD_ORDER,
   type Address,
   type DrugDescriptor,
+  type FieldName,
   type FieldVerdict,
   type ScriptData,
   type EnteredData,
@@ -139,6 +140,22 @@ export interface VerifyOptions {
 /** Reason code the drug field carries while skipDrugLookup defers the real comparison — see VerifyOptions.skipDrugLookup. Callers (the overlay) check for this exact code to know a field is still computing, not actually unverifiable. */
 export const PENDING_DRUG_LOOKUP_REASON_CODE = 'pending_lookup';
 
+/**
+ * Will 2026-09-11: patient address verification off for now — remove
+ * 'patientAddress' from this set to re-enable.
+ *
+ * Fields in this set are skipped entirely — their comparison never runs
+ * and no verdict for them is emitted (same mechanism FIELD_ORDER already
+ * uses for the conditional 'availableDate' verdict, see includeAvailableDate
+ * below and the completeness assertion that accounts for it). The C#
+ * overlay's PopulateRows (ViewModels/OverlayViewModel.cs) already tolerates
+ * a missing verdict for any FieldOrder.Fields entry ("defensive: engine
+ * contract guarantees all 13 fields, but never crash the UI on a contract
+ * drift") and simply skips rendering that row — so omitting the verdict
+ * here needs no overlay change and cannot show a yellow/red address flag.
+ */
+export const DISABLED_FIELDS: ReadonlySet<FieldName> = new Set<FieldName>(['patientAddress']);
+
 export function verify(
   source: ScriptData,
   entered: EnteredData,
@@ -151,7 +168,11 @@ export function verify(
   // DOB is pastOnly: a 2-digit year that would window into the future
   // (e.g. "3/5/45" -> 2045) re-windows to the 1900s instead.
   const dobResult = compareDates(source.patientDOB, entered.patientDOB, { pastOnly: true });
-  const addressResult = compareAddresses(source.patientAddress, entered.patientAddress);
+  // DISABLED_FIELDS guard: skip the comparison itself, not just the
+  // verdict, when patient address checking is off — see DISABLED_FIELDS.
+  const addressResult = DISABLED_FIELDS.has('patientAddress')
+    ? null
+    : compareAddresses(source.patientAddress, entered.patientAddress);
   const prescriberNameResult = comparePrescriberName(source.prescriber?.name, entered.prescriber?.name);
   const prescriberNpiResult = comparePrescriberNpi(source.prescriber?.npi, entered.prescriber?.npi);
   const prescriberPhoneResult = comparePrescriberPhone(source.prescriber?.phone, entered.prescriber?.phone);
@@ -198,12 +219,19 @@ export function verify(
       sourceValue: stringifyScalar(source.patientDOB),
       enteredValue: stringifyScalar(entered.patientDOB)
     },
-    {
-      field: 'patientAddress',
-      ...addressResult,
-      sourceValue: stringifyAddress(source.patientAddress),
-      enteredValue: stringifyAddress(entered.patientAddress)
-    },
+    // DISABLED_FIELDS: omitted entirely (never rendered/flagged) when
+    // 'patientAddress' is in the set, same mechanism as the conditional
+    // 'availableDate' verdict below.
+    ...(addressResult
+      ? [
+          {
+            field: 'patientAddress' as const,
+            ...addressResult,
+            sourceValue: stringifyAddress(source.patientAddress),
+            enteredValue: stringifyAddress(entered.patientAddress)
+          }
+        ]
+      : []),
     {
       field: 'prescriberName',
       ...prescriberNameResult,
@@ -314,10 +342,11 @@ export function verify(
   // same includeAvailableDate flag construction used above — never
   // computed independently, so this can't silently drift out of sync
   // with which fields are actually conditional).
-  const expectedVerdictCount = FIELD_ORDER.length - (includeAvailableDate ? 0 : 1);
+  const expectedVerdictCount =
+    FIELD_ORDER.length - (includeAvailableDate ? 0 : 1) - DISABLED_FIELDS.size;
   if (verdicts.length !== expectedVerdictCount) {
     throw new Error(
-      `Engine output completeness violation: expected ${expectedVerdictCount} verdicts (FIELD_ORDER has ${FIELD_ORDER.length}, availableDate ${includeAvailableDate ? 'included' : 'excluded'}), got ${verdicts.length}.`
+      `Engine output completeness violation: expected ${expectedVerdictCount} verdicts (FIELD_ORDER has ${FIELD_ORDER.length}, availableDate ${includeAvailableDate ? 'included' : 'excluded'}, ${DISABLED_FIELDS.size} field(s) disabled), got ${verdicts.length}.`
     );
   }
 

@@ -32,11 +32,6 @@
       "reasonCode": "exact_match"
     },
     {
-      "field": "patientAddress",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
       "field": "prescriberName",
       "status": "yellow",
       "reasonCode": "not_provided"
@@ -89,8 +84,8 @@
   ],
   "expectedSummary": {
     "green": 5,
-    "yellow": 8,
+    "yellow": 7,
     "red": 0,
-    "total": 13
+    "total": 12
   }
 }

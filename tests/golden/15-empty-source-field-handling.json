@@ -36,11 +36,6 @@
       "reasonCode": "not_provided"
     },
     {
-      "field": "patientAddress",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
       "field": "prescriberName",
       "status": "yellow",
       "reasonCode": "not_provided"
@@ -93,8 +88,8 @@
   ],
   "expectedSummary": {
     "green": 1,
-    "yellow": 12,
+    "yellow": 11,
     "red": 0,
-    "total": 13
+    "total": 12
   }
 }

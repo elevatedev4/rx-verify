@@ -20,11 +20,6 @@
       "reasonCode": "date_mismatch"
     },
     {
-      "field": "patientAddress",
-      "status": "yellow",
-      "reasonCode": "not_provided"
-    },
-    {
       "field": "prescriberName",
       "status": "yellow",
       "reasonCode": "not_provided"
@@ -77,8 +72,8 @@
   ],
   "expectedSummary": {
     "green": 1,
-    "yellow": 11,
+    "yellow": 10,
     "red": 1,
-    "total": 13
+    "total": 12
   }
 }
