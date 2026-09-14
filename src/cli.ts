@@ -222,7 +222,17 @@ function runVerify(input: CliInput): VerifyResult {
   // file's header doc) when a real drug lookup is actually going to
   // happen — see CliInput.skipDrugLookup doc above.
   const provider = skipDrugLookup ? NULL_PROVIDER : new LocalNdcProvider();
-  return verify(resolvedSource, entered, provider, { skipDrugLookup, evidence: DRUG_EQUIVALENCE_EVIDENCE });
+  const result = verify(resolvedSource, entered, provider, { skipDrugLookup, evidence: DRUG_EQUIVALENCE_EVIDENCE });
+
+  // Diagnostic-only passthrough (see VerifyResult.refillsOcrRegionWords'
+  // doc) — verify() itself never sees OCR words, so this can only be
+  // attached here, from parseEscriptOcr's own PrescriptionRecord output,
+  // never inside verify().
+  const ocrRegionWords = resolvedSource.refillsOcrRegionWords;
+  if (ocrRegionWords && ocrRegionWords.length > 0) {
+    return { ...result, refillsOcrRegionWords: ocrRegionWords };
+  }
+  return result;
 }
 
 async function main(): Promise<void> {

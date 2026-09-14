@@ -1114,7 +1114,8 @@ public sealed class IntegratedOverlayCoordinator
                     // other field's VerdictFieldInfo gets the defaults
                     // (null/null) from VerdictFieldInfo's own doc.
                     RefillsTotalFillsLabelSeen: r.FieldKey == "refills" ? _viewModel.RefillsTotalFillsLabelSeen : null,
-                    RefillsTotalFillsLabelPrefix: r.FieldKey == "refills" ? _viewModel.RefillsTotalFillsLabelPrefix : null)))
+                    RefillsTotalFillsLabelPrefix: r.FieldKey == "refills" ? _viewModel.RefillsTotalFillsLabelPrefix : null,
+                    RefillsOcrRegionWords: r.FieldKey == "refills" ? _viewModel.RefillsOcrRegionWords : null)))
             .ToList();
 
         boxesWindow.SetBoxes(boxes, bounds.Location, scale, scale, reportingEnabled);

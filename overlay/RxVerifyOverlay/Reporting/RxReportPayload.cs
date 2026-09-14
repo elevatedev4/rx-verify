@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using RxVerifyOverlay.Diagnostics;
 using RxVerifyOverlay.Integrated;
 
@@ -91,6 +92,20 @@ public sealed class RxReportPayload
 
     /// <summary>Which FieldMap.TotalFillsKeyPrefixes entry matched, if RefillsTotalFillsLabelSeen — label text only (e.g. "Total fills: "), NEVER the refill count/value itself. Null when RefillsTotalFillsLabelSeen isn't true.</summary>
     public string? RefillsTotalFillsLabelPrefix { get; set; }
+
+    /// <summary>
+    /// OCR-path counterpart to RefillsTotalFillsLabelSeen/Prefix above
+    /// (field report 2026-09, owner verbatim, twice — refill-approval
+    /// "Total Fills" not being read): only ever non-null when Field ==
+    /// "refills" AND the source input mode was "ocr" AND refills came
+    /// back unresolved — see Integrated/VerdictFieldInfo.cs and
+    /// src/types.ts PrescriptionRecord.refillsOcrRegionWords for the full
+    /// chain. Already PHI-filtered TS-side before this ever reaches the
+    /// overlay; NOT part of HQ's current zod schema either — same
+    /// "round-trips but doesn't persist until extended server-side"
+    /// caveat as SourceInputMode above.
+    /// </summary>
+    public IReadOnlyList<string>? RefillsOcrRegionWords { get; set; }
 
     /// <summary>
     /// PHI-safe tail of Ocr/OcrLogger.cs's per-day diagnostic log (2026-08-17
@@ -197,6 +212,7 @@ public static class RxReportBuilder
             // in the payload) rather than silently here too.
             RefillsTotalFillsLabelSeen = field.RefillsTotalFillsLabelSeen,
             RefillsTotalFillsLabelPrefix = field.RefillsTotalFillsLabelPrefix,
+            RefillsOcrRegionWords = field.RefillsOcrRegionWords,
             LogTail = string.IsNullOrEmpty(logTail) ? null : logTail
         };
     }

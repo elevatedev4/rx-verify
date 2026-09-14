@@ -361,6 +361,19 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// <summary>Pairs with RefillsTotalFillsLabelSeen — see that property's doc.</summary>
     public string? RefillsTotalFillsLabelPrefix { get; private set; }
 
+    /// <summary>
+    /// Diagnostic-only (field report 2026-09, owner verbatim, twice —
+    /// refill-approval "Total Fills" not being read on the OCR path):
+    /// the OCR-path counterpart to RefillsTotalFillsLabelSeen above —
+    /// see Models/EngineModels.cs VerifyResult.RefillsOcrRegionWords'
+    /// doc. Set from RefreshFromOcrAsync's engine result; the Uia path
+    /// (RefreshFromUiaAsync) never sets this at all, mirroring exactly
+    /// how RefillsTotalFillsLabelSeen is OCR-path-null / Uia-path-only in
+    /// the other direction. No UI binding — carried through to
+    /// Reporting/RxReportBuilder.cs only.
+    /// </summary>
+    public IReadOnlyList<string>? RefillsOcrRegionWords { get; private set; }
+
     private string _statusMessage = "Not attached to PioneerRx yet.";
     public string StatusMessage
     {
@@ -686,6 +699,11 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         var fastResult = await _engineClient.VerifyAsync(ocrWords, entered, skipDrugLookup: true);
         timing.EngineMs = engineStopwatch.ElapsedMilliseconds;
 
+        // See RefillsOcrRegionWords' own doc — refills never depends on
+        // the (not-yet-run) drug lookup, so fastResult already carries
+        // this diagnostic's final value for this refresh.
+        RefillsOcrRegionWords = fastResult.RefillsOcrRegionWords;
+
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
 
         if (!string.IsNullOrEmpty(fastResult.Error))
@@ -734,6 +752,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             UpdateNotes(reader.SourceNotes);
             RefillsTotalFillsLabelSeen = reader.RefillsTotalFillsLabelSeen;
             RefillsTotalFillsLabelPrefix = reader.RefillsTotalFillsLabelPrefix;
+            // Not applicable on this (Uia) path — see RefillsOcrRegionWords'
+            // own doc, mirroring RefillsTotalFillsLabelSeen's OCR-path reset.
+            RefillsOcrRegionWords = null;
         }
         catch (Exception ex)
         {
@@ -1058,6 +1079,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         NonEscriptMessage = ""; // NotAnEscript's own branch (RefreshFromOcrAsync) re-sets this AFTER calling ClearCategories — every other caller wants it cleared
         RefillsTotalFillsLabelSeen = null; // not applicable — no source was read this pass, or the pharmacist is on the OCR path (see property doc)
         RefillsTotalFillsLabelPrefix = null;
+        RefillsOcrRegionWords = null; // not applicable — no source was read this pass, or the pharmacist is on the Uia path (see property doc)
 
         // ADDENDUM item 7: no verdicts currently displayed for ANY Rx —
         // see CurrentVerdictsRxIdentity's doc. _pendingRxIdentity too, so

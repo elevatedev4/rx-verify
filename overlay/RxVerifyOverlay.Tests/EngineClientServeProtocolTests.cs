@@ -39,6 +39,37 @@ public class EngineClientServeProtocolTests
         Assert.Equal(1, result.Summary.Green);
     }
 
+    // Field report (2026-09, owner verbatim, twice — refill-approval
+    // "Total Fills" not being read): VerifyResult.RefillsOcrRegionWords
+    // (Models/EngineModels.cs) must pass through ParseResponseLine
+    // unchanged — this is a mechanical passthrough field, never computed
+    // or filtered on the C# side (see that property's own doc for why:
+    // the PHI filtering already happened TS-side).
+    [Fact]
+    public void RefillsOcrRegionWordsPassesThroughWhenPresent()
+    {
+        const string line = """
+            {"id":"1","verdicts":[{"field":"refills","status":"yellow","reasonCode":"not_provided","explanation":"Source e-prescription did not provide a refill count to compare.","sourceValue":null,"enteredValue":"3"}],"summary":{"green":0,"yellow":1,"red":0,"total":1},"refillsOcrRegionWords":["Fulfillment","status:","pending"]}
+            """;
+
+        var result = EngineClient.ParseResponseLine(line, "1");
+
+        Assert.NotNull(result.RefillsOcrRegionWords);
+        Assert.Equal(new[] { "Fulfillment", "status:", "pending" }, result.RefillsOcrRegionWords);
+    }
+
+    [Fact]
+    public void RefillsOcrRegionWordsIsNullWhenAbsent()
+    {
+        const string line = """
+            {"id":"1","verdicts":[{"field":"patientName","status":"green","reasonCode":"exact_match","explanation":"Name matches.","sourceValue":"John Smith","enteredValue":"John Smith"}],"summary":{"green":1,"yellow":0,"red":0,"total":1}}
+            """;
+
+        var result = EngineClient.ParseResponseLine(line, "1");
+
+        Assert.Null(result.RefillsOcrRegionWords);
+    }
+
     [Fact]
     public void ErrorResponseIsPrefixedAsAnEngineError()
     {

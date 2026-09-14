@@ -874,16 +874,44 @@ export interface ParsedRefillsValue {
 }
 
 /**
+ * Field report (2026-09, owner verbatim, refill-approval documents): the
+ * value after a "Total Fills"/"Refills" label can carry a DESCRIPTIVE
+ * PARENTHETICAL *before* the actual number, not just after it — see
+ * overlay/RxVerifyOverlay/Parsing/EscriptTreeParser.cs's own (UIA-side,
+ * UNCONFIRMED-against-a-real-dump) doc for this exact field: "Total
+ * fills (renewal: total incl. current): 4". Without this, the leading-
+ * token digit check in parseRefills below sees "(renewal:" first and
+ * fails immediately, even though a real integer sits right there later
+ * in the same value text. Only strips a parenthetical that is the value
+ * text's OWN leading token and that has a confirmed closing ")" later in
+ * the token run (never guesses past an unclosed paren) — plus one bare
+ * ":" token immediately after, if the closing paren didn't already carry
+ * it glued on ("current):" vs "current) :"). Everything AFTER that is
+ * handled completely unchanged by the rest of parseRefills.
+ */
+function skipLeadingParenthetical(tokens: string[]): string[] {
+  if (tokens.length === 0 || !(tokens[0] as string).startsWith('(')) return tokens;
+  let closeIdx = 0;
+  while (closeIdx < tokens.length && !(tokens[closeIdx] as string).includes(')')) closeIdx++;
+  if (closeIdx >= tokens.length) return tokens; // never closed -- leave alone, never guess
+  let rest = tokens.slice(closeIdx + 1);
+  if (rest.length > 0 && /^:+$/.test(rest[0] as string)) rest = rest.slice(1);
+  return rest;
+}
+
+/**
  * "1 (additional refills)" -> {value: "1", isTotalFillsPhrase: false}.
  * "11 (including this fill)" (or OCR-split "1 1 (including this fill)")
  * -> {value: "11", isTotalFillsPhrase: true}. Only the leading integer
  * (merged across any OCR-split digit tokens — see TOTAL_FILLS_TAIL_
  * PHRASES' doc above) is trusted as the count; a RECOGNIZED trailing
- * phrase is read for its semantics, never trusted for anything else.
- * Returns undefined if the (repaired) value doesn't start with a number.
+ * phrase is read for its semantics, never trusted for anything else. A
+ * leading descriptive parenthetical (see skipLeadingParenthetical) is
+ * skipped first. Returns undefined if the (repaired) value doesn't start
+ * with a number.
  */
 function parseRefills(raw: string): ParsedRefillsValue | undefined {
-  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  const tokens = skipLeadingParenthetical(raw.trim().split(/\s+/).filter(Boolean));
   if (tokens.length === 0) return undefined;
 
   // First token: any digit-length is trusted as before this branch ever
@@ -1005,6 +1033,232 @@ function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | und
     }
   }
   return undefined;
+}
+
+/**
+ * Refill-approval / renewal-response pattern anchor #2 — see the call
+ * site's doc for the field report this fixes. findLabelAtLineStart
+ * (Pass A/B) only ever tries a row's LEADING 1-3 words against every
+ * label; a "Total Fills" label sharing a row with other text ahead of it
+ * is invisible to it. This reuses findLabelAt (already defined above for
+ * bleed detection) at EVERY position in EVERY row, filtered down to just
+ * the 'totalfills' canonical, so it gets the exact same fuzzy tolerance
+ * (and OCR digit/letter-confusable/glued-token handling) a normal label
+ * match already gets — see normalize()/isFuzzyMatch's own docs; no
+ * separate confusable table is needed here. The value after the label is
+ * read through the ordinary parseRefills (including its
+ * skipLeadingParenthetical step, for the "Total fills (renewal: ...): 4"
+ * shape) so this anchor and a normal label match behave identically once
+ * the label itself is found.
+ */
+function findTotalFillsLabelAnywhere(lines: OcrWord[][]): ParsedRefillsValue | undefined {
+  for (const line of lines) {
+    for (let start = 0; start < line.length; start++) {
+      const match = findLabelAt(line, start);
+      if (!match || match.label.key !== 'refills' || match.label.canonical !== 'totalfills') continue;
+      const remainder = wordsToText(stripLeadingColon(line.slice(start + match.consumed)));
+      if (!remainder) continue;
+      const parsed = parseRefills(remainder);
+      if (parsed) return parsed;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * LabelKeys treated as sensitive for PrescriptionRecord.refillsOcrRegionWords
+ * (see that field's doc): every word already claimed by one of these
+ * resolved fields is excluded, never surfaced in the diagnostic. Errs
+ * toward excluding MORE than strictly necessary (over-exclusion just
+ * means less diagnostic context; under-exclusion would mean a real PHI/
+ * drug-identity leak into an HQ-bound error report) — 'directions'/'note'/
+ * 'substitutions' are included even though they're not identity fields,
+ * since sig/note text can describe the condition being treated.
+ * Deliberately does NOT include 'refills'/'quantity'/'written'/
+ * 'available'/'ds2'/'order' — those carry no patient/prescriber/drug
+ * identity on their own.
+ */
+const REFILLS_DIAGNOSTIC_SENSITIVE_KEYS: LabelKey[] = [
+  'patient',
+  'dob',
+  'address',
+  'prescriber',
+  'agentName',
+  'location',
+  'phone',
+  'medication',
+  'ndc',
+  'directions',
+  'note',
+  'substitutions',
+  'dxCodes'
+];
+
+/**
+ * REVIEWER BLOCKER FIX (2026-09-14): the resolutionMeta-based exclusion
+ * above only ever covers a field that actually RESOLVED to a value. If a
+ * "Patient"/"DOB"/"Address"/"Prescriber"/"Phone" LABEL is on-screen but
+ * its value failed to resolve (e.g. isImplausibleNameValue rejected a
+ * digit-dominated candidate) — or is simply mid-resolution/rejected for
+ * any other reason — resolutionMeta never gets populated for that key at
+ * all, and the raw label+value ROW would otherwise be free to leak
+ * verbatim into this diagnostic if it happened to sit next to a
+ * "fill"-shaped row. Checked independently of resolutionMeta, at the
+ * ROW level, via the SAME findLabelAtLineStart every normal field
+ * resolution already uses — a label match here drops the WHOLE row
+ * (never just its value words) PLUS the row immediately after it (the
+ * label's value routinely continues onto the following block-column
+ * row — see Pass B), regardless of whether that value ever actually
+ * resolved anywhere else in this function.
+ */
+const REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS: ReadonlySet<LabelKey> = new Set([
+  'patient',
+  'dob',
+  'address',
+  'prescriber',
+  'phone'
+]);
+
+/** Stable identity for one OCR word within a page, used only to de-duplicate/exclude by set membership (never compares by object reference, since the same logical word can be sliced into more than one array). */
+function ocrWordKey(w: OcrWord): string {
+  return `${w.x}|${w.y}|${w.text}`;
+}
+
+/**
+ * REVIEWER BLOCKER FIX: shape-based exclusions, independent of any label
+ * or resolution outcome at all — the other half of the gap (an
+ * UNLABELED name/date/phone/NPI sitting in freeform text near a
+ * "fill"-shaped row, with no label anywhere on the page to anchor a
+ * row-level drop to). Every one of these is checked against the RAW
+ * token text, never against a normalized/parsed value, so a false
+ * positive only ever costs a bit of diagnostic context — never the other
+ * direction.
+ */
+
+/** A date shaped like m/d/y (2-4 digit year, '/','-','.' separators) or yyyy-mm-dd — covers DOB, written, and available dates alike; this diagnostic never distinguishes which one, so all date-shaped tokens are dropped. */
+function isDateShapedToken(token: string): boolean {
+  return /^\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}$/.test(token) || /^\d{4}-\d{2}-\d{2}$/.test(token);
+}
+
+/** A digit run of 7 or more (after stripping all non-digit characters) — covers a whole 10-digit NPI, a whole 10-digit phone number, and a split phone FRAGMENT ("555-0100") alike. Deliberately coarse: a plain 7+-digit run is never a refill count or an ordinary quantity in this domain, so this can't cost real diagnostic value for THIS field. */
+function isSensitiveDigitRun(token: string): boolean {
+  return token.replace(/\D/g, '').length >= 7;
+}
+
+/** A single capitalized word ("Smith", "O'Brien", "Mary-Jane") — the shape a name token takes on either side of the comma in "Last, First". */
+const CAPITALIZED_WORD_RE = /^[A-Z][a-zA-Z'-]*$/;
+
+/**
+ * True when ROW `line` contains a "Last, First" (or "Last,First" glued)
+ * shaped pair anywhere in it — the freeform, UNLABELED name shape (no
+ * "Patient"/"Prescriber" label anywhere for REFILLS_DIAGNOSTIC_SENSITIVE_
+ * LABEL_KEYS to ever catch). Deliberately coarse — checks every adjacent
+ * token pair/triple in the row, not just the first — since a name can
+ * appear anywhere in a summary line. A match drops the ENTIRE row (not
+ * just the matching tokens), same "whole row, never just the flagged
+ * word" posture as the label-based check above.
+ */
+function rowLooksNameLike(line: OcrWord[]): boolean {
+  const tokens = line.map((w) => w.text);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] ?? '';
+    if (tok === ',') {
+      const prev = tokens[i - 1] ?? '';
+      const next = tokens[i + 1] ?? '';
+      if (CAPITALIZED_WORD_RE.test(prev) && CAPITALIZED_WORD_RE.test(next)) return true;
+      continue;
+    }
+    const commaGlued = /^([A-Z][a-zA-Z'-]*),([A-Z][a-zA-Z'-]*)$/.exec(tok);
+    if (commaGlued) return true;
+    const trailingComma = /^([A-Z][a-zA-Z'-]*),$/.exec(tok);
+    if (trailingComma) {
+      const next = tokens[i + 1] ?? '';
+      if (CAPITALIZED_WORD_RE.test(next)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Field report (2026-09, owner verbatim, twice — refill-approval "Total
+ * Fills" not being read): the ~40 OCR word tokens nearest any "fill"/
+ * "refill"-shaped text, so a filed error report carries PROOF of what
+ * OCR actually captured instead of just "(not provided)" with nothing
+ * to go on. Only called when `refills` ends up unresolved (see the call
+ * site) — this is diagnostic evidence for the NEXT failure, not a value
+ * this engine ever uses for anything itself.
+ *
+ * PHI-CONSCIOUS BY CONSTRUCTION, THREE INDEPENDENT LAYERS (reviewer
+ * round 2 — the first version only had layer 1):
+ *  1. every word already claimed by a RESOLVED patient/prescriber/drug/
+ *     directions/note/etc field (REFILLS_DIAGNOSTIC_SENSITIVE_KEYS) is
+ *     excluded;
+ *  2. every row carrying a patient/prescriber/DOB/address/phone LABEL —
+ *     found independently via findLabelAtLineStart, regardless of
+ *     whether that label's value ever actually resolved anywhere else in
+ *     this file — is dropped WHOLESALE, along with the row immediately
+ *     after it (REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS);
+ *  3. every row that LOOKS like a freeform, unlabeled name (rowLooksNameLike)
+ *     is dropped wholesale too, and every individual token shaped like a
+ *     date, phone number/fragment, or NPI (isDateShapedToken/
+ *     isSensitiveDigitRun) is dropped even from an otherwise-clean row.
+ * Only whole PHYSICAL ROWS containing a "fill"-shaped word, plus their
+ * immediate row-before/row-after neighbors (±1, never further), are ever
+ * considered as candidates at all. Capped at `maxWords` total.
+ */
+function buildRefillsOcrRegionWords(
+  lines: OcrWord[][],
+  resolutionMeta: Partial<Record<LabelKey, { strategy: FieldDiagnostic['strategy']; words: OcrWord[] }>>,
+  maxWords = 40
+): string[] {
+  const sensitiveKeys = new Set<string>();
+  for (const key of REFILLS_DIAGNOSTIC_SENSITIVE_KEYS) {
+    const meta = resolutionMeta[key];
+    if (!meta) continue;
+    for (const w of meta.words) sensitiveKeys.add(ocrWordKey(w));
+  }
+
+  // Layer 2: row-level label exclusion, independent of resolution outcome.
+  const sensitiveLineIndices = new Set<number>();
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    if (!line) continue;
+    const match = findLabelAtLineStart(line);
+    if (match && REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS.has(match.label.key)) {
+      sensitiveLineIndices.add(li);
+      sensitiveLineIndices.add(li + 1);
+    }
+  }
+
+  const isFillShaped = (text: string) => normalize(text).includes('fill');
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li] ?? [];
+    if (!line.some((w) => isFillShaped(w.text))) continue;
+
+    for (const neighborIdx of [li - 1, li, li + 1]) {
+      const candidateLine = lines[neighborIdx];
+      if (!candidateLine) continue;
+      // Layer 2 (label rows) and layer 3 (unlabeled name-shaped rows) —
+      // both drop the ENTIRE row, never just individual tokens.
+      if (sensitiveLineIndices.has(neighborIdx)) continue;
+      if (rowLooksNameLike(candidateLine)) continue;
+
+      for (const w of candidateLine) {
+        const key = ocrWordKey(w);
+        if (seen.has(key)) continue;
+        // Layer 1 (resolved-field words) and layer 3 (shape-based
+        // per-token exclusions: dates, phone/NPI-shaped digit runs).
+        if (sensitiveKeys.has(key) || isDateShapedToken(w.text) || isSensitiveDigitRun(w.text)) continue;
+        seen.add(key);
+        out.push(w.text);
+        if (out.length >= maxWords) return out;
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -1131,6 +1385,14 @@ export interface FieldDiagnostic {
   value?: { text: string; x: number; y: number };
   /** Machine-readable miss reason. Absent when status is 'resolved'. */
   reason?: string;
+  /**
+   * Refills-diagnostic ONLY (see PrescriptionRecord.refillsOcrRegionWords'
+   * doc) — the same PHI-filtered word list, carried into the log so a
+   * "refills: MISS" line is provable against what OCR actually saw.
+   * Checked BEFORE the normal resolved/miss formatting below, since this
+   * entry doesn't carry a real label/value pairing of its own.
+   */
+  regionWords?: string[];
 }
 
 /** Caps a value's logged text so a long sig/address doesn't blow up a "few lines per field" diagnostics block. */
@@ -1139,6 +1401,9 @@ function truncateForLog(text: string, max = 60): string {
 }
 
 function formatDiagnosticLine(d: FieldDiagnostic): string {
+  if (d.regionWords) {
+    return `  ${d.field}: nearest OCR words to "fill"/"refill" = [${d.regionWords.join(', ')}]`;
+  }
   if (d.status === 'miss') {
     return `  ${d.field}: MISS(${d.reason ?? 'unresolved'})`;
   }
@@ -1899,6 +2164,40 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       }
     }
 
+    // ---- Pattern anchor #2: "Total Fills" label found ANYWHERE on a
+    // row, not just at the row's START (refill-approval / renewal-
+    // response layout) ----
+    // Field report (2026-09, owner verbatim, twice): "the field says
+    // 'Total Fills:' when it is a refill approval... This didn't read
+    // the script. On Refill prescriptions, it will say Total Fills:."
+    // Only a FALLBACK, same priority rules as the anchor above (never
+    // overwrites an already-resolved raw.refills) — this exists because
+    // findLabelAtLineStart (Pass A/B above) only ever looks at a row's
+    // LEADING 1-3 words, so a "Total Fills" label sharing a row with
+    // other summary text ahead of it (a documented, if UNCONFIRMED-
+    // against-a-real-dump shape for this exact field — see
+    // overlay/RxVerifyOverlay/Parsing/EscriptTreeParser.cs's own
+    // "Total fills (renewal: total incl. current): 4" doc for the UIA
+    // side's version of the same problem) is invisible to it. Reuses
+    // findLabelAt (already used elsewhere in this file for bleed
+    // detection) at every position in every row, so it gets the exact
+    // same fuzzy tolerance a normal label gets — already generous enough
+    // to tolerate the OCR digit/letter confusable "Tota1 Fi11s" (edit
+    // distance 3 against the 10-char "totalfills" canonical, exactly at
+    // this file's own threshold for that length) and a single glued
+    // token like "TotalFills:" (normalize() strips the colon, exact
+    // match) — no separate confusable table needed. Scans
+    // linesBeforeChromeFilter, same reasoning as the anchor above.
+    if (raw.refills === undefined) {
+      const anywhereMatch = findTotalFillsLabelAnywhere(linesBeforeChromeFilter);
+      if (anywhereMatch !== undefined) {
+        raw.refills = anywhereMatch.value;
+        refillsPhraseOverride = anywhereMatch.isTotalFillsPhrase;
+        refillsResolvedCanonical = 'totalfills';
+        resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
+      }
+    }
+
     // ---- Date validation/correction for dob & written ----
     // If the label-associated value for either date field doesn't
     // actually parse as a date, search the pool of leftover value lines
@@ -2205,6 +2504,19 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     }
     const hasDrugData = drug.name !== undefined || drug.ndc !== undefined;
     if (hasDrugData) record.drug = drug;
+
+    // Field report (2026-09, owner verbatim, twice): refills still came
+    // back "(not provided)" on a refill-approval document with no proof
+    // of why. See PrescriptionRecord.refillsOcrRegionWords' doc — only
+    // computed on an actual miss, so a normal successful parse pays zero
+    // extra cost.
+    if (record.refills === undefined) {
+      const regionWords = buildRefillsOcrRegionWords(linesBeforeChromeFilter, resolutionMeta);
+      if (regionWords.length > 0) {
+        record.refillsOcrRegionWords = regionWords;
+        diagnostics.push({ field: 'refills.ocrRegionWords', status: 'resolved', regionWords });
+      }
+    }
 
     appendOcrDiagnosticsLog(diagnostics);
   } catch {

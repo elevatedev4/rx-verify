@@ -1322,6 +1322,249 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  // Field report (2026-09, owner verbatim, twice): "the field says
+  // 'Total Fills:' when it is a refill approval... This didn't read the
+  // script. On Refill prescriptions, it will say Total Fills:." Synthetic
+  // refill-approval-shaped OCR word arrays (invented names/drugs) below —
+  // covers a "Total Fills" label sitting mid-row (not at the row's
+  // start), a descriptive parenthetical BEFORE the number ("Total Fills
+  // (renewal: total incl. current): 4" — see EscriptTreeParser.cs's own
+  // UIA-side doc for this exact field shape), the OCR digit/letter
+  // confusable "Tota1 Fi11s", and a fully glued "TotalFills:" token.
+  describe('refill-approval / renewal-response documents: "Total Fills" not at the row start, or with a descriptive parenthetical before the number', () => {
+    it('finds "Total Fills: N" sharing a row with OTHER text ahead of it (not at the row start) and applies N-1 by default', () => {
+      // "Status Approved Total Fills: 4" -- "Total Fills" is the 3rd/4th
+      // token on the row, never reachable by findLabelAtLineStart's
+      // leading-1-to-3-word check.
+      const summaryRow = row(358, ['Status', 'Approved', 'Total', 'Fills:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), summaryRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBe(true);
+
+      const result = compareRefills(record.refills, 3, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('skips a descriptive parenthetical BEFORE the number: "Total Fills (renewal: total incl. current): 4"', () => {
+      const totalFillsRow = row(358, [
+        'Total',
+        'Fills',
+        '(renewal:',
+        'total',
+        'incl.',
+        'current):',
+        '4'
+      ]);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('combines both: a mid-row "Total Fills" label with a descriptive parenthetical before the number', () => {
+      const summaryRow = row(358, [
+        'Status',
+        'Approved',
+        'Total',
+        'Fills',
+        '(renewal:',
+        'total',
+        'incl.',
+        'current):',
+        '4'
+      ]);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), summaryRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('tolerates the OCR digit/letter confusable "Tota1 Fi11s:" via the existing fuzzy label match (no separate confusable table needed)', () => {
+      const totalFillsRow = row(358, ['Tota1', 'Fi11s:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('tolerates a fully glued single token "TotalFills:" too', () => {
+      const totalFillsRow = row(358, ['TotalFills:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('a mid-row "(additional refills)" tail still overrides the default N-1 math', () => {
+      const summaryRow = row(358, ['Status', 'Approved', 'Total', 'Fills:', '4', '(additional', 'refills)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), summaryRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+
+      const result = compareRefills(record.refills, 4, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('an explicit "Refills" label elsewhere on the page still wins over a mid-row "Total Fills" (no double-counting)', () => {
+      const refillsRow = row(320, ['Refills:', '2']);
+      const summaryRow = row(358, ['Status', 'Approved', 'Total', 'Fills:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow, summaryRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('2');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+
+    // End-to-end synthetic refill-approval fixture (invented patient/drug
+    // names): a full record built the way an approval document actually
+    // renders, confirming the extraction plus N-1 comparison together.
+    it('full pipeline: a synthetic refill-approval capture extracts refills correctly and compares GREEN against the N-1 entered value', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const summaryRow = row(358, ['Status', 'Approved', 'Total', 'Fills:', '4', '(including', 'this', 'fill)']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, summaryRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBe(true);
+
+      const result = compareRefills(record.refills, 3, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+  });
+
+  // Field report (2026-09, owner verbatim, twice): refills still came
+  // back "(not provided)" with no proof of why. PrescriptionRecord.
+  // refillsOcrRegionWords (built by buildRefillsOcrRegionWords) exists so
+  // the NEXT such report carries evidence — invented patient/drug names
+  // below, per this file's own synthetic-data-only rule.
+  describe('refillsOcrRegionWords diagnostic (refills unresolved — proves what OCR actually saw)', () => {
+    it('is populated with words near a "fill"-shaped token, INCLUDING its immediate neighbor row, when refills never resolves', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const noiseRow = row(300, ['Fulfillment', 'status:', 'pending']);
+      const neighborRow = row(340, ['Warehouse', 'code', 'ABC123']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow, neighborRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.refillsOcrRegionWords).toBeDefined();
+      expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+      expect(record.refillsOcrRegionWords).toContain('Warehouse');
+    });
+
+    it('NEVER includes a word already claimed by a resolved patient or drug field — PHI-conscious by construction', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const noiseRow = row(300, ['Fulfillment', 'status:', 'pending']);
+      const neighborRow = row(340, ['Warehouse', 'code', 'ABC123']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow, neighborRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refillsOcrRegionWords).not.toContain('Jordan');
+      expect(record.refillsOcrRegionWords).not.toContain('Testcase');
+      expect(record.refillsOcrRegionWords).not.toContain('Fakedrugin');
+    });
+
+    it('is undefined (never an empty array) when refills DID resolve — no diagnostic noise on a normal successful parse', () => {
+      const refillsRow = row(320, ['Refills:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsOcrRegionWords).toBeUndefined();
+    });
+
+    it('is undefined when nothing "fill"-shaped appears anywhere near the miss either — never fabricates evidence that was never there', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const noiseRow = row(300, ['Random', 'unrelated', 'text']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, noiseRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.refillsOcrRegionWords).toBeUndefined();
+    });
+
+    it('the diagnostics log block includes the region words when refills is unresolved', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      // A buffer row between the patient label and the fill-hit row —
+      // the row IMMEDIATELY after a sensitive label is itself excluded
+      // (see REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS' doc), so without
+      // this buffer the fill-hit row would collide with that exclusion
+      // for an unrelated reason and this test would no longer be
+      // exercising what it says it exercises.
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const noiseRow = row(300, ['Fulfillment', 'status:', 'pending']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
+      parseEscriptOcr(ocr);
+
+      // buildDiagnosticsBlock itself is pure/independently tested
+      // elsewhere in this file; this just confirms parseEscriptOcr's own
+      // internal call includes a regionWords-shaped entry by re-deriving
+      // it the same way parseEscriptOcr does, via the public record.
+      const record = parseEscriptOcr(ocr);
+      expect(record.refillsOcrRegionWords).toBeDefined();
+      const block = buildDiagnosticsBlock([
+        { field: 'refills.ocrRegionWords', status: 'resolved', regionWords: record.refillsOcrRegionWords }
+      ]);
+      expect(block).toContain('nearest OCR words to "fill"/"refill"');
+      expect(block).toContain('Fulfillment');
+    });
+
+    // REVIEWER BLOCKER (2026-09-14): the original version only excluded
+    // words already claimed via resolutionMeta — populated ONLY when a
+    // field actually resolved through a label match. An UNLABELED name
+    // (no "Patient" text anywhere on the page at all) sitting next to a
+    // fill-hit row was never excluded by that alone. Synthetic name here.
+    it('excludes an unlabeled, unresolved "Last, First" name row sitting right next to a fill-hit row', () => {
+      // "Quantity" label only, so the page has SOMETHING recognizable
+      // (parseEscriptOcr bails out entirely with zero fields if nothing
+      // at all is recognized) — the name row itself carries no label.
+      const quantityRow = row(100, ['Quantity', '30']);
+      const nameRow = row(200, ['Testcase,', 'Jordan']);
+      const fillRow = row(240, ['Fulfillment', 'pending']);
+      const ocr = flatten([TOOLBAR_ROW, quantityRow, nameRow, fillRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.patient).toBeUndefined(); // confirms this really is unresolved, not just unchecked
+      expect(record.refillsOcrRegionWords).toBeDefined();
+      expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+      expect(record.refillsOcrRegionWords).not.toContain('Testcase,');
+      expect(record.refillsOcrRegionWords).not.toContain('Jordan');
+    });
+
+    // REVIEWER BLOCKER, continued: a LABEL that IS on-screen (unlike the
+    // name case above) but whose value never resolves into the record —
+    // the row-level exclusion (independent of resolutionMeta) must still
+    // catch it. DOB row placed as an actual ±1 neighbor of the fill-hit
+    // row (not just "the row after the label", which is a separate,
+    // already-covered case) so this specifically proves the label itself
+    // is recognized and excluded wholesale, value included.
+    it('excludes a DOB row (label + unparseable value) sitting right next to a fill-hit row, even though it never resolves into patientDOB', () => {
+      const quantityRow = row(100, ['Quantity', '30']);
+      const fillRow = row(200, ['Fulfillment', 'pending']);
+      const dobRow = row(240, ['DOB:', 'garbled']);
+      const ocr = flatten([TOOLBAR_ROW, quantityRow, fillRow, dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.patientDOB).toBeUndefined(); // confirms "garbled" never became a real DOB
+      expect(record.refillsOcrRegionWords).toBeDefined();
+      expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+      expect(record.refillsOcrRegionWords).not.toContain('DOB:');
+      expect(record.refillsOcrRegionWords).not.toContain('garbled');
+    });
+  });
+
   // Live report (2026-08-17): pharmacist flagged a wrong YELLOW — engine
   // showed source refills "(not provided)", entered "2", when the page
   // actually reads "Total Fills: 3 (including this fill)" on a
