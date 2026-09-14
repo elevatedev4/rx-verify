@@ -217,6 +217,23 @@ public sealed class VerifyResult
     public List<FieldVerdict> Verdicts { get; set; } = new();
     public VerifySummary Summary { get; set; } = new();
     public string? Error { get; set; }
+
+    /// <summary>
+    /// Diagnostic-only (field report 2026-09, owner verbatim, twice —
+    /// refill-approval "Total Fills" not being read on the OCR path):
+    /// mirrors src/types.ts VerifyResult.refillsOcrRegionWords exactly —
+    /// the ~40 OCR word tokens nearest any "fill"/"refill"-shaped text,
+    /// already PHI-filtered TS-side (src/ocr/parseEscriptOcr.ts
+    /// buildRefillsOcrRegionWords excludes every word claimed by a
+    /// resolved patient/prescriber/drug/directions/note field before this
+    /// ever reaches the wire). Only present when the OCR path was used
+    /// AND refills came back unresolved; null otherwise. Threaded through
+    /// unchanged (no further processing on this side) to
+    /// OverlayViewModel -&gt; VerdictFieldInfo -&gt; Reporting/
+    /// RxReportPayload.cs, same mechanical passthrough pattern as
+    /// RefillsTotalFillsLabelSeen/Prefix below.
+    /// </summary>
+    public List<string>? RefillsOcrRegionWords { get; set; }
 }
 
 /// <summary>

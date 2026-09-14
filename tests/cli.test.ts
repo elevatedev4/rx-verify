@@ -109,6 +109,53 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
     expect(nameVerdict.sourceValue).toBe('Noise, Test');
   }, 15000);
 
+  // Field report (2026-09, owner verbatim, twice — refill-approval "Total
+  // Fills" not being read): confirms VerifyResult.refillsOcrRegionWords
+  // (attached by cli.ts's runVerify from parseEscriptOcr's own
+  // PrescriptionRecord output, since verify() itself never sees OCR
+  // words) actually reaches the wire response, and never leaks the
+  // patient name it deliberately excludes. Synthetic names only.
+  it('includes refillsOcrRegionWords in the wire response when refills is unresolved, excluding patient-field words', async () => {
+    const ocr = [
+      { text: 'Patient:', x: 0, y: 0, w: 80, h: 18 },
+      { text: 'Jordan', x: 90, y: 0, w: 80, h: 18 },
+      { text: 'Testcase', x: 180, y: 0, w: 80, h: 18 },
+      { text: 'Fulfillment', x: 0, y: 40, w: 80, h: 18 },
+      { text: 'status:', x: 90, y: 40, w: 80, h: 18 },
+      { text: 'pending', x: 180, y: 40, w: 80, h: 18 }
+    ];
+    const input = JSON.stringify({
+      ocr,
+      entered: { patientName: 'Jordan Testcase', refills: 3 },
+      skipDrugLookup: true
+    });
+
+    const { stdout, code } = await runCli(input);
+    const result = JSON.parse(stdout);
+
+    expect(code).toBe(0);
+    const refillsVerdict = result.verdicts.find((v: any) => v.field === 'refills');
+    expect(refillsVerdict.reasonCode).toBe('not_provided');
+    expect(result.refillsOcrRegionWords).toBeDefined();
+    expect(result.refillsOcrRegionWords).toContain('Fulfillment');
+    expect(result.refillsOcrRegionWords).not.toContain('Jordan');
+    expect(result.refillsOcrRegionWords).not.toContain('Testcase');
+  }, 15000);
+
+  it('omits refillsOcrRegionWords from the wire response when refills DOES resolve', async () => {
+    const input = JSON.stringify({
+      source: { patientName: 'John Smith', refills: 2 },
+      entered: { patientName: 'John Smith', refills: 2 },
+      skipDrugLookup: true
+    });
+
+    const { stdout, code } = await runCli(input);
+    const result = JSON.parse(stdout);
+
+    expect(code).toBe(0);
+    expect(result.refillsOcrRegionWords).toBeUndefined();
+  }, 15000);
+
   it('reports an error object + non-zero exit on invalid JSON', async () => {
     const { stdout, code } = await runCli('not json');
     const result = JSON.parse(stdout);

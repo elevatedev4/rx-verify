@@ -153,6 +153,34 @@ public class RxReportBuilderTests
         Assert.Null(payload.RefillsTotalFillsLabelPrefix);
     }
 
+    // Field report (2026-09, owner verbatim, twice — refill-approval
+    // "Total Fills" not being read on the OCR path): RefillsOcrRegionWords
+    // is the OCR-path counterpart to RefillsTotalFillsLabelSeen/Prefix
+    // above — same mechanical passthrough, already PHI-filtered before it
+    // ever reaches VerdictFieldInfo (see that property's own doc).
+    [Fact]
+    public void RefillsOcrRegionWordsPassesThroughFromTheField()
+    {
+        var regionWords = new[] { "Fulfillment", "status:", "pending" };
+        var field = new VerdictFieldInfo(
+            "refills", "Refills", VerdictStatus.Yellow, "(not provided)", "2", "not provided", "not_provided",
+            RefillsOcrRegionWords: regionWords);
+
+        var payload = RxReportBuilder.Build(field, "should be 2, Total Fills wasn't read", null, null, CreatedAt, sourceInputMode: "ocr");
+
+        Assert.Equal(regionWords, payload.RefillsOcrRegionWords);
+    }
+
+    [Fact]
+    public void RefillsOcrRegionWordsDefaultsToNullForOtherFields()
+    {
+        var field = new VerdictFieldInfo("quantity", "Quantity", VerdictStatus.Red, "60", "90", "Quantity mismatch", "qty_mismatch");
+
+        var payload = RxReportBuilder.Build(field, "correction", null, null, CreatedAt, sourceInputMode: "ocr");
+
+        Assert.Null(payload.RefillsOcrRegionWords);
+    }
+
     [Fact]
     public void LogTailDefaultsToNullWhenNotPassed()
     {

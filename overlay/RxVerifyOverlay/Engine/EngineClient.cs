@@ -447,6 +447,9 @@ public sealed class EngineClient : IDisposable
         public List<FieldVerdict>? Verdicts { get; set; }
         public VerifySummary? Summary { get; set; }
         public string? Error { get; set; }
+
+        /// <summary>See Models/EngineModels.cs VerifyResult.RefillsOcrRegionWords' doc — mirrored here purely so ParseResponseLine below can pass it through unchanged.</summary>
+        public List<string>? RefillsOcrRegionWords { get; set; }
     }
 
     /// <summary>
@@ -551,7 +554,8 @@ public sealed class EngineClient : IDisposable
         return new VerifyResult
         {
             Verdicts = envelope.Verdicts ?? new List<FieldVerdict>(),
-            Summary = envelope.Summary ?? new VerifySummary()
+            Summary = envelope.Summary ?? new VerifySummary(),
+            RefillsOcrRegionWords = envelope.RefillsOcrRegionWords
         };
     }
 

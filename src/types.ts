@@ -119,6 +119,20 @@ export interface PrescriptionRecord {
    */
   refillsFromTotalFills?: boolean;
   /**
+   * SOURCE-side, DIAGNOSTIC ONLY, OCR path only: set ONLY when `refills`
+   * above ends up undefined (nothing recognized as a refill count at
+   * all) — the ~40 OCR word tokens nearest any "fill"/"refill"-shaped
+   * text on the page, so a filed error report carries proof of what OCR
+   * actually captured instead of just "(not provided)". Built by
+   * buildRefillsOcrRegionWords in src/ocr/parseEscriptOcr.ts, which
+   * explicitly excludes every word already claimed by a resolved
+   * patient/prescriber/drug/directions/note field — PHI-conscious by
+   * construction (over-exclusion is the safe failure mode here), never a
+   * guarantee that zero sensitive text could theoretically appear.
+   * Never set on the entered side, never set when refills DID resolve.
+   */
+  refillsOcrRegionWords?: string[];
+  /**
    * SOURCE-side only: true when the e-script's MedicationPrescribed >
    * Substitutions indicator states the prescriber does NOT allow
    * substitution (NCPDP SCRIPT code 1, "Substitution Not Allowed by
@@ -154,4 +168,15 @@ export interface VerifySummary {
 export interface VerifyResult {
   verdicts: FieldVerdict[];
   summary: VerifySummary;
+  /**
+   * Diagnostic-only passthrough of PrescriptionRecord.refillsOcrRegionWords
+   * (see that field's doc) — attached by src/cli.ts's runVerify, never by
+   * verify() itself, since verify() has no knowledge of OCR at all. Only
+   * present when the OCR path was used AND refills came back unresolved.
+   * The C# overlay (Reporting/RxReportPayload.cs) reads this straight
+   * through into the HQ error-report payload, same "diagnostic-only,
+   * ignored by every other consumer" treatment as sourceInputMode/
+   * refillsTotalFillsLabelSeen already get there.
+   */
+  refillsOcrRegionWords?: string[];
 }

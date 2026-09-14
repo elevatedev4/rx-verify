@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using RxVerifyOverlay.Diagnostics;
 using RxVerifyOverlay.Models;
 
@@ -42,7 +43,16 @@ public sealed record VerdictFieldInfo(
     // only (the matched FieldMap.TotalFillsKeyPrefixes constant) — never
     // the refill count/value itself.
     bool? RefillsTotalFillsLabelSeen = null,
-    string? RefillsTotalFillsLabelPrefix = null)
+    string? RefillsTotalFillsLabelPrefix = null,
+    // Field report (2026-09, owner verbatim, twice — refill-approval
+    // "Total Fills" not being read): OCR-path counterpart to the two
+    // fields above — see ViewModels/OverlayViewModel.cs
+    // RefillsOcrRegionWords' doc and Models/EngineModels.cs VerifyResult.
+    // RefillsOcrRegionWords' doc for the full chain. Already PHI-filtered
+    // by the time it reaches here (src/ocr/parseEscriptOcr.ts
+    // buildRefillsOcrRegionWords) — never re-filtered or truncated on
+    // this side.
+    IReadOnlyList<string>? RefillsOcrRegionWords = null)
 {
     /// <summary>
     /// True for the 3 patient-identity fields (RxLogFormatter.IsPatientField).
