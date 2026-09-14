@@ -416,8 +416,21 @@ describe('Round 6 fixes', () => {
       expect(r.reasonCode).toBe('verbatim_match');
     });
 
-    it('confirms the raw text really is unparseable on its own (sanity check the fast path is actually doing work)', () => {
-      const p = parseSig('Inject 12.5mg under the skin every week.');
+    // NOTE (2026-08-20 field report — "1 mg SQ qWeek" vs "Inject 1mg
+    // under the skin every week."): "under the skin" -> route 'sc' and
+    // "every week"/"qweek"/"q week" -> frequency 'qwk' were added to
+    // src/sig/index.ts's MULTI_WORD_TERMS, and a glued dose+unit split
+    // (e.g. "12.5mg" -> "12.5 mg") was added alongside a new "mg"/"mcg"
+    // DOSE_UNIT_MAP entry — so THIS SPECIFIC example text now parses
+    // structurally (ambiguous: false) instead of only matching via the
+    // verbatim fast path above. That's the fix working as intended, not
+    // a regression: this sanity check is re-pointed at a phrase that
+    // states no recognizable dose/route/frequency at all, so it still
+    // proves the verbatim fast path (tested above) is doing REAL
+    // independent work rather than happening to coincide with successful
+    // structured parsing.
+    it('confirms an unrelated phrase with no dose/route/frequency is genuinely unparseable on its own (sanity check the fast path is actually doing work)', () => {
+      const p = parseSig('Apply as directed by physician for symptom relief');
       expect(p.ambiguous).toBe(true);
     });
 
@@ -435,6 +448,59 @@ describe('Round 6 fixes', () => {
 
     it('regression: a parseable pair that genuinely differs is still RED, not swallowed by the fast path', () => {
       const r = compareSigs('take 1 tab po bid', 'take 2 tab po bid');
+      expect(r.status).toBe('red');
+    });
+  });
+
+  // Field report (2026-08-21, synthetic dose count here): "TAKE ONE (1)
+  // TABLET BY MOUTH TWICE DAILY" vs "TAKE ONE TABLET BY MOUTH TWICE
+  // DAILY." — a parenthesized digit restating the just-stated number word
+  // must not surface as an asymmetric residual token.
+  describe('field report: parenthesized dose-count restatement ("one (1)")', () => {
+    it('is GREEN: "TAKE TWO (2) CAPSULES BY MOUTH ONCE DAILY" vs "TAKE TWO CAPSULES BY MOUTH ONCE DAILY."', () => {
+      const r = compareSigs('TAKE TWO (2) CAPSULES BY MOUTH ONCE DAILY', 'TAKE TWO CAPSULES BY MOUTH ONCE DAILY.');
+      expect(r.status).toBe('green');
+    });
+
+    it('does not fold a parenthetical that CONTRADICTS the stated number word — still surfaces for review', () => {
+      const r = compareSigs('TAKE TWO (3) CAPSULES BY MOUTH ONCE DAILY', 'TAKE TWO CAPSULES BY MOUTH ONCE DAILY.');
+      expect(r.status).not.toBe('green');
+    });
+
+    it('a digit (not a number word) immediately followed by a duplicate parenthetical also folds', () => {
+      const r = compareSigs('TAKE 2 (2) CAPSULES BY MOUTH ONCE DAILY', 'TAKE 2 CAPSULES BY MOUTH ONCE DAILY.');
+      expect(r.status).toBe('green');
+    });
+  });
+
+  // Field report (2026-08-20, synthetic dose/strength here): "1 mg SQ
+  // qWeek" vs "Inject 1mg under the skin every week." — subcutaneous
+  // route spelled out, weekly frequency spelled/abbreviated two ways, and
+  // a glued dose+unit ("1mg") that must still yield the same dose count
+  // as the normally-spaced "1 mg" on the other side.
+  describe('field report: subcutaneous weekly injection sig ("SQ qWeek" / "under the skin every week")', () => {
+    it('is GREEN: "2.5 mg SQ qWeek" vs "Inject 2.5mg under the skin every week."', () => {
+      const r = compareSigs('2.5 mg SQ qWeek', 'Inject 2.5mg under the skin every week.');
+      expect(r.status).toBe('green');
+    });
+
+    it('is GREEN with the spaced "q week" spelling too: "2.5 mg SQ q week" vs "Inject 2.5mg under the skin every week."', () => {
+      const r = compareSigs('2.5 mg SQ q week', 'Inject 2.5mg under the skin every week.');
+      expect(r.status).toBe('green');
+    });
+
+    it('"sq" and "subq"/"subcut"/"subcutaneously" all still normalize to the same route', () => {
+      const r = compareSigs('2.5 mg SQ qWeek', '2.5 mg subcutaneously qWeek');
+      expect(r.status).toBe('green');
+    });
+
+    it('does not silently match a genuinely different dose amount', () => {
+      const r = compareSigs('2.5 mg SQ qWeek', 'Inject 5mg under the skin every week.');
+      expect(r.status).toBe('red');
+    });
+
+    it('"mg" and "mcg" stay distinct dose units — a real magnitude difference is still caught', () => {
+      const r = compareSigs('2.5 mg SQ qWeek', 'Inject 2.5mcg under the skin every week.');
       expect(r.status).toBe('red');
     });
   });

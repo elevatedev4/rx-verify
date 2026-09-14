@@ -1218,6 +1218,110 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  // Field report (2026-08-21, synthetic count here — owner verbatim:
+  // "Source was 11. You should read more of the line, not just the first
+  // number, because there is additional helpful text like '(additional
+  // refills)' or '(including this fill)'"): OCR's per-glyph bounding
+  // boxes for a multi-digit count can land as SEPARATE word tokens
+  // ("1" "1" for a visually-single "11"), which wordsToText then rejoins
+  // with a space — the old parseRefills only ever looked at the FIRST
+  // token and silently truncated "11" down to "1". Also covers the
+  // "(additional refills)" tail, which means the stated count IS the
+  // refill count already (no N-1 math), unlike "(including this fill)".
+  describe('field report: multi-digit refill count split across OCR word tokens, and the "(additional refills)" tail', () => {
+    it('merges an OCR-split multi-digit count ("1" "1" -> 11) behind an explicit "Refills" label', () => {
+      const refillsRow = row(358, ['Refills:', '1', '1']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('11');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+
+    // REVIEWER BLOCKER (2026-09-14): the multi-digit merge must NOT be
+    // unbounded — this file's own trimColumnGap/trimSigColumnGap
+    // machinery exists because column-boundary detection can bleed an
+    // ADJACENT field's value onto the same row. A refills "1" followed by
+    // an unrelated bled-in TWO-DIGIT value ("30") must never concatenate
+    // into "130" — "30" isn't shaped like the real glyph-split artifact
+    // (a lone single digit), so the merge must stop after the first
+    // token, exactly like the pre-existing single-token behavior.
+    it('does NOT merge a bled-in multi-digit value from a neighboring column ("1" then "30" stays refills=1, never 130)', () => {
+      const refillsRow = row(358, ['Refills:', '1', '30']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('1');
+      expect(record.refills).not.toBe('130');
+    });
+
+    // Same bound, via the labelless "Total Fills" pattern-anchor fallback
+    // (findTotalFillsPhraseValue's backward digit walk) — a bled-in
+    // multi-digit value sitting two tokens before the phrase must not
+    // merge in either.
+    it('the labelless pattern-anchor fallback also refuses to merge a bled-in multi-digit value ("30" "1" "(additional refills)" stays refills=1)', () => {
+      const valueRow = row(400, ['30', '1', '(additional', 'refills)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('1');
+      expect(record.refills).not.toBe('301');
+    });
+
+
+    it('"(additional refills)" means the stated count is the refill count as-is — no N-1 math, even behind a "Total Fills" label', () => {
+      const totalFillsRow = row(358, ['Total', 'Fills:', '4', '(additional', 'refills)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+
+      const result = compareRefills(record.refills, 4, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('"(including this fill)" still means N-1 refills, merging a split count too, with the label present', () => {
+      const totalFillsRow = row(358, ['Total', 'Fills:', '1', '1', '(including', 'this', 'fill)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('11');
+      expect(record.refillsFromTotalFills).toBe(true);
+
+      const result = compareRefills(record.refills, 10, record.refillsFromTotalFills);
+      expect(result.status).toBe('green');
+    });
+
+    it('the labelless pattern-anchor fallback also merges a split count and recognizes "(additional refills)"', () => {
+      const valueRow = row(400, ['1', '1', '(additional', 'refills)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('11');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+
+    it('the labelless pattern-anchor fallback still applies N-1 math for "(including this fill)" with a merged split count', () => {
+      const valueRow = row(400, ['1', '1', '(including', 'this', 'fill)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('11');
+      expect(record.refillsFromTotalFills).toBe(true);
+    });
+
+    it('an explicit "Refills" label still wins over a labelless "(additional refills)" tail (no double application)', () => {
+      const refillsRow = row(320, ['Refills:', '4']);
+      const additionalTailRow = row(358, ['9', '(additional', 'refills)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow, additionalTailRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsFromTotalFills).toBeUndefined();
+    });
+  });
+
   // Live report (2026-08-17): pharmacist flagged a wrong YELLOW — engine
   // showed source refills "(not provided)", entered "2", when the page
   // actually reads "Total Fills: 3 (including this fill)" on a

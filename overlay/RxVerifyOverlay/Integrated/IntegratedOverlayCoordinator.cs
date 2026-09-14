@@ -1099,6 +1099,11 @@ public sealed class IntegratedOverlayCoordinator
             // "in play" for this Rx — see DawBoxRule's doc. Every other
             // field is unaffected.
             .Where(r => r.FieldKey != "daw" || DawBoxRule.ShouldDrawBox(r.Status, r.EnteredValue, r.SourceValue))
+            // Field report (owner, 2026-08-25): a field nothing was
+            // actually read for (not_provided/unparseable_*) must never
+            // draw the same red "check it" box a real mismatch gets — see
+            // BoxColorMapper.ShouldDrawBox's doc. Applies to every field.
+            .Where(r => BoxColorMapper.ShouldDrawBox(r.ReasonCode))
             .Select(r => (
                 r.ScreenRect!.Value,
                 BoxColorMapper.IsGreenBox(r.Status),

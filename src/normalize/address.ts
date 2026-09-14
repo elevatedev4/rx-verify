@@ -152,6 +152,74 @@ function splitGluedSuffixUnitTokens(s: string): string {
   return s.replace(GLUED_SUFFIX_UNIT_RE, '$1 $2 $3');
 }
 
+/**
+ * Field report (2026-09-04): OCR glued a street SUFFIX directly onto a
+ * following unit-designator WORD ("StSuite 100" for "St Suite 100"), but
+ * — unlike GLUED_SUFFIX_UNIT_RE above — the unit VALUE ("100") already
+ * has its own space before it; only the suffix and the designator word
+ * are glued together with no space between them at all. GLUED_SUFFIX_
+ * UNIT_RE never fires here because it requires the designator to be
+ * immediately followed by digits with NO space (\d\w* right after the
+ * designator) — it doesn't cover "designator, then a normally-spaced
+ * value". This is checked as its own, narrower pass: split a token that
+ * is EXACTLY a known suffix word immediately followed by a known unit
+ * designator word (nothing else) into the two separate tokens; the
+ * unit-value word after it needs no help, it's already its own token.
+ * Scoped to a whole-token equality match (never a substring replace)
+ * against the same two known-word lists GLUED_SUFFIX_UNIT_RE already
+ * trusts, so this can't fracture an ordinary street or city word either.
+ */
+const GLUED_SUFFIX_UNIT_WHOLE_RE = new RegExp(`^(${SUFFIX_WORD_ALT})(${UNIT_WORD_ALT})$`, 'i');
+
+function splitGluedSuffixUnitWholeToken(s: string): string {
+  return s
+    .split(' ')
+    .map((tok) => {
+      const m = GLUED_SUFFIX_UNIT_WHOLE_RE.exec(tok);
+      return m ? `${m[1]} ${m[2]}` : tok;
+    })
+    .join(' ');
+}
+
+/**
+ * Field report (2026-08-20/09-04, several live reports, synthetic shapes
+ * here): OCR routinely glues a street-name DIRECTIONAL onto the digit
+ * runs on either side of it, with no spaces at all — "4520W9THSTREET"/
+ * "4520W9THST" for "4520 W 9th Street"/"4520 W 9th St" — or splits the
+ * HOUSE NUMBER itself across a stray space while still gluing the
+ * directional to what follows — "2 340W9th Street" for "2340 W 9th
+ * Street" (a single leading digit peels off the house number, and the
+ * rest glues straight into the directional+ordinal). Both are scoped to
+ * the exact shape "digit-run, single directional letter, digit-run",
+ * optionally trailed by a known street-suffix word glued on with no
+ * space either — never a blind alpha/digit boundary split, so this
+ * cannot mangle a genuinely different address; the numeric tokens it
+ * produces still have to match EXACTLY via streetTokensMatch's own
+ * numeric-is-never-fuzzed rule, so a wrong split can only ever fail
+ * toward MORE yellow, never a false green, same invariant as every
+ * other tolerance in this file.
+ *
+ * Order matters: the house-number-rejoin pass must run BEFORE the
+ * fully-glued pass, since it can produce a new fully-glued token
+ * ("2340w9th") that the second pass then also needs to split.
+ */
+const HOUSE_NUMBER_DIRECTIONAL_REJOIN_RE = /\b(\d)\s+(\d+)([nsew])(\d+\w*)\b/gi;
+
+function rejoinSplitHouseNumberBeforeDirectional(s: string): string {
+  return s.replace(HOUSE_NUMBER_DIRECTIONAL_REJOIN_RE, (_m, d1: string, d2: string, dir: string, rest: string) => `${d1}${d2} ${dir} ${rest}`);
+}
+
+const GLUED_DIRECTIONAL_ORDINAL_SUFFIX_RE = new RegExp(
+  `\\b(\\d+)([nsew])(\\d+(?:st|nd|rd|th)?)(${SUFFIX_WORD_ALT})?\\b`,
+  'gi'
+);
+
+function splitGluedDirectionalOrdinalSuffix(s: string): string {
+  return s.replace(GLUED_DIRECTIONAL_ORDINAL_SUFFIX_RE, (_m, houseNum: string, dir: string, ordinal: string, suffix: string | undefined) =>
+    suffix ? `${houseNum} ${dir} ${ordinal} ${suffix}` : `${houseNum} ${dir} ${ordinal}`
+  );
+}
+
 /** Standard Levenshtein edit distance, small-string DP (address tokens are short). */
 function levenshtein(a: string, b: string): number {
   const m = a.length;
@@ -357,9 +425,26 @@ function truncatedSuffixMatch(token: string): string | null {
   return null;
 }
 
+/**
+ * Unit-designator words to strip when they're left dangling immediately
+ * before a "#unit" value that's already been pulled out separately (see
+ * the hashMatch handling in normalizeStreetLine below) — every entry in
+ * UNIT_DESIGNATORS except the "#" symbol itself, which isn't a WORD that
+ * could ever precede itself this way.
+ */
+const UNIT_DESIGNATOR_WORDS_ALT = UNIT_DESIGNATORS.filter((d) => d !== '#')
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+const TRAILING_UNIT_DESIGNATOR_RE = new RegExp(`(?:^|\\s)(?:${UNIT_DESIGNATOR_WORDS_ALT})\\s*$`, 'i');
+
 /** Split a raw street line into base + unit, and normalize tokens. */
 function normalizeStreetLine(raw: string): NormalizedStreet {
-  let s = splitGluedUnitTokens(splitGluedSuffixUnitTokens(splitHouseNumberFraction(foldCase(raw))));
+  let s = splitGluedUnitTokens(
+    splitGluedSuffixUnitWholeToken(
+      splitGluedSuffixUnitTokens(splitHouseNumberFraction(foldCase(raw)))
+    )
+  );
+  s = splitGluedDirectionalOrdinalSuffix(rejoinSplitHouseNumberBeforeDirectional(s));
 
   // Extract "#123" style unit anywhere in the string.
   let unit: string | null = null;
@@ -367,6 +452,17 @@ function normalizeStreetLine(raw: string): NormalizedStreet {
   if (hashMatch) {
     unit = hashMatch[1] ?? null;
     s = s.replace(hashMatch[0], '').trim();
+    // Field report (2026-08-19, synthetic shape here): "Suite #1100" — the
+    // designator WORD immediately preceding the "#value" we just pulled
+    // out must come out too, not linger as an unrecognized trailing
+    // street token ("...Dr Suite" comparing unequal to the other side's
+    // plain "...Dr"). Only strips a designator word that is now the
+    // line's OWN trailing token (post-removal), so a designator word
+    // appearing earlier in the line for an unrelated reason is untouched.
+    const trailingDesignator = TRAILING_UNIT_DESIGNATOR_RE.exec(s);
+    if (trailingDesignator) {
+      s = s.slice(0, trailingDesignator.index).trim();
+    }
   }
 
   const tokens = s.split(' ').filter(Boolean);

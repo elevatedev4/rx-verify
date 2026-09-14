@@ -973,4 +973,70 @@ describe('compareAddresses -- secondary-unit designators + stray-comma normaliza
     expect(r.status).toBe('yellow');
     expect(r.reasonCode).toBe('unit_differs');
   });
+
+  // Field reports (2026-09-04/2026-08-19/2026-08-20, synthetic values here
+  // — same shapes as the live reports, different numbers/names): OCR-glued
+  // and split-spacing street text that a pharmacist confirmed is the exact
+  // same address. See rejoinSplitHouseNumberBeforeDirectional,
+  // splitGluedDirectionalOrdinalSuffix, splitGluedSuffixUnitWholeToken, and
+  // the trailing-unit-designator strip in normalizeStreetLine (all in
+  // src/normalize/address.ts).
+  describe('OCR-glued/split-spacing street text (2026-09 field reports)', () => {
+    it('a street suffix glued directly onto a following unit-designator WORD (unit value still normally spaced) matches', () => {
+      const r = compareAddresses(
+        { street: '4521 N Elm StSuite 200, Topeka, KS 66611' },
+        { street: '4521 N Elm St Topeka, KS 66611' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('a fully-glued directional+ordinal+suffix ("2618W9THSTREET") matches its correctly-spaced counterpart', () => {
+      const r = compareAddresses(
+        { street: '2618W9THSTREET, TOPEKA, KS 66611' },
+        { street: '2618 W 9TH ST TOPEKA, KS 66611' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('a fully-glued directional+ordinal with the abbreviated suffix ("2618W9THST") matches too', () => {
+      const r = compareAddresses(
+        { street: '2618W9THST, TOPEKA, KS 66611' },
+        { street: '2618 W 9TH ST TOPEKA, KS 66611' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('a house number split by a stray space, with the remainder glued to the directional+ordinal ("2 618W9th Street Suite 12"), matches the correctly-spaced/abbreviated form', () => {
+      const r = compareAddresses(
+        { street: '2 618W9th Street Suite 12, Topeka, KS 66611' },
+        { street: '2618 W 9th St, Ste 12 Topeka, KS 66611' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('does not silently match when the rejoined house number is actually different', () => {
+      const r = compareAddresses(
+        { street: '2 618W9th Street, Topeka, KS 66611' },
+        { street: '2619 W 9th St Topeka, KS 66611' }
+      );
+      expect(r.status).toBe('yellow');
+      expect(r.reasonCode).toBe('address_differs');
+    });
+
+    it('a unit stated via "#value" whose designator word is left dangling in front of it ("Suite #1400") still matches a side that spells the abbreviated form correctly', () => {
+      const r = compareAddresses(
+        { street: '790 Elm Boulevard Suite 1400, Topeka, KS 66611' },
+        { street: '790 Elm Blvd Suite #1400 Topeka, KS 66611' }
+      );
+      expect(r.status).toBe('green');
+    });
+
+    it('a unit stated on only one side (dangling designator word notwithstanding) still stays green per the existing unit-stated-once tolerance', () => {
+      const r = compareAddresses(
+        { street: '790 Elm Boulevard Suite 1400, Topeka, KS 66611' },
+        { street: '790 Elm Blvd Topeka, KS 66611' }
+      );
+      expect(r.status).toBe('green');
+    });
+  });
 });

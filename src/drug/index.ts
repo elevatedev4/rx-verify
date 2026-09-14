@@ -1093,10 +1093,19 @@ export function normalizeDrugNameString(raw: string): string {
   // spelled out and re-folded above) down to one occurrence.
   folded = dedupeReleaseAbbrevs(folded);
 
+  // Field report (2026-09-04, synthetic value in tests — real report
+  // "KETOCONAZOLE 2 % SHAMPOO" vs "Ketoconazole 2% Shampoo"): OCR read a
+  // stray space between a percent-strength number and its "%" sign that
+  // PioneerRx's own entry never has. Collapsed here, BEFORE the unit-
+  // spacing fold below, so "2 %" and "2%" fold to the identical "2%"
+  // text on both sides -- narrowly scoped to digit-then-%-sign only,
+  // never touching an unrelated "%" occurrence elsewhere in the name.
+  const percentFolded = folded.replace(/(\d)\s+%/g, '$1%');
+
   // Force exactly one space between a number and a trailing strength
   // unit, so "2mg" and "2 mg" fold to the same text (unit CASING is
   // already handled by the toLowerCase() above).
-  const spaced = folded.replace(/(\d)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
+  const spaced = percentFolded.replace(/(\d)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
 
   // Fold a per-ingredient combo strength stated as "N unit-M unit" down to
   // the bare "N/M" slash shorthand — see foldComboStrengthNotation's doc.
@@ -1436,10 +1445,46 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   // independent "(90.0000"-style token isn't affected elsewhere) then
   // stripping parens per-token is safe here: this bucketing is local to
   // this fallback only.
+  // Field report (2026-09, synthetic values in tests — real report shapes
+  // "CLONAZEPAM (KLONOPIN) 1 MG TABLET" / "AMPHETAMINE-DEXTROAMPHETAMINE
+  // (ADDERALL) 20 MG TABLET"): a BRAND name in parens alongside the
+  // generic ("(klonopin)"/"(adderall)") isn't recognized by any of
+  // COMPONENT_RELEASE_TOKENS/SALT_TOKENS/COMPONENT_ROUTE_TOKENS/
+  // COMPONENT_FORM_TOKENS below, unlike the already-handled "(XL)"
+  // release-qualifier case -- stripping just the parens characters (as
+  // this file already did) left the bare brand word ("klonopin"/
+  // "adderall") to fall into the generic ingredient-token bucket as a
+  // phantom extra ingredient, breaking rule 1's ingredient-set equality
+  // against a source/entered pair that otherwise names the exact same
+  // drug. `parenWrapped` tracks which tokens were originally a LONE
+  // "(word)" annotation (never a multi-word phrase).
+  //
+  // REVIEWER BLOCKER FIX: the first version of this fix dropped ANY
+  // unrecognized lone-paren token, not just an actual brand name --
+  // reviewer-demonstrated false GREEN: "GUAIFENESIN (DM) 100 MG" (DM =
+  // dextromethorphan, a REAL second active ingredient) vs entered
+  // "Guaifenesin 100 MG" (missing that ingredient -- a genuine dispensing
+  // error) went GREEN, because "(dm)" isn't in SALT_TOKENS/COMPONENT_
+  // ROUTE_TOKENS/COMPONENT_FORM_TOKENS/COMPONENT_RELEASE_TOKENS either,
+  // so the old code silently dropped it as if it were brand noise. A
+  // parenthetical is dropped ONLY when it's in this small, explicit,
+  // maintained allowlist of ACTUAL brand names an owner report has
+  // confirmed appear this way -- never merely "unrecognized". Anything
+  // else in parens (including a real ingredient abbreviation like "DM")
+  // now falls straight through to the ordinary ingredient bucket below,
+  // exactly like any other unrecognized token elsewhere in this file --
+  // per this file's own IRON RULE, that can only ever make a match
+  // stricter (more yellow), never a false green.
+  const BRAND_ANNOTATION_ALLOWLIST = new Set(['klonopin', 'adderall']);
+  const parenWrapped = new Set<string>();
   const tokens = normalized
     .split(' ')
     .filter(Boolean)
-    .map((tok) => tok.replace(/[()]/g, ''))
+    .map((tok) => {
+      const stripped = tok.replace(/[()]/g, '');
+      if (stripped !== tok && /^\(.*\)$/.test(tok)) parenWrapped.add(stripped);
+      return stripped;
+    })
     .filter(Boolean);
 
   const isNumeric = (tok: string): boolean => /^\d+(\.\d+)?%?$/.test(tok);
@@ -1509,6 +1554,13 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
       if (form === null) form = tok;
       continue;
     }
+    // Dropped ONLY when it was a lone parenthetical AND it's an actual
+    // allowlisted brand name (per parenWrapped/BRAND_ANNOTATION_ALLOWLIST's
+    // doc above) -- an unrecognized parenthetical that ISN'T on the
+    // allowlist (e.g. a real ingredient abbreviation like "DM") falls
+    // through to the ordinary ingredient bucket below, same as any other
+    // unrecognized token.
+    if (parenWrapped.has(tok) && BRAND_ANNOTATION_ALLOWLIST.has(tok)) continue;
     ingredientTokens.add(tok);
   }
 

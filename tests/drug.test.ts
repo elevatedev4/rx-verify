@@ -487,7 +487,130 @@ describe('compareDrugs', () => {
         );
         expect(r.status).toBe('green');
       });
+
+      // Field report (2026-09-04, synthetic strength/spacing here): the
+      // combo-family "Salts" shorthand also has to survive a brand name
+      // stated in parens AND a stray double space in the entered form
+      // word — "AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 20 MG TABLET" vs
+      // "Amphetamine 25mg Salts  Tab" (two spaces before "Tab").
+      it('is GREEN with a parenthesized brand name alongside the combo ingredient AND a doubled internal space: "AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 25 MG TABLET" vs "Amphetamine 25mg Salts  Tab"', () => {
+        const r = compareDrugs(
+          { name: 'AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 25 MG TABLET' },
+          { name: 'Amphetamine 25mg Salts  Tab' },
+          provider
+        );
+        expect(r.status).toBe('green');
+      });
     });
+
+    // Field report (2026-09-04, synthetic drug/strength here): a brand
+    // name in parens alongside the GENERIC name, where neither side
+    // resolves to a known concept (unresolvedProvider) — must not leak
+    // into the component-fallback's ingredient-token set as a phantom
+    // extra ingredient. Real report shape: "CLONAZEPAM (KLONOPIN) 1 MG
+    // TABLET 1 mg" vs "Clonazepam 1 Mg Tablet".
+    describe('parenthesized BRAND name alongside an unresolved generic (component fallback)', () => {
+      // Uses "KLONOPIN" (a real allowlisted brand — see BRAND_ANNOTATION_
+      // ALLOWLIST in src/drug/index.ts) rather than a made-up placeholder
+      // brand: after the reviewer's blocker fix, the drop is scoped to an
+      // explicit, finite allowlist, so an arbitrary fictitious brand name
+      // would no longer be dropped and isn't representative of the fix.
+      it('is GREEN name_component_match: "TESTAZEPAM (KLONOPIN) 2 MG TABLET 2 mg" vs "Testazepam 2 Mg Tablet"', () => {
+        const r = compareDrugs(
+          { name: 'TESTAZEPAM (KLONOPIN) 2 MG TABLET 2 mg' },
+          { name: 'Testazepam 2 Mg Tablet' },
+          unresolvedProvider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_component_match');
+      });
+
+      it('a recognized release qualifier in parens ("(XL)") is still classified as release, not dropped as a brand annotation', () => {
+        const r = compareDrugs(
+          { name: 'Testazepam Succinate (XL) 50 MG ORAL TABLET' },
+          { name: 'Testazepam Succ Er 50 Mg Tab' },
+          unresolvedProvider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_component_match');
+      });
+
+      it('a genuinely different ingredient stated as the ONLY name (not in parens) still fails to match — the brand-paren drop is not a general "ignore any word" escape hatch', () => {
+        const r = compareDrugs(
+          { name: 'Testazepam Otherdrug 2 Mg Tablet' },
+          { name: 'Testazepam 2 Mg Tablet' },
+          unresolvedProvider
+        );
+        expect(r.status).not.toBe('green');
+      });
+
+      // REVIEWER BLOCKER (2026-09-14): the paren-drop must be scoped to an
+      // explicit brand allowlist, never "anything unrecognized" — a real
+      // SECOND ACTIVE INGREDIENT stated in parens (e.g. "DM" for
+      // dextromethorphan in a combo cough/cold product) must NOT be
+      // silently dropped just because it isn't in SALT_TOKENS/
+      // COMPONENT_ROUTE_TOKENS/COMPONENT_FORM_TOKENS/COMPONENT_RELEASE_
+      // TOKENS either. Reviewer's exact counter-example (synthetic
+      // strength here): "GUAIFENESIN (DM) 100 MG" vs "Guaifenesin 100 MG"
+      // (missing the second ingredient — a genuine dispensing error) must
+      // stay non-green.
+      it('does NOT drop a real ingredient abbreviation in parens ("DM" = dextromethorphan) — a missing second active ingredient stays non-green', () => {
+        const r = compareDrugs(
+          { name: 'GUAIFENESIN (DM) 100 MG' },
+          { name: 'Guaifenesin 100 MG' },
+          unresolvedProvider
+        );
+        expect(r.status).not.toBe('green');
+        expect(r.reasonCode).not.toBe('name_component_match');
+      });
+
+      it('does NOT drop a second real ingredient abbreviation in parens ("PSE" = pseudoephedrine) either', () => {
+        const r = compareDrugs(
+          { name: 'GUAIFENESIN (PSE) 100 MG' },
+          { name: 'Guaifenesin 100 MG' },
+          unresolvedProvider
+        );
+        expect(r.status).not.toBe('green');
+        expect(r.reasonCode).not.toBe('name_component_match');
+      });
+
+      it('still drops the two allowlisted brand names ("Klonopin"/"Adderall") — the allowlist fix does not regress the original field reports', () => {
+        const klonopin = compareDrugs(
+          { name: 'TESTAZEPAM (KLONOPIN) 1 MG TABLET' },
+          { name: 'Testazepam 1 Mg Tablet' },
+          unresolvedProvider
+        );
+        expect(klonopin.status).toBe('green');
+
+        const adderall = compareDrugs(
+          { name: 'AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 25 MG TABLET' },
+          { name: 'Amphetamine 25mg Salts Tab' },
+          provider
+        );
+        expect(adderall.status).toBe('green');
+      });
+    });
+  });
+});
+
+// Field report (2026-09-04, synthetic strength here): OCR read a stray
+// space between a percent-strength number and the "%" sign
+// ("KETOCONAZOLE 2 % SHAMPOO" vs "Ketoconazole 2% Shampoo") — collapsed
+// by normalizeDrugNameString before the identity-match fast path.
+describe('percent-strength spacing (2026-09-04 field report)', () => {
+  it('normalizes "2 %" and "2%" to the same text', () => {
+    expect(normalizeDrugNameString('Testdrug 4 % Shampoo')).toBe(normalizeDrugNameString('Testdrug 4% Shampoo'));
+  });
+
+  it('is GREEN name_identity_match for the exact report shape (synthetic strength)', () => {
+    const r = compareDrugs({ name: 'TESTDRUG 4 % SHAMPOO' }, { name: 'Testdrug 4% Shampoo' }, provider);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('name_identity_match');
+  });
+
+  it('does not silently match a genuinely different percent strength', () => {
+    const r = compareDrugs({ name: 'TESTDRUG 4 % SHAMPOO' }, { name: 'Testdrug 5% Shampoo' }, provider);
+    expect(r.status).not.toBe('green');
   });
 });
 

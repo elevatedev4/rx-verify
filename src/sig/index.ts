@@ -84,7 +84,7 @@ const ROUTE_MAP: Record<string, string> = {
   // a fully valid route here.
   im: 'im', // intramuscular
   iv: 'iv', // intravenous
-  sc: 'sc', subq: 'sc', subcut: 'sc', subcutaneously: 'sc', // all fold to one canonical
+  sc: 'sc', sq: 'sc', subq: 'sc', subcut: 'sc', subcutaneously: 'sc', // all fold to one canonical
   // "in each nostril" is substituted (MULTI_WORD_TERMS) directly to the
   // 'nasal' token below before tokenization.
   nasal: 'nasal',
@@ -304,7 +304,18 @@ const DOSE_UNIT_MAP: Record<string, string> = {
   puff: 'puff', puffs: 'puff', inhalation: 'puff', inhalations: 'puff',
   spray: 'spray', sprays: 'spray',
   unit: 'unit', units: 'unit',
-  patch: 'patch', patches: 'patch'
+  patch: 'patch', patches: 'patch',
+  // Field report (2026-08-20, synthetic dose here): "1 mg SQ qWeek" vs
+  // "Inject 1mg under the skin every week." — weight-based dosing (common
+  // for injectables) had no dose-unit entry at all, so "mg"/"mcg" fell
+  // through to the generic residual-token bucket on whichever side
+  // stated it as its OWN token, producing an asymmetric residual (the
+  // OTHER side's "mg" was glued into "1mg" and never became its own
+  // token at all — see splitGluedDoseUnit below for that half of the
+  // fix). "mg" and "mcg" are kept as DISTINCT canonical units (never
+  // folded together, and never folded into "g") — they're different
+  // magnitudes, and blurring them would risk a false-green dose mismatch.
+  mg: 'mg', mcg: 'mcg'
 };
 
 const ROMAN_MAP: Record<string, number> = {
@@ -372,6 +383,18 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   // Round 5, fix 4 (additive): substituted directly to the 'nasal' route
   // token (ROUTE_MAP), same pattern as "by mouth" -> 'po' above.
   [/\bin each nostril\b/g, 'nasal'],
+  // Field report (2026-08-20, synthetic dose/route here): "1 mg SQ qWeek"
+  // vs "Inject 1mg under the skin every week." — "under the skin" is the
+  // spelled-out form of the subcutaneous route ("sq"/"subq"/"subcut" all
+  // already fold to ROUTE_MAP's 'sc'), same substitute-before-tokenizing
+  // pattern as "by mouth" -> 'po' above.
+  [/\bunder the skin\b/g, 'sc'],
+  // Same report: "qWeek" (glued) and "q week" (spaced) both mean "every
+  // week" (owner, verbatim: "Q means every") — \s* covers both spellings
+  // in one pattern, folding to the existing 'qwk' FREQ_MAP key (1/7 per
+  // day) rather than adding a second, driftable weekly-rate entry there.
+  [/\bq\s*week\b/g, 'qwk'],
+  [/\bevery week\b/g, 'qwk'],
   // Round 7, fix 1 (additive): TIME_OF_DAY concept — same pattern as "by
   // mouth" -> "po" above, folding away the surrounding preposition onto
   // a single canonical TIME_OF_DAY_MAP key (see that table's doc). No
@@ -398,8 +421,51 @@ const MULTI_WORD_TERMS: Array<[RegExp, string]> = [
   [/\bwith supper\b/g, 'dinner']
 ];
 
+/**
+ * Field report (2026-08-21, synthetic dose count here): "TAKE ONE (1)
+ * TABLET BY MOUTH TWICE DAILY" vs "TAKE ONE TABLET BY MOUTH TWICE DAILY."
+ * went yellow sig_ambiguous — the source restates the dose count in both
+ * written and numeric form ("one (1)"), and the bare "(1)" token (parens
+ * attached, so it never matches extractDoseCount's plain-digit check) was
+ * left over as a residual token present only on the source side, tripping
+ * the asymmetric-residual guard even though "one" and "(1)" say the exact
+ * same thing. Only strips a parenthesized digit group that DUPLICATES the
+ * number word or digit stated immediately before it (word/digit value ===
+ * the parenthetical's value) — a parenthetical that states a DIFFERENT
+ * number, or one with nothing recognizable in front of it, is left
+ * completely alone and still surfaces as a residual for human review,
+ * same conservative "only fold a confirmed restatement" approach
+ * foldTrailingDuplicateStrength takes in src/drug/index.ts.
+ */
+function foldRedundantParentheticalDoseCount(s: string): string {
+  return s.replace(
+    /\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+(?:\.\d+)?)\s*\(\s*(\d+(?:\.\d+)?)\s*\)/g,
+    (whole: string, word: string, digits: string) => {
+      const wordVal = NUMBER_WORD_MAP[word] ?? (/^\d+(?:\.\d+)?$/.test(word) ? Number(word) : null);
+      return wordVal !== null && wordVal === Number(digits) ? word : whole;
+    }
+  );
+}
+
+/**
+ * Field report (2026-08-20, synthetic dose here): "Inject 1mg under the
+ * skin every week." — a dose count glued directly to its weight unit with
+ * no space ("1mg") never matched extractDoseCount's plain-digit check
+ * (which requires the WHOLE token to be numeric), so the dose count was
+ * silently missed on that side entirely, while the other side's normally-
+ * spaced "1 mg" parsed fine. Same digit-unit spacing fix drug/index.ts's
+ * normalizeDrugNameString and src/quantity/index.ts already apply for
+ * their own domains — scoped here to the sig dose-unit vocabulary only
+ * (mg/mcg/ml/g/unit(s)), never a blind digit+letters split.
+ */
+function splitGluedDoseUnit(s: string): string {
+  return s.replace(/(\d+(?:\.\d+)?)(mg|mcg|ml|g|units?)\b/g, '$1 $2');
+}
+
 function preprocess(raw: string): string {
   let s = raw.toLowerCase().trim();
+  s = foldRedundantParentheticalDoseCount(s);
+  s = splitGluedDoseUnit(s);
   for (const [re, replacement] of MULTI_WORD_TERMS) {
     s = s.replace(re, replacement);
   }
