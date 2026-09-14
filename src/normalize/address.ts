@@ -184,10 +184,10 @@ function splitGluedSuffixUnitWholeToken(s: string): string {
 /**
  * Field report (2026-08-20/09-04, several live reports, synthetic shapes
  * here): OCR routinely glues a street-name DIRECTIONAL onto the digit
- * runs on either side of it, with no spaces at all — "1312W6THSTREET"/
- * "1312W6THST" for "1312 W 6th Street"/"1312 W 6th St" — or splits the
+ * runs on either side of it, with no spaces at all — "4520W9THSTREET"/
+ * "4520W9THST" for "4520 W 9th Street"/"4520 W 9th St" — or splits the
  * HOUSE NUMBER itself across a stray space while still gluing the
- * directional to what follows — "1 112W6th Street" for "1112 W 6th
+ * directional to what follows — "2 340W9th Street" for "2340 W 9th
  * Street" (a single leading digit peels off the house number, and the
  * rest glues straight into the directional+ordinal). Both are scoped to
  * the exact shape "digit-run, single directional letter, digit-run",
@@ -201,7 +201,7 @@ function splitGluedSuffixUnitWholeToken(s: string): string {
  *
  * Order matters: the house-number-rejoin pass must run BEFORE the
  * fully-glued pass, since it can produce a new fully-glued token
- * ("1112w6th") that the second pass then also needs to split.
+ * ("2340w9th") that the second pass then also needs to split.
  */
 const HOUSE_NUMBER_DIRECTIONAL_REJOIN_RE = /\b(\d)\s+(\d+)([nsew])(\d+\w*)\b/gi;
 
