@@ -120,9 +120,16 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
       { text: 'Patient:', x: 0, y: 0, w: 80, h: 18 },
       { text: 'Jordan', x: 90, y: 0, w: 80, h: 18 },
       { text: 'Testcase', x: 180, y: 0, w: 80, h: 18 },
-      { text: 'Fulfillment', x: 0, y: 40, w: 80, h: 18 },
-      { text: 'status:', x: 90, y: 40, w: 80, h: 18 },
-      { text: 'pending', x: 180, y: 40, w: 80, h: 18 }
+      // Buffer row: the row immediately AFTER a patient/prescriber/DOB/
+      // phone/address label is itself excluded from the diagnostic (see
+      // REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS' doc), so without this
+      // buffer the fill-hit row below would collide with that exclusion
+      // for an unrelated reason.
+      { text: 'Quantity:', x: 0, y: 40, w: 80, h: 18 },
+      { text: '30', x: 90, y: 40, w: 80, h: 18 },
+      { text: 'Fulfillment', x: 0, y: 80, w: 80, h: 18 },
+      { text: 'status:', x: 90, y: 80, w: 80, h: 18 },
+      { text: 'pending', x: 180, y: 80, w: 80, h: 18 }
     ];
     const input = JSON.stringify({
       ocr,

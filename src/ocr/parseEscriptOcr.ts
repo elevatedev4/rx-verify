@@ -1094,9 +1094,89 @@ const REFILLS_DIAGNOSTIC_SENSITIVE_KEYS: LabelKey[] = [
   'dxCodes'
 ];
 
+/**
+ * REVIEWER BLOCKER FIX (2026-09-14): the resolutionMeta-based exclusion
+ * above only ever covers a field that actually RESOLVED to a value. If a
+ * "Patient"/"DOB"/"Address"/"Prescriber"/"Phone" LABEL is on-screen but
+ * its value failed to resolve (e.g. isImplausibleNameValue rejected a
+ * digit-dominated candidate) — or is simply mid-resolution/rejected for
+ * any other reason — resolutionMeta never gets populated for that key at
+ * all, and the raw label+value ROW would otherwise be free to leak
+ * verbatim into this diagnostic if it happened to sit next to a
+ * "fill"-shaped row. Checked independently of resolutionMeta, at the
+ * ROW level, via the SAME findLabelAtLineStart every normal field
+ * resolution already uses — a label match here drops the WHOLE row
+ * (never just its value words) PLUS the row immediately after it (the
+ * label's value routinely continues onto the following block-column
+ * row — see Pass B), regardless of whether that value ever actually
+ * resolved anywhere else in this function.
+ */
+const REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS: ReadonlySet<LabelKey> = new Set([
+  'patient',
+  'dob',
+  'address',
+  'prescriber',
+  'phone'
+]);
+
 /** Stable identity for one OCR word within a page, used only to de-duplicate/exclude by set membership (never compares by object reference, since the same logical word can be sliced into more than one array). */
 function ocrWordKey(w: OcrWord): string {
   return `${w.x}|${w.y}|${w.text}`;
+}
+
+/**
+ * REVIEWER BLOCKER FIX: shape-based exclusions, independent of any label
+ * or resolution outcome at all — the other half of the gap (an
+ * UNLABELED name/date/phone/NPI sitting in freeform text near a
+ * "fill"-shaped row, with no label anywhere on the page to anchor a
+ * row-level drop to). Every one of these is checked against the RAW
+ * token text, never against a normalized/parsed value, so a false
+ * positive only ever costs a bit of diagnostic context — never the other
+ * direction.
+ */
+
+/** A date shaped like m/d/y (2-4 digit year, '/','-','.' separators) or yyyy-mm-dd — covers DOB, written, and available dates alike; this diagnostic never distinguishes which one, so all date-shaped tokens are dropped. */
+function isDateShapedToken(token: string): boolean {
+  return /^\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}$/.test(token) || /^\d{4}-\d{2}-\d{2}$/.test(token);
+}
+
+/** A digit run of 7 or more (after stripping all non-digit characters) — covers a whole 10-digit NPI, a whole 10-digit phone number, and a split phone FRAGMENT ("555-0100") alike. Deliberately coarse: a plain 7+-digit run is never a refill count or an ordinary quantity in this domain, so this can't cost real diagnostic value for THIS field. */
+function isSensitiveDigitRun(token: string): boolean {
+  return token.replace(/\D/g, '').length >= 7;
+}
+
+/** A single capitalized word ("Smith", "O'Brien", "Mary-Jane") — the shape a name token takes on either side of the comma in "Last, First". */
+const CAPITALIZED_WORD_RE = /^[A-Z][a-zA-Z'-]*$/;
+
+/**
+ * True when ROW `line` contains a "Last, First" (or "Last,First" glued)
+ * shaped pair anywhere in it — the freeform, UNLABELED name shape (no
+ * "Patient"/"Prescriber" label anywhere for REFILLS_DIAGNOSTIC_SENSITIVE_
+ * LABEL_KEYS to ever catch). Deliberately coarse — checks every adjacent
+ * token pair/triple in the row, not just the first — since a name can
+ * appear anywhere in a summary line. A match drops the ENTIRE row (not
+ * just the matching tokens), same "whole row, never just the flagged
+ * word" posture as the label-based check above.
+ */
+function rowLooksNameLike(line: OcrWord[]): boolean {
+  const tokens = line.map((w) => w.text);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] ?? '';
+    if (tok === ',') {
+      const prev = tokens[i - 1] ?? '';
+      const next = tokens[i + 1] ?? '';
+      if (CAPITALIZED_WORD_RE.test(prev) && CAPITALIZED_WORD_RE.test(next)) return true;
+      continue;
+    }
+    const commaGlued = /^([A-Z][a-zA-Z'-]*),([A-Z][a-zA-Z'-]*)$/.exec(tok);
+    if (commaGlued) return true;
+    const trailingComma = /^([A-Z][a-zA-Z'-]*),$/.exec(tok);
+    if (trailingComma) {
+      const next = tokens[i + 1] ?? '';
+      if (CAPITALIZED_WORD_RE.test(next)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1108,14 +1188,23 @@ function ocrWordKey(w: OcrWord): string {
  * site) — this is diagnostic evidence for the NEXT failure, not a value
  * this engine ever uses for anything itself.
  *
- * PHI-CONSCIOUS BY CONSTRUCTION: every word already claimed by a
- * resolved patient/prescriber/drug/directions/note/etc field (see
- * REFILLS_DIAGNOSTIC_SENSITIVE_KEYS) is excluded outright, and only
- * whole PHYSICAL ROWS containing a "fill"-shaped word (plus their
- * immediate row-before/row-after neighbors, for context) are ever
- * considered at all — this can never accidentally pull in an unrelated
- * patient-name or drug-name row that happens to sit somewhere else on
- * the page. Capped at `maxWords` total.
+ * PHI-CONSCIOUS BY CONSTRUCTION, THREE INDEPENDENT LAYERS (reviewer
+ * round 2 — the first version only had layer 1):
+ *  1. every word already claimed by a RESOLVED patient/prescriber/drug/
+ *     directions/note/etc field (REFILLS_DIAGNOSTIC_SENSITIVE_KEYS) is
+ *     excluded;
+ *  2. every row carrying a patient/prescriber/DOB/address/phone LABEL —
+ *     found independently via findLabelAtLineStart, regardless of
+ *     whether that label's value ever actually resolved anywhere else in
+ *     this file — is dropped WHOLESALE, along with the row immediately
+ *     after it (REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS);
+ *  3. every row that LOOKS like a freeform, unlabeled name (rowLooksNameLike)
+ *     is dropped wholesale too, and every individual token shaped like a
+ *     date, phone number/fragment, or NPI (isDateShapedToken/
+ *     isSensitiveDigitRun) is dropped even from an otherwise-clean row.
+ * Only whole PHYSICAL ROWS containing a "fill"-shaped word, plus their
+ * immediate row-before/row-after neighbors (±1, never further), are ever
+ * considered as candidates at all. Capped at `maxWords` total.
  */
 function buildRefillsOcrRegionWords(
   lines: OcrWord[][],
@@ -1129,6 +1218,18 @@ function buildRefillsOcrRegionWords(
     for (const w of meta.words) sensitiveKeys.add(ocrWordKey(w));
   }
 
+  // Layer 2: row-level label exclusion, independent of resolution outcome.
+  const sensitiveLineIndices = new Set<number>();
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    if (!line) continue;
+    const match = findLabelAtLineStart(line);
+    if (match && REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS.has(match.label.key)) {
+      sensitiveLineIndices.add(li);
+      sensitiveLineIndices.add(li + 1);
+    }
+  }
+
   const isFillShaped = (text: string) => normalize(text).includes('fill');
 
   const out: string[] = [];
@@ -1140,9 +1241,17 @@ function buildRefillsOcrRegionWords(
     for (const neighborIdx of [li - 1, li, li + 1]) {
       const candidateLine = lines[neighborIdx];
       if (!candidateLine) continue;
+      // Layer 2 (label rows) and layer 3 (unlabeled name-shaped rows) —
+      // both drop the ENTIRE row, never just individual tokens.
+      if (sensitiveLineIndices.has(neighborIdx)) continue;
+      if (rowLooksNameLike(candidateLine)) continue;
+
       for (const w of candidateLine) {
         const key = ocrWordKey(w);
-        if (sensitiveKeys.has(key) || seen.has(key)) continue;
+        if (seen.has(key)) continue;
+        // Layer 1 (resolved-field words) and layer 3 (shape-based
+        // per-token exclusions: dates, phone/NPI-shaped digit runs).
+        if (sensitiveKeys.has(key) || isDateShapedToken(w.text) || isSensitiveDigitRun(w.text)) continue;
         seen.add(key);
         out.push(w.text);
         if (out.length >= maxWords) return out;

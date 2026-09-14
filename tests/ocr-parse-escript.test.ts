@@ -1495,8 +1495,15 @@ describe('parseEscriptOcr', () => {
 
     it('the diagnostics log block includes the region words when refills is unresolved', () => {
       const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      // A buffer row between the patient label and the fill-hit row —
+      // the row IMMEDIATELY after a sensitive label is itself excluded
+      // (see REFILLS_DIAGNOSTIC_SENSITIVE_LABEL_KEYS' doc), so without
+      // this buffer the fill-hit row would collide with that exclusion
+      // for an unrelated reason and this test would no longer be
+      // exercising what it says it exercises.
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
       const noiseRow = row(300, ['Fulfillment', 'status:', 'pending']);
-      const ocr = flatten([TOOLBAR_ROW, patientRow, noiseRow]);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
       parseEscriptOcr(ocr);
 
       // buildDiagnosticsBlock itself is pure/independently tested
@@ -1510,6 +1517,51 @@ describe('parseEscriptOcr', () => {
       ]);
       expect(block).toContain('nearest OCR words to "fill"/"refill"');
       expect(block).toContain('Fulfillment');
+    });
+
+    // REVIEWER BLOCKER (2026-09-14): the original version only excluded
+    // words already claimed via resolutionMeta — populated ONLY when a
+    // field actually resolved through a label match. An UNLABELED name
+    // (no "Patient" text anywhere on the page at all) sitting next to a
+    // fill-hit row was never excluded by that alone. Synthetic name here.
+    it('excludes an unlabeled, unresolved "Last, First" name row sitting right next to a fill-hit row', () => {
+      // "Quantity" label only, so the page has SOMETHING recognizable
+      // (parseEscriptOcr bails out entirely with zero fields if nothing
+      // at all is recognized) — the name row itself carries no label.
+      const quantityRow = row(100, ['Quantity', '30']);
+      const nameRow = row(200, ['Testcase,', 'Jordan']);
+      const fillRow = row(240, ['Fulfillment', 'pending']);
+      const ocr = flatten([TOOLBAR_ROW, quantityRow, nameRow, fillRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.patient).toBeUndefined(); // confirms this really is unresolved, not just unchecked
+      expect(record.refillsOcrRegionWords).toBeDefined();
+      expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+      expect(record.refillsOcrRegionWords).not.toContain('Testcase,');
+      expect(record.refillsOcrRegionWords).not.toContain('Jordan');
+    });
+
+    // REVIEWER BLOCKER, continued: a LABEL that IS on-screen (unlike the
+    // name case above) but whose value never resolves into the record —
+    // the row-level exclusion (independent of resolutionMeta) must still
+    // catch it. DOB row placed as an actual ±1 neighbor of the fill-hit
+    // row (not just "the row after the label", which is a separate,
+    // already-covered case) so this specifically proves the label itself
+    // is recognized and excluded wholesale, value included.
+    it('excludes a DOB row (label + unparseable value) sitting right next to a fill-hit row, even though it never resolves into patientDOB', () => {
+      const quantityRow = row(100, ['Quantity', '30']);
+      const fillRow = row(200, ['Fulfillment', 'pending']);
+      const dobRow = row(240, ['DOB:', 'garbled']);
+      const ocr = flatten([TOOLBAR_ROW, quantityRow, fillRow, dobRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.patientDOB).toBeUndefined(); // confirms "garbled" never became a real DOB
+      expect(record.refillsOcrRegionWords).toBeDefined();
+      expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+      expect(record.refillsOcrRegionWords).not.toContain('DOB:');
+      expect(record.refillsOcrRegionWords).not.toContain('garbled');
     });
   });
 
