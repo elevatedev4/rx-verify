@@ -28,7 +28,9 @@ public class HoverStateMachineTests
     {
         var machine = new HoverStateMachine();
 
-        // 60ms ticks, threshold is 250ms — 3 ticks (180ms) isn't enough yet.
+        // 60ms ticks, threshold is 250ms — the first sample over a new
+        // hotspot is an entry tick (elapsed reset to 0, not accumulated),
+        // so 3 ticks only reach 0ms, 60ms, 120ms — nowhere near enough yet.
         for (var i = 0; i < 3; i++)
         {
             var result = machine.Update(Sample(isOverHotspot: true, hotspotIndex: 0));
@@ -41,13 +43,16 @@ public class HoverStateMachineTests
     {
         var machine = new HoverStateMachine();
 
-        // 4 ticks * 60ms = 240ms (still below 250ms threshold).
-        for (var i = 0; i < 4; i++)
+        // The first tick over a new hotspot is an entry tick — elapsed is
+        // reset to 0 and that sample's own duration is NOT accumulated.
+        // So 5 ticks give 0, 60, 120, 180, 240ms — still below the 250ms
+        // threshold.
+        for (var i = 0; i < 5; i++)
         {
             Assert.Equal(HoverPopupAction.None, machine.Update(Sample(true, 0)).PopupAction);
         }
 
-        // 5th tick crosses 250ms (300ms total) — Show fires exactly here.
+        // 6th tick crosses 250ms (300ms total) — Show fires exactly here.
         var showResult = machine.Update(Sample(true, 0));
         Assert.Equal(HoverPopupAction.Show, showResult.PopupAction);
 
@@ -74,7 +79,8 @@ public class HoverStateMachineTests
     {
         var machine = new HoverStateMachine();
 
-        // Only 2 ticks (120ms) — well below the 250ms threshold, nothing shown yet.
+        // Only 2 ticks — an entry tick (0ms) plus one more (60ms) — well
+        // below the 250ms threshold, nothing shown yet.
         machine.Update(Sample(true, 0));
         machine.Update(Sample(true, 0));
 
@@ -211,10 +217,13 @@ public class HoverStateMachineTests
         // not interfere with unrelated dwell/popup bookkeeping.
         var machine = new HoverStateMachine();
 
-        for (var i = 0; i < 4; i++)
+        // Entry tick (0ms) plus 4 more 60ms ticks = 0, 60, 120, 180, 240ms —
+        // still below the 250ms threshold.
+        for (var i = 0; i < 5; i++)
         {
             Assert.Equal(HoverPopupAction.None, machine.Update(Sample(true, 0, dialogOpen: true)).PopupAction);
         }
+        // 6th tick crosses 250ms (300ms total) — Show fires exactly here.
         var showResult = machine.Update(Sample(true, 0, dialogOpen: true));
         Assert.Equal(HoverPopupAction.Show, showResult.PopupAction);
 
@@ -256,18 +265,22 @@ public class HoverStateMachineTests
         // Same hotspot index as before Reset — if the dwell state weren't
         // actually cleared, this would look like "already dwelling here"
         // and could behave inconsistently; asserting the FULL threshold is
-        // required again is the real proof Reset worked.
-        for (var i = 0; i < 4; i++)
+        // required again is the real proof Reset worked. Reset put the
+        // machine back to "not hovering anything", so the very next sample
+        // is an entry tick again (0ms), then 4 more 60ms ticks reach 240ms —
+        // still below the 250ms threshold.
+        for (var i = 0; i < 5; i++)
         {
             Assert.Equal(HoverPopupAction.None, machine.Update(Sample(true, 0)).PopupAction);
         }
+        // 6th tick crosses 250ms (300ms total) — Show fires exactly here.
         Assert.Equal(HoverPopupAction.Show, machine.Update(Sample(true, 0)).PopupAction);
     }
 
-    /// <summary>Drives the machine through exactly enough 60ms ticks to cross the 250ms dwell threshold and return to a "just showed" state, for tests that only care about what happens AFTER the popup is already up.</summary>
+    /// <summary>Drives the machine through exactly enough 60ms ticks to cross the 250ms dwell threshold and return to a "just showed" state, for tests that only care about what happens AFTER the popup is already up. The first sample over a hotspot is an entry tick (elapsed reset to 0, not accumulated), so it takes 5 ticks to reach 0/60/120/180/240ms and a 6th to cross 250ms (300ms total).</summary>
     private static void DwellUntilShown(HoverStateMachine machine, int hotspotIndex)
     {
-        for (var i = 0; i < 4; i++)
+        for (var i = 0; i < 5; i++)
         {
             machine.Update(Sample(true, hotspotIndex));
         }
