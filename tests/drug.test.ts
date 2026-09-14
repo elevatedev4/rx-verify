@@ -510,9 +510,14 @@ describe('compareDrugs', () => {
     // extra ingredient. Real report shape: "CLONAZEPAM (KLONOPIN) 1 MG
     // TABLET 1 mg" vs "Clonazepam 1 Mg Tablet".
     describe('parenthesized BRAND name alongside an unresolved generic (component fallback)', () => {
-      it('is GREEN name_component_match: "TESTAZEPAM (FAKEBRAND) 2 MG TABLET 2 mg" vs "Testazepam 2 Mg Tablet"', () => {
+      // Uses "KLONOPIN" (a real allowlisted brand — see BRAND_ANNOTATION_
+      // ALLOWLIST in src/drug/index.ts) rather than a made-up placeholder
+      // brand: after the reviewer's blocker fix, the drop is scoped to an
+      // explicit, finite allowlist, so an arbitrary fictitious brand name
+      // would no longer be dropped and isn't representative of the fix.
+      it('is GREEN name_component_match: "TESTAZEPAM (KLONOPIN) 2 MG TABLET 2 mg" vs "Testazepam 2 Mg Tablet"', () => {
         const r = compareDrugs(
-          { name: 'TESTAZEPAM (FAKEBRAND) 2 MG TABLET 2 mg' },
+          { name: 'TESTAZEPAM (KLONOPIN) 2 MG TABLET 2 mg' },
           { name: 'Testazepam 2 Mg Tablet' },
           unresolvedProvider
         );
@@ -537,6 +542,52 @@ describe('compareDrugs', () => {
           unresolvedProvider
         );
         expect(r.status).not.toBe('green');
+      });
+
+      // REVIEWER BLOCKER (2026-09-14): the paren-drop must be scoped to an
+      // explicit brand allowlist, never "anything unrecognized" — a real
+      // SECOND ACTIVE INGREDIENT stated in parens (e.g. "DM" for
+      // dextromethorphan in a combo cough/cold product) must NOT be
+      // silently dropped just because it isn't in SALT_TOKENS/
+      // COMPONENT_ROUTE_TOKENS/COMPONENT_FORM_TOKENS/COMPONENT_RELEASE_
+      // TOKENS either. Reviewer's exact counter-example (synthetic
+      // strength here): "GUAIFENESIN (DM) 100 MG" vs "Guaifenesin 100 MG"
+      // (missing the second ingredient — a genuine dispensing error) must
+      // stay non-green.
+      it('does NOT drop a real ingredient abbreviation in parens ("DM" = dextromethorphan) — a missing second active ingredient stays non-green', () => {
+        const r = compareDrugs(
+          { name: 'GUAIFENESIN (DM) 100 MG' },
+          { name: 'Guaifenesin 100 MG' },
+          unresolvedProvider
+        );
+        expect(r.status).not.toBe('green');
+        expect(r.reasonCode).not.toBe('name_component_match');
+      });
+
+      it('does NOT drop a second real ingredient abbreviation in parens ("PSE" = pseudoephedrine) either', () => {
+        const r = compareDrugs(
+          { name: 'GUAIFENESIN (PSE) 100 MG' },
+          { name: 'Guaifenesin 100 MG' },
+          unresolvedProvider
+        );
+        expect(r.status).not.toBe('green');
+        expect(r.reasonCode).not.toBe('name_component_match');
+      });
+
+      it('still drops the two allowlisted brand names ("Klonopin"/"Adderall") — the allowlist fix does not regress the original field reports', () => {
+        const klonopin = compareDrugs(
+          { name: 'TESTAZEPAM (KLONOPIN) 1 MG TABLET' },
+          { name: 'Testazepam 1 Mg Tablet' },
+          unresolvedProvider
+        );
+        expect(klonopin.status).toBe('green');
+
+        const adderall = compareDrugs(
+          { name: 'AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 25 MG TABLET' },
+          { name: 'Amphetamine 25mg Salts Tab' },
+          provider
+        );
+        expect(adderall.status).toBe('green');
       });
     });
   });

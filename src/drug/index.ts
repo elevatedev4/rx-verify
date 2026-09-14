@@ -1457,11 +1457,25 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
   // phantom extra ingredient, breaking rule 1's ingredient-set equality
   // against a source/entered pair that otherwise names the exact same
   // drug. `parenWrapped` tracks which tokens were originally a LONE
-  // "(word)" annotation (never a multi-word phrase) so the loop below can
-  // drop one that ends up UNRECOGNIZED (i.e. not a release/salt/route/
-  // form word) instead of leaking it into ingredientTokens -- a
-  // recognized one (like "(xl)") is unaffected, since it's consumed by
-  // COMPONENT_RELEASE_TOKENS etc. before ever reaching that fallback.
+  // "(word)" annotation (never a multi-word phrase).
+  //
+  // REVIEWER BLOCKER FIX: the first version of this fix dropped ANY
+  // unrecognized lone-paren token, not just an actual brand name --
+  // reviewer-demonstrated false GREEN: "GUAIFENESIN (DM) 100 MG" (DM =
+  // dextromethorphan, a REAL second active ingredient) vs entered
+  // "Guaifenesin 100 MG" (missing that ingredient -- a genuine dispensing
+  // error) went GREEN, because "(dm)" isn't in SALT_TOKENS/COMPONENT_
+  // ROUTE_TOKENS/COMPONENT_FORM_TOKENS/COMPONENT_RELEASE_TOKENS either,
+  // so the old code silently dropped it as if it were brand noise. A
+  // parenthetical is dropped ONLY when it's in this small, explicit,
+  // maintained allowlist of ACTUAL brand names an owner report has
+  // confirmed appear this way -- never merely "unrecognized". Anything
+  // else in parens (including a real ingredient abbreviation like "DM")
+  // now falls straight through to the ordinary ingredient bucket below,
+  // exactly like any other unrecognized token elsewhere in this file --
+  // per this file's own IRON RULE, that can only ever make a match
+  // stricter (more yellow), never a false green.
+  const BRAND_ANNOTATION_ALLOWLIST = new Set(['klonopin', 'adderall']);
   const parenWrapped = new Set<string>();
   const tokens = normalized
     .split(' ')
@@ -1540,11 +1554,13 @@ function decomposeDrugNameComponents(rawName: string): DrugNameComponents {
       if (form === null) form = tok;
       continue;
     }
-    // An unrecognized lone parenthetical annotation (brand name, per
-    // parenWrapped's doc above) is dropped here rather than leaked into
-    // ingredientTokens -- everything ELSE unrecognized still falls
-    // through to the ingredient bucket unchanged.
-    if (parenWrapped.has(tok)) continue;
+    // Dropped ONLY when it was a lone parenthetical AND it's an actual
+    // allowlisted brand name (per parenWrapped/BRAND_ANNOTATION_ALLOWLIST's
+    // doc above) -- an unrecognized parenthetical that ISN'T on the
+    // allowlist (e.g. a real ingredient abbreviation like "DM") falls
+    // through to the ordinary ingredient bucket below, same as any other
+    // unrecognized token.
+    if (parenWrapped.has(tok) && BRAND_ANNOTATION_ALLOWLIST.has(tok)) continue;
     ingredientTokens.add(tok);
   }
 

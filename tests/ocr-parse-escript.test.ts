@@ -1238,6 +1238,37 @@ describe('parseEscriptOcr', () => {
       expect(record.refillsFromTotalFills).toBeUndefined();
     });
 
+    // REVIEWER BLOCKER (2026-09-14): the multi-digit merge must NOT be
+    // unbounded — this file's own trimColumnGap/trimSigColumnGap
+    // machinery exists because column-boundary detection can bleed an
+    // ADJACENT field's value onto the same row. A refills "1" followed by
+    // an unrelated bled-in TWO-DIGIT value ("30") must never concatenate
+    // into "130" — "30" isn't shaped like the real glyph-split artifact
+    // (a lone single digit), so the merge must stop after the first
+    // token, exactly like the pre-existing single-token behavior.
+    it('does NOT merge a bled-in multi-digit value from a neighboring column ("1" then "30" stays refills=1, never 130)', () => {
+      const refillsRow = row(358, ['Refills:', '1', '30']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('1');
+      expect(record.refills).not.toBe('130');
+    });
+
+    // Same bound, via the labelless "Total Fills" pattern-anchor fallback
+    // (findTotalFillsPhraseValue's backward digit walk) — a bled-in
+    // multi-digit value sitting two tokens before the phrase must not
+    // merge in either.
+    it('the labelless pattern-anchor fallback also refuses to merge a bled-in multi-digit value ("30" "1" "(additional refills)" stays refills=1)', () => {
+      const valueRow = row(400, ['30', '1', '(additional', 'refills)']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('1');
+      expect(record.refills).not.toBe('301');
+    });
+
+
     it('"(additional refills)" means the stated count is the refill count as-is — no N-1 math, even behind a "Total Fills" label', () => {
       const totalFillsRow = row(358, ['Total', 'Fills:', '4', '(additional', 'refills)']);
       const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), totalFillsRow]);

@@ -820,12 +820,35 @@ function parseQuantity(raw: string): { quantity?: string; quantityUnit?: string 
  * src/normalize/address.ts's rejoinSplitHouseNumberBeforeDirectional),
  * `wordsToText` joins them back with a space ("1 1 (additional
  * refills)") and the old single-token read silently truncated to "1".
- * Fixed by walking every LEADING token that is (after per-token OCR
- * digit repair) purely digits and concatenating them, stopping at the
- * first non-digit token — this reproduces the old behavior exactly when
- * OCR already read the count as one token (the loop runs once), and
- * additionally recovers the full count when OCR split it across several.
+ * Fixed by merging a SECOND leading token into the first when (and only
+ * when) it's shaped exactly like the real glyph-split artifact — see
+ * MAX_MERGED_REFILL_DIGITS' doc for the safety bound this needed after
+ * review.
  */
+/**
+ * REVIEWER BLOCKER FIX: the first version of this merge walked an
+ * UNBOUNDED run of purely-digit tokens ("/^\d+$/", any length,
+ * concatenated with no cap). Reviewer-demonstrated false read: this
+ * file's own trimColumnGap/trimSigColumnGap machinery exists specifically
+ * because column-boundary detection can bleed an ADJACENT field's value
+ * onto the same row (a documented, recurring problem in this parser) — a
+ * refills "1" followed by a bled-in quantity "30" on the same row
+ * concatenated to "130" under the old unbounded merge, where the OLD
+ * (pre-this-branch) single-token behavior would have harmlessly kept just
+ * "1" and left "30" as an ignored leftover token.
+ *
+ * The real glyph-split artifact this fix targets is narrow and specific:
+ * OCR splitting ONE multi-digit count into INDIVIDUAL SINGLE-DIGIT tokens
+ * ("1" "1" for "11", never "1" "30" — a genuine second field's value is
+ * never itself a lone digit long by coincidence in the cases seen here).
+ * So: only a token that is (after digit-repair) EXACTLY one digit long
+ * ever merges, and the total merged digit string is capped at this many
+ * characters — 2, matching the exact real-report shape ("11") — so even
+ * a run of several stray single-digit tokens can never silently build an
+ * arbitrarily long number out of unrelated column bleed.
+ */
+const MAX_MERGED_REFILL_DIGITS = 2;
+
 const TOTAL_FILLS_TAIL_PHRASES: Array<{ words: string[]; isTotalFillsPhrase: boolean }> = [
   // "(including this fill)" -- the stated count already includes the
   // initial fill, i.e. it's a TOTAL-fills count: refills = N - 1 (see
@@ -863,14 +886,23 @@ function parseRefills(raw: string): ParsedRefillsValue | undefined {
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return undefined;
 
-  let digits = '';
-  let i = 0;
-  for (; i < tokens.length; i++) {
+  // First token: any digit-length is trusted as before this branch ever
+  // existed (the ordinary, un-split case — "4", "11", etc, one token).
+  const firstRepaired = repairDigits(tokens[0] as string);
+  if (!/^\d+$/.test(firstRepaired)) return undefined;
+  let digits = firstRepaired;
+  let i = 1;
+  // Merge additional LEADING tokens only while each is (after repair)
+  // EXACTLY one digit long AND the merged total stays within the cap —
+  // see MAX_MERGED_REFILL_DIGITS' doc for why this is capped this
+  // narrowly (a real second field's value bleeding in from a neighboring
+  // column is never itself a lone single digit by coincidence in the
+  // cases this parser has seen; it must never be allowed to concatenate).
+  for (; i < tokens.length && digits.length < MAX_MERGED_REFILL_DIGITS; i++) {
     const repaired = repairDigits(tokens[i] as string);
-    if (!/^\d+$/.test(repaired)) break;
+    if (!/^\d$/.test(repaired)) break;
     digits += repaired;
   }
-  if (!digits) return undefined;
 
   const tailWords = tokens
     .slice(i)
@@ -940,10 +972,13 @@ function findNdcToken(words: OcrWord[], exclude: Set<string>): OcrWord | null {
  * physical OCR row, not the whole page flattened) so a number and an
  * unrelated phrase elsewhere on the page can never pair up across rows.
  *
- * The integer itself is walked backward from the phrase, merging any
- * run of contiguous, individually-digit-shaped tokens immediately
- * preceding it — see parseRefills' doc for why OCR can split one
- * multi-digit count ("11") across two adjacent word tokens ("1" "1").
+ * The integer itself is the token immediately preceding the phrase,
+ * optionally with ONE more single-digit token merged in front of it —
+ * see parseRefills' MAX_MERGED_REFILL_DIGITS doc for why this merge is
+ * capped this narrowly (OCR splitting one multi-digit count, "11", into
+ * two single-digit tokens "1" "1" — never an unbounded run — so an
+ * unrelated multi-digit value from elsewhere on the row can never
+ * concatenate in).
  */
 function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | undefined {
   for (const line of lines) {
@@ -954,14 +989,16 @@ function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | und
           return k === 0 ? raw.replace(/^\(+/, '') : k === phrase.words.length - 1 ? raw.replace(/[).,]+$/, '') : raw;
         });
         if (!phrase.words.every((w, k) => tailWords[k] === w)) continue;
+        if (i - 1 < 0) continue;
 
-        let digits = '';
-        let j = i - 1;
-        while (j >= 0) {
-          const repaired = repairDigits((line[j]?.text ?? '').trim());
-          if (!/^\d+$/.test(repaired)) break;
-          digits = repaired + digits;
-          j--;
+        const immediate = repairDigits((line[i - 1]?.text ?? '').trim());
+        if (!/^\d+$/.test(immediate)) continue;
+        let digits = immediate;
+        // At most ONE further single-digit token merges in front, and
+        // only while staying within the cap — mirrors parseRefills exactly.
+        if (digits.length < MAX_MERGED_REFILL_DIGITS && i - 2 >= 0) {
+          const prior = repairDigits((line[i - 2]?.text ?? '').trim());
+          if (/^\d$/.test(prior)) digits = prior + digits;
         }
         if (digits) return { value: digits, isTotalFillsPhrase: phrase.isTotalFillsPhrase };
       }
