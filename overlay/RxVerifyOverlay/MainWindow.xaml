@@ -330,8 +330,37 @@
                                         longer bound anywhere in this template.
                                     -->
                                     <Border Background="#FF1E1E1E">
-                                        <!-- Task 3: 11 -> 9 (~18%); round 2: Margin 4,2,0,2 -> 3,1,0,1 -->
-                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="9" Margin="3,1,0,1" />
+                                        <!--
+                                            Task 3: 11 -> 9 (~18%); round 2: Margin 4,2,0,2 -> 3,1,0,1.
+                                            Field report (owner, 2026-08-20, prescriberNpi, verbatim):
+                                            "the patient and prescriber green/red bars need to move
+                                            slightly closer to their fields. The spacing on the drug
+                                            part is good." Patient/Prescriber and Rx (drug/sig/qty/
+                                            refills) share this exact header template, so the only
+                                            per-category lever available here is this header's own
+                                            bottom margin, which sets the gap before the first field
+                                            row's colored bar directly below it (StackPanel — see the
+                                            Rows ItemsControl right after this Border). Bottom margin
+                                            trimmed from 1 to 0, Patient/Prescriber ONLY, via the
+                                            trigger below — symmetric between the two (never one
+                                            without the other) — leaving Rx's header margin (and
+                                            everything else about this template) unchanged, since
+                                            that spacing was already reported as correct.
+                                        -->
+                                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontWeight="Bold" FontSize="9" Margin="3,1,0,1">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Name}" Value="{x:Static models:FieldCategories.Patient}">
+                                                            <Setter Property="Margin" Value="3,1,0,0" />
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding Name}" Value="{x:Static models:FieldCategories.Prescriber}">
+                                                            <Setter Property="Margin" Value="3,1,0,0" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                     </Border>
 
                                     <!--

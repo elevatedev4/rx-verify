@@ -31,4 +31,39 @@ public class BoxColorMapperTests
     {
         Assert.False(BoxColorMapper.IsGreenBox(VerdictStatus.Red));
     }
+
+    // Field report (owner, 2026-08-25, prescriberPhone, synthetic values
+    // here): a source that was never read at all ("not_provided") must
+    // never draw a box at all — not the red "check it" box IsGreenBox's
+    // binary collapse would otherwise give it, since there is nothing to
+    // check it against. See BoxColorMapper.ShouldDrawBox's doc.
+    [Fact]
+    public void NotProvidedReasonCodeDrawsNoBox()
+    {
+        Assert.False(BoxColorMapper.ShouldDrawBox("not_provided"));
+    }
+
+    [Fact]
+    public void UnparseableDateReasonCodeDrawsNoBox()
+    {
+        Assert.False(BoxColorMapper.ShouldDrawBox("unparseable_date"));
+    }
+
+    [Fact]
+    public void UnparseableQuantityReasonCodeDrawsNoBox()
+    {
+        Assert.False(BoxColorMapper.ShouldDrawBox("unparseable_quantity"));
+    }
+
+    [Fact]
+    public void OrdinaryMismatchReasonCodeStillDrawsABox()
+    {
+        // Unchanged behavior for every OTHER yellow/red reasonCode —
+        // this fix is scoped to the three unreadable codes only, never a
+        // general "hide the box" escape hatch.
+        Assert.True(BoxColorMapper.ShouldDrawBox("address_differs"));
+        Assert.True(BoxColorMapper.ShouldDrawBox("phone_differs"));
+        Assert.True(BoxColorMapper.ShouldDrawBox("refills_mismatch"));
+        Assert.True(BoxColorMapper.ShouldDrawBox(null));
+    }
 }

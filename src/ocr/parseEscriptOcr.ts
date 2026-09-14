@@ -808,18 +808,80 @@ function parseQuantity(raw: string): { quantity?: string; quantityUnit?: string 
 }
 
 /**
- * "1 (additional refills)" -> "1". Only the leading integer is trusted;
- * any trailing descriptive text is dropped. The leading token is
- * repaired for OCR letter-digit mangling first (e.g. "l" OCR'd for "1"),
- * then validated as digits. Returns undefined if the (repaired) value
- * doesn't start with a number.
+ * Field report (2026-08-21, owner verbatim): "Source was 11. You should
+ * read more of the line, not just the first number, because there is
+ * additional helpful text like '(additional refills)' or '(including
+ * this fill)'". The v1 version of this function only ever looked at
+ * `trimmed.split(/\s+/)[0]` — a single leading WORD — which is exactly
+ * right when OCR reads a multi-digit count as one token ("11"), but on a
+ * live capture where OCR's per-glyph bounding boxes for a value like "11"
+ * get grouped as TWO separate word tokens ("1" "1", the same kind of
+ * digit-run splitting reported for house numbers in
+ * src/normalize/address.ts's rejoinSplitHouseNumberBeforeDirectional),
+ * `wordsToText` joins them back with a space ("1 1 (additional
+ * refills)") and the old single-token read silently truncated to "1".
+ * Fixed by walking every LEADING token that is (after per-token OCR
+ * digit repair) purely digits and concatenating them, stopping at the
+ * first non-digit token — this reproduces the old behavior exactly when
+ * OCR already read the count as one token (the loop runs once), and
+ * additionally recovers the full count when OCR split it across several.
  */
-function parseRefills(raw: string): string | undefined {
-  const trimmed = raw.trim();
-  const firstToken = trimmed.split(/\s+/)[0] ?? '';
-  const repaired = repairDigits(firstToken);
-  const m = /^(\d+)/.exec(repaired);
-  return m ? m[1] : undefined;
+const TOTAL_FILLS_TAIL_PHRASES: Array<{ words: string[]; isTotalFillsPhrase: boolean }> = [
+  // "(including this fill)" -- the stated count already includes the
+  // initial fill, i.e. it's a TOTAL-fills count: refills = N - 1 (see
+  // compareRefills, quantity/index.ts).
+  { words: ['including', 'this', 'fill'], isTotalFillsPhrase: true },
+  // "(additional refills)" -- the stated count IS the refill count
+  // already (not a total-fills count): refills = N, no subtraction.
+  { words: ['additional', 'refills'], isTotalFillsPhrase: false }
+];
+
+export interface ParsedRefillsValue {
+  /** The (possibly multi-token-merged) leading integer, still as a string. */
+  value: string;
+  /**
+   * When the line's trailing text explicitly states which reading
+   * applies ("(including this fill)" / "(additional refills)"), this
+   * OVERRIDES the label-based totalfills default — see the call site in
+   * parseEscriptOcr for why the phrase must win over the label. undefined
+   * when no recognized trailing phrase is present (label-based default
+   * applies, unchanged from before this fix).
+   */
+  isTotalFillsPhrase?: boolean;
+}
+
+/**
+ * "1 (additional refills)" -> {value: "1", isTotalFillsPhrase: false}.
+ * "11 (including this fill)" (or OCR-split "1 1 (including this fill)")
+ * -> {value: "11", isTotalFillsPhrase: true}. Only the leading integer
+ * (merged across any OCR-split digit tokens — see TOTAL_FILLS_TAIL_
+ * PHRASES' doc above) is trusted as the count; a RECOGNIZED trailing
+ * phrase is read for its semantics, never trusted for anything else.
+ * Returns undefined if the (repaired) value doesn't start with a number.
+ */
+function parseRefills(raw: string): ParsedRefillsValue | undefined {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return undefined;
+
+  let digits = '';
+  let i = 0;
+  for (; i < tokens.length; i++) {
+    const repaired = repairDigits(tokens[i] as string);
+    if (!/^\d+$/.test(repaired)) break;
+    digits += repaired;
+  }
+  if (!digits) return undefined;
+
+  const tailWords = tokens
+    .slice(i)
+    .map((t) => t.toLowerCase().replace(/^\(+/, '').replace(/[).,]+$/, ''))
+    .filter(Boolean);
+  for (const phrase of TOTAL_FILLS_TAIL_PHRASES) {
+    if (phrase.words.length <= tailWords.length && phrase.words.every((w, idx) => tailWords[idx] === w)) {
+      return { value: digits, isTotalFillsPhrase: phrase.isTotalFillsPhrase };
+    }
+  }
+  return { value: digits };
 }
 
 /** Mirrors Models/EngineModels.cs SubstitutionsNotAllowed semantics — "not allowed"/DAW indicator => true; "allowed" => false; blank/ambiguous => undefined (never guessed). Checks "not allowed" before the bare "allowed" substring match. */
@@ -868,27 +930,40 @@ function findNdcToken(words: OcrWord[], exclude: Set<string>): OcrWord | null {
  * nothing to find, and the value tail is silently lost even though it
  * survived OCR intact.
  *
- * The trailing phrase "(including this fill)" is distinctive enough on
- * an escript — it doesn't occur for any other field — that a bare
- * integer immediately followed by it is trusted as a Total-Fills read on
- * its own, mirroring the NPI/NDC pattern anchors just above (and
- * resolveDateField's pool-fallback further below): a narrow, exact
- * shape match, never a generic "any number near parentheses" guess.
- * Scans row-by-row (a physical OCR row, not the whole page flattened) so
- * a number and an unrelated "(including this fill)" elsewhere on the
- * page can never pair up across rows.
+ * A trailing phrase from TOTAL_FILLS_TAIL_PHRASES ("(including this
+ * fill)" / "(additional refills)") is distinctive enough on an escript —
+ * neither occurs for any other field — that an integer immediately
+ * followed by one is trusted as a Total-Fills read on its own, mirroring
+ * the NPI/NDC pattern anchors just above (and resolveDateField's
+ * pool-fallback further below): a narrow, exact shape match, never a
+ * generic "any number near parentheses" guess. Scans row-by-row (a
+ * physical OCR row, not the whole page flattened) so a number and an
+ * unrelated phrase elsewhere on the page can never pair up across rows.
+ *
+ * The integer itself is walked backward from the phrase, merging any
+ * run of contiguous, individually-digit-shaped tokens immediately
+ * preceding it — see parseRefills' doc for why OCR can split one
+ * multi-digit count ("11") across two adjacent word tokens ("1" "1").
  */
-function findTotalFillsPhraseValue(lines: OcrWord[][]): string | undefined {
+function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | undefined {
   for (const line of lines) {
-    for (let i = 0; i + 3 < line.length; i++) {
-      const value = (line[i]?.text ?? '').trim();
-      const w1 = (line[i + 1]?.text ?? '').toLowerCase().replace(/^\(/, '');
-      const w2 = (line[i + 2]?.text ?? '').toLowerCase();
-      const w3 = (line[i + 3]?.text ?? '')
-        .toLowerCase()
-        .replace(/[).,]+$/, '');
-      if (/^\d+$/.test(value) && w1 === 'including' && w2 === 'this' && w3 === 'fill') {
-        return value;
+    for (const phrase of TOTAL_FILLS_TAIL_PHRASES) {
+      for (let i = 0; i + phrase.words.length <= line.length; i++) {
+        const tailWords = phrase.words.map((_, k) => {
+          const raw = (line[i + k]?.text ?? '').toLowerCase();
+          return k === 0 ? raw.replace(/^\(+/, '') : k === phrase.words.length - 1 ? raw.replace(/[).,]+$/, '') : raw;
+        });
+        if (!phrase.words.every((w, k) => tailWords[k] === w)) continue;
+
+        let digits = '';
+        let j = i - 1;
+        while (j >= 0) {
+          const repaired = repairDigits((line[j]?.text ?? '').trim());
+          if (!/^\d+$/.test(repaired)) break;
+          digits = repaired + digits;
+          j--;
+        }
+        if (digits) return { value: digits, isTotalFillsPhrase: phrase.isTotalFillsPhrase };
       }
     }
   }
@@ -1225,6 +1300,16 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // "prefer the explicit Refills value" if a script somehow shows
     // both, not "whichever label happened to be encountered last".
     let refillsResolvedCanonical: string | undefined;
+    // Set only by the findTotalFillsPhraseValue pattern-anchor fallback
+    // below, from the SAME trailing-phrase read that recovered raw.refills
+    // in the first place ("(including this fill)" vs "(additional
+    // refills)") -- see ParsedRefillsValue's doc. Takes priority over
+    // BOTH the label-based totalfills default and re-parsing raw.refills
+    // for a phrase, since raw.refills is set to just the bare digits by
+    // that fallback (the phrase text itself is never stored back into
+    // raw.refills) and would otherwise look phrase-less at the final
+    // resolution site.
+    let refillsPhraseOverride: boolean | undefined;
     const leftoverLines: OcrWord[][] = [];
     // How each raw[key] was actually resolved — populated at every
     // assignment site (Pass A inline, Pass B block-column) and consumed
@@ -1770,7 +1855,8 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     if (raw.refills === undefined) {
       const totalFillsPhrase = findTotalFillsPhraseValue(linesBeforeChromeFilter);
       if (totalFillsPhrase !== undefined) {
-        raw.refills = totalFillsPhrase;
+        raw.refills = totalFillsPhrase.value;
+        refillsPhraseOverride = totalFillsPhrase.isTotalFillsPhrase;
         refillsResolvedCanonical = 'totalfills';
         resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
       }
@@ -1988,8 +2074,9 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
       pushMiss('quantity', 'quantity', 'no-value-paired');
     }
     if (raw.refills) {
-      const refills = parseRefills(raw.refills);
-      if (refills) {
+      const parsedRefills = parseRefills(raw.refills);
+      if (parsedRefills) {
+        const refills = parsedRefills.value;
         record.refills = refills;
         // Change 3: "Total fills: N" (seen on responded refill-request
         // e-scripts) counts the initial fill plus refills, so the
@@ -2002,7 +2089,26 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         // 'refills'/'refillsauthorized'/'refillsremaining' occurrence
         // always wins over a 'totalfills' one, so a script showing BOTH
         // never double-counts (see refillsResolvedCanonical doc above).
-        if (refillsResolvedCanonical === 'totalfills') record.refillsFromTotalFills = true;
+        //
+        // Field report (2026-08-21, owner verbatim): "there is additional
+        // helpful text like '(additional refills)' or '(including this
+        // fill)'" — when the line itself explicitly states which reading
+        // applies, THAT wins over the label-based default above (a
+        // "Total Fills: N (additional refills)" line means refills = N,
+        // not N-1, even though the label alone would normally imply
+        // total-fills math) — see parseRefills/ParsedRefillsValue's doc.
+        const isTotalFills =
+          refillsPhraseOverride !== undefined
+            ? refillsPhraseOverride
+            : parsedRefills.isTotalFillsPhrase !== undefined
+              ? parsedRefills.isTotalFillsPhrase
+              : refillsResolvedCanonical === 'totalfills';
+        // Only ever set the flag to `true` — matching the field's
+        // pre-existing optional-boolean shape (undefined, never an
+        // explicit `false`, when total-fills math doesn't apply); every
+        // reader (compareRefills' `sourceIsTotalFills = false` default)
+        // already treats the two identically.
+        if (isTotalFills) record.refillsFromTotalFills = true;
         pushResolved('refills', 'refills', refills);
       } else {
         pushMiss('refills', 'refills', 'validation-failed:not-numeric');

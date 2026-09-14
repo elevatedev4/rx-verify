@@ -487,7 +487,79 @@ describe('compareDrugs', () => {
         );
         expect(r.status).toBe('green');
       });
+
+      // Field report (2026-09-04, synthetic strength/spacing here): the
+      // combo-family "Salts" shorthand also has to survive a brand name
+      // stated in parens AND a stray double space in the entered form
+      // word — "AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 20 MG TABLET" vs
+      // "Amphetamine 25mg Salts  Tab" (two spaces before "Tab").
+      it('is GREEN with a parenthesized brand name alongside the combo ingredient AND a doubled internal space: "AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 25 MG TABLET" vs "Amphetamine 25mg Salts  Tab"', () => {
+        const r = compareDrugs(
+          { name: 'AMPHETAMINE-DEXTROAMPHETAMINE (ADDERALL) 25 MG TABLET' },
+          { name: 'Amphetamine 25mg Salts  Tab' },
+          provider
+        );
+        expect(r.status).toBe('green');
+      });
     });
+
+    // Field report (2026-09-04, synthetic drug/strength here): a brand
+    // name in parens alongside the GENERIC name, where neither side
+    // resolves to a known concept (unresolvedProvider) — must not leak
+    // into the component-fallback's ingredient-token set as a phantom
+    // extra ingredient. Real report shape: "CLONAZEPAM (KLONOPIN) 1 MG
+    // TABLET 1 mg" vs "Clonazepam 1 Mg Tablet".
+    describe('parenthesized BRAND name alongside an unresolved generic (component fallback)', () => {
+      it('is GREEN name_component_match: "TESTAZEPAM (FAKEBRAND) 2 MG TABLET 2 mg" vs "Testazepam 2 Mg Tablet"', () => {
+        const r = compareDrugs(
+          { name: 'TESTAZEPAM (FAKEBRAND) 2 MG TABLET 2 mg' },
+          { name: 'Testazepam 2 Mg Tablet' },
+          unresolvedProvider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_component_match');
+      });
+
+      it('a recognized release qualifier in parens ("(XL)") is still classified as release, not dropped as a brand annotation', () => {
+        const r = compareDrugs(
+          { name: 'Testazepam Succinate (XL) 50 MG ORAL TABLET' },
+          { name: 'Testazepam Succ Er 50 Mg Tab' },
+          unresolvedProvider
+        );
+        expect(r.status).toBe('green');
+        expect(r.reasonCode).toBe('name_component_match');
+      });
+
+      it('a genuinely different ingredient stated as the ONLY name (not in parens) still fails to match — the brand-paren drop is not a general "ignore any word" escape hatch', () => {
+        const r = compareDrugs(
+          { name: 'Testazepam Otherdrug 2 Mg Tablet' },
+          { name: 'Testazepam 2 Mg Tablet' },
+          unresolvedProvider
+        );
+        expect(r.status).not.toBe('green');
+      });
+    });
+  });
+});
+
+// Field report (2026-09-04, synthetic strength here): OCR read a stray
+// space between a percent-strength number and the "%" sign
+// ("KETOCONAZOLE 2 % SHAMPOO" vs "Ketoconazole 2% Shampoo") — collapsed
+// by normalizeDrugNameString before the identity-match fast path.
+describe('percent-strength spacing (2026-09-04 field report)', () => {
+  it('normalizes "2 %" and "2%" to the same text', () => {
+    expect(normalizeDrugNameString('Testdrug 4 % Shampoo')).toBe(normalizeDrugNameString('Testdrug 4% Shampoo'));
+  });
+
+  it('is GREEN name_identity_match for the exact report shape (synthetic strength)', () => {
+    const r = compareDrugs({ name: 'TESTDRUG 4 % SHAMPOO' }, { name: 'Testdrug 4% Shampoo' }, provider);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('name_identity_match');
+  });
+
+  it('does not silently match a genuinely different percent strength', () => {
+    const r = compareDrugs({ name: 'TESTDRUG 4 % SHAMPOO' }, { name: 'Testdrug 5% Shampoo' }, provider);
+    expect(r.status).not.toBe('green');
   });
 });
 
