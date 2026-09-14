@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Mirrors update-and-run.ps1 (the desktop shortcut's own update+build
+    # flow) so a commit that fails to compile there fails here too, before
+    # it ever reaches Will's desktop shortcut.
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No .nvmrc and package.json's "engines" field is a range (">=20"),
+      # not a pinned version, so default to 22.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install engine dependencies
+        run: npm ci
+
+      - name: Build engine (npm run build)
+        run: npm run build
+
+      - name: Test engine (npm test)
+        run: npm test
+
+      # net8.0-windows10.0.19041.0 (see RxVerifyOverlay.csproj) needs the
+      # .NET 8 SDK.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # update-and-run.ps1 (lines ~482-644) builds the overlay by
+      # Push-Location'ing into overlay/RxVerifyOverlay and running a plain
+      # `dotnet build` (implicit restore, default Debug configuration).
+      # Restore/build are split here (standard CI pattern) but the
+      # working directory, target, and configuration match exactly.
+      - name: Restore overlay
+        working-directory: overlay/RxVerifyOverlay
+        run: dotnet restore RxVerifyOverlay.sln
+
+      - name: Build overlay (dotnet build)
+        working-directory: overlay/RxVerifyOverlay
+        run: dotnet build RxVerifyOverlay.sln -c Debug --no-restore
+
+      - name: Test overlay (dotnet test)
+        working-directory: overlay/RxVerifyOverlay
+        run: >-
+          dotnet test RxVerifyOverlay.sln -c Debug --no-build
+          --logger trx --results-directory TestResults
+
+      - name: Upload overlay test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay-test-results
+          path: overlay/RxVerifyOverlay/TestResults/*.trx
+          retention-days: 14
