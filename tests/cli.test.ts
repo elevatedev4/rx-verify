@@ -2,14 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliPath = path.join(__dirname, '..', 'src', 'cli.ts');
-const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+// Resolve tsx's own CLI entry point rather than spawning the
+// node_modules/.bin/tsx shim directly — on Windows that shim is
+// tsx.cmd, and spawning it without shell:true fails with ENOENT.
+// Spawning process.execPath against the resolved entry works
+// identically on every platform.
+const tsxCliEntry = createRequire(import.meta.url).resolve('tsx/cli');
 
 function runCli(input: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(tsxBin, [cliPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [tsxCliEntry, cliPath], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d.toString()));

@@ -33,7 +33,13 @@ jobs:
       - name: Build engine (npm run build)
         run: npm run build
 
+      # continue-on-error so a failure here doesn't skip the overlay
+      # compile below — the whole point of this workflow is to verify the
+      # C# build even when the engine tests are red. The job is still
+      # failed overall by "Fail if engine tests failed" at the end.
       - name: Test engine (npm test)
+        id: engine-tests
+        continue-on-error: true
         run: npm test
 
       # net8.0-windows10.0.19041.0 (see RxVerifyOverlay.csproj) needs the
@@ -68,3 +74,10 @@ jobs:
           name: overlay-test-results
           path: overlay/RxVerifyOverlay/TestResults/*.trx
           retention-days: 14
+
+      # Engine test failures were deliberately swallowed above so the
+      # dotnet build/test steps still run and report. Fail the job now
+      # so the overall result is still red.
+      - name: Fail if engine tests failed
+        if: steps.engine-tests.outcome == 'failure'
+        run: exit 1

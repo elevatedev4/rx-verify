@@ -3,10 +3,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliPath = path.join(__dirname, '..', 'src', 'cli.ts');
-const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+// Resolve tsx's own CLI entry point rather than spawning the
+// node_modules/.bin/tsx shim directly — on Windows that shim is
+// tsx.cmd, and spawning it without shell:true fails with ENOENT.
+// Spawning process.execPath against the resolved entry works
+// identically on every platform.
+const tsxCliEntry = createRequire(import.meta.url).resolve('tsx/cli');
 
 /**
  * Minimal harness for --serve mode (src/cli.ts): spawns ONE persistent
@@ -24,7 +30,7 @@ class ServeHarness {
   private closed = false;
 
   constructor() {
-    this.child = spawn(tsxBin, [cliPath, '--serve'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    this.child = spawn(process.execPath, [tsxCliEntry, cliPath, '--serve'], { stdio: ['pipe', 'pipe', 'pipe'] });
     this.child.on('close', () => {
       this.closed = true;
     });
