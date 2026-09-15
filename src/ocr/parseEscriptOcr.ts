@@ -2188,13 +2188,30 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // token like "TotalFills:" (normalize() strips the colon, exact
     // match) — no separate confusable table needed. Scans
     // linesBeforeChromeFilter, same reasoning as the anchor above.
+    // BUG FIX (2026-09-15, "refills stopped being assessed at all" field
+    // report): this anchor is new, broader (every position of every row,
+    // not just line starts) and untested against the full variety of
+    // real captures. Everything else this function still has left to do
+    // for EVERY OTHER FIELD (dob/written/available validation, prescriber,
+    // drug, the refills value assembly just below) runs AFTER this point,
+    // inside the SAME outer try — so an uncaught throw here would have
+    // silently zeroed out the entire record (every field, not just
+    // refills), matching the reported symptom exactly. Local try/catch so
+    // a bug in this fallback can only ever cost the refills field itself
+    // (already the case whenever it simply finds nothing), never any
+    // other field on the same document. See class doc's "Never throw"
+    // policy — same posture, applied one level deeper.
     if (raw.refills === undefined) {
-      const anywhereMatch = findTotalFillsLabelAnywhere(linesBeforeChromeFilter);
-      if (anywhereMatch !== undefined) {
-        raw.refills = anywhereMatch.value;
-        refillsPhraseOverride = anywhereMatch.isTotalFillsPhrase;
-        refillsResolvedCanonical = 'totalfills';
-        resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
+      try {
+        const anywhereMatch = findTotalFillsLabelAnywhere(linesBeforeChromeFilter);
+        if (anywhereMatch !== undefined) {
+          raw.refills = anywhereMatch.value;
+          refillsPhraseOverride = anywhereMatch.isTotalFillsPhrase;
+          refillsResolvedCanonical = 'totalfills';
+          resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
+        }
+      } catch {
+        diagnostics.push({ field: 'refills', status: 'miss', reason: 'internal-error:label-anywhere-anchor' });
       }
     }
 
@@ -2510,11 +2527,26 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // of why. See PrescriptionRecord.refillsOcrRegionWords' doc — only
     // computed on an actual miss, so a normal successful parse pays zero
     // extra cost.
+    //
+    // BUG FIX (2026-09-15): local try/catch — this is diagnostic-only
+    // (never affects record.refills or any other field, all of which are
+    // already assigned by this point), but it sits before the
+    // appendOcrDiagnosticsLog call below, inside the same outer try as
+    // every other field's assembly. Without this, a bug in this brand-new
+    // helper would silently throw away the OCR diagnostics log line for
+    // the ENTIRE document (every field's resolved/miss reason, not just
+    // refills') on exactly the kind of document (refills unresolved)
+    // where that log is most needed to diagnose why.
     if (record.refills === undefined) {
-      const regionWords = buildRefillsOcrRegionWords(linesBeforeChromeFilter, resolutionMeta);
-      if (regionWords.length > 0) {
-        record.refillsOcrRegionWords = regionWords;
-        diagnostics.push({ field: 'refills.ocrRegionWords', status: 'resolved', regionWords });
+      try {
+        const regionWords = buildRefillsOcrRegionWords(linesBeforeChromeFilter, resolutionMeta);
+        if (regionWords.length > 0) {
+          record.refillsOcrRegionWords = regionWords;
+          diagnostics.push({ field: 'refills.ocrRegionWords', status: 'resolved', regionWords });
+        }
+      } catch {
+        // Best-effort diagnostic only — never let it block the real
+        // diagnostics log below from being written.
       }
     }
 

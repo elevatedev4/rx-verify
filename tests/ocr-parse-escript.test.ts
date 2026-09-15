@@ -1439,6 +1439,42 @@ describe('parseEscriptOcr', () => {
       const result = compareRefills(record.refills, 3, record.refillsFromTotalFills);
       expect(result.status).toBe('green');
     });
+
+    // BUG FIX regression guard (2026-09-15, "refills stopped being
+    // assessed at all" field report): a bare "Refills" label with no
+    // trailing colon at all must still resolve via the ordinary Pass A/B
+    // path, completely untouched by the new anchor #2 / skipLeadingParenthetical
+    // additions above (both are no-ops whenever the value's first token
+    // isn't itself a "("-prefixed token) — locks in that this ordinary,
+    // by-far-most-common shape was never at risk from yesterday's change.
+    it('plain "Refills 4" (no colon at all) still extracts refills=4 — unaffected by the new anchors', () => {
+      const refillsRow = row(320, ['Refills', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+    });
+
+    // BUG FIX regression guard (2026-09-15): pattern anchor #2 sits
+    // BEFORE the rest of this function's field assembly (dob/written/
+    // available validation, prescriber, drug, refills' own final value)
+    // inside the same outer try/catch as everything else — the field
+    // report described refills going undefined AND every other field
+    // going dark on refill-approval documents at the same time.
+    // Confirms patient/drug still resolve normally on exactly this kind
+    // of document, alongside a refills value recovered via the new
+    // mid-row anchor.
+    it('other fields (patient, drug) still resolve normally on a refill-approval document that needs the mid-row Total Fills anchor', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const summaryRow = row(358, ['Status', 'Approved', 'Total', 'Fills:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, summaryRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.patientName).toBe('Jordan Testcase');
+      expect(record.drug?.name).toContain('Fakedrugin');
+    });
   });
 
   // Field report (2026-09, owner verbatim, twice): refills still came
@@ -1481,6 +1517,23 @@ describe('parseEscriptOcr', () => {
 
       expect(record.refills).toBe('4');
       expect(record.refillsOcrRegionWords).toBeUndefined();
+    });
+
+    // BUG FIX regression guard (2026-09-15, "refills stopped being
+    // assessed at all" field report): buildRefillsOcrRegionWords runs
+    // near the very end of parseEscriptOcr's field assembly, AFTER
+    // patient/drug/etc. are already set on `record` — confirms a total
+    // refills miss (nothing "fill"-shaped anywhere, no diagnostic to
+    // build) still leaves every other already-resolved field intact.
+    it('a total refills miss never disturbs other already-resolved fields on the same document', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.patientName).toBe('Jordan Testcase');
+      expect(record.drug?.name).toContain('Fakedrugin');
     });
 
     it('is undefined when nothing "fill"-shaped appears anywhere near the miss either — never fabricates evidence that was never there', () => {
