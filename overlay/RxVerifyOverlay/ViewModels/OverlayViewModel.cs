@@ -496,11 +496,29 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private readonly RxReportSubmitter _autoDiagnosticSubmitter;
 
-    /// <summary>Trigger condition 1a (brief item 1) — any OCR word shaped like "refill"/"refills"/"fills"/"fill", case-insensitive. Same regex shape as src/ocr/parseEscriptOcr.ts's own isFillShaped (normalize(text).includes('fill')), just applied client-side to the raw word list this ViewModel already has, since the engine's own PHI-filtered region-words diagnostic isn't always populated (only when refills is UNRESOLVED — see refillsMissReason's doc; a wrong ENTERED value alone can also land here).</summary>
-    private static readonly Regex FillWordRegex = new("refill|fills?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
     /// <summary>Trigger condition 1b (brief item 1) / document-classification signal — an OCR word suggesting this document is a refill-approval/renewal response, independent of whether it also happens to say "fill" anywhere.</summary>
     private static readonly Regex ApprovalWordRegex = new("approv|renew", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Busy-screen skip (2026-09-16 field report: a real report fired on a
+    /// PreCheck screen while Pioneer's "Please wait while the claim
+    /// processes" popup was still up — the only fill-shaped words visible
+    /// were "Filled:"/"Fill:" labels, not real refill content). Checked
+    /// against the WHOLE page's OCR text (letters-only, case-folded — see
+    /// IsBusyScreenText) rather than per-word, since every phrase here is
+    /// multi-word. Matching is tolerant of a single OCR-dropped letter
+    /// (see IsFuzzyPhraseMatch) — "PROCESSING" read as "PROCESSNG" still
+    /// counts as busy.
+    /// </summary>
+    private static readonly string[] BusyScreenPhrases =
+    {
+        "please wait",
+        "claim processes",
+        "claim processing",
+        "processing claim",
+        "processing",
+        "loading"
+    };
 
     public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
     {
@@ -788,15 +806,23 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             if (refillsRow is null) return; // defensive: should always exist (FieldOrder.Fields is unconditional for refills) — never crash the refresh if it somehow doesn't
 
             var renderState = AutoDiagnosticPolicy.ClassifyRefillsBoxRenderState(refillsRow.Status, refillsRow.ReasonCode, refillsRow.ScreenRect.HasValue);
-            if (!AutoDiagnosticPolicy.IsUncoloured(renderState)) return; // working correctly (green/red) — nothing to diagnose, skip the state-file I/O below entirely
 
-            var hasFillWords = ocrWords.Any(w => FillWordRegex.IsMatch(w.Text));
+            // NOTE: unlike gate 2 (hasFillWords/isApproval) below, a
+            // colored (Green/Red) render state is deliberately NOT
+            // short-circuited here before the state-file I/O — the
+            // debounce streak (see AutoDiagnosticPolicy.ShouldReport)
+            // must be reset to null the moment this context's box is
+            // seen colored again, or a LATER uncoloured tick for the
+            // same Rx/window would wrongly resume the old stale streak
+            // instead of starting a fresh one.
+            var isBusyScreen = IsBusyScreenText(ocrWords);
+            var hasFillWords = ocrWords.Any(w => AutoDiagnosticPolicy.IsFillWord(w.Text));
             var isApproval = ocrWords.Any(w => ApprovalWordRegex.IsMatch(w.Text));
-            if (!hasFillWords && !isApproval) return; // doesn't look like a prescription that should have refills at all — not a bug
 
+            var contextKey = AutoDiagnosticPolicy.GetContextKey(CurrentVerdictsRxIdentity, _lastRxWindowTitle, window.ScreenMode);
             var rateLimitState = AutoDiagnosticStateStore.Load();
             var (shouldReport, updatedState) = AutoDiagnosticPolicy.ShouldReport(
-                renderState, hasFillWords, isApproval, rateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity);
+                renderState, hasFillWords, isApproval, isBusyScreen, rateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity, contextKey);
             AutoDiagnosticStateStore.Save(updatedState);
 
             // One line, state names + reason code only — no OCR text, no
@@ -804,9 +830,12 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             // posture as every other [TAG]-prefixed OcrLogger.LogTiming
             // line in this file (e.g. "[PRECHECK-GATE]" above).
             OcrLogger.LogTiming(
-                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
+                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} isBusyScreen={isBusyScreen} streak={updatedState.Streak?.ConsecutiveMisses ?? 0} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
 
             if (!shouldReport) return;
+
+            var streak = updatedState.Streak?.ConsecutiveMisses ?? 0;
+            var persistedSeconds = updatedState.Streak is null ? 0 : (DateTime.UtcNow - updatedState.Streak.FirstMissUtc).TotalSeconds;
 
             var documentClassification = AutoDiagnosticPolicy.ClassifyDocument(isApproval, window.ScreenMode);
             var note = AutoDiagnosticNoteBuilder.Build(
@@ -816,7 +845,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
                 window.ScreenMode,
                 documentClassification,
                 AppDiagnostics.GetCommitSha(),
-                RefillsOcrRegionWords);
+                RefillsOcrRegionWords,
+                streak,
+                persistedSeconds);
 
             // "(auto)" for Source per the feature spec — this is an
             // automatic report, not a pharmacist reading and transcribing
@@ -852,6 +883,52 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             // AutoDiagnosticStateStore) — a bug here must never break the
             // pharmacist's own verification refresh.
         }
+    }
+
+    /// <summary>
+    /// True when the page's OCR text as a whole contains one of
+    /// BusyScreenPhrases — see that field's doc. Joins every OCR word
+    /// into one string before matching (not per-word) since these
+    /// phrases are multi-word, then normalizes both sides down to
+    /// letters-only/lowercase so OCR word-splitting/spacing quirks never
+    /// matter, and tolerates a single OCR-dropped letter per phrase (see
+    /// IsFuzzyPhraseMatch).
+    /// </summary>
+    private static bool IsBusyScreenText(IReadOnlyList<OcrWord> ocrWords)
+    {
+        var pageText = NormalizeLettersOnly(string.Join(" ", ocrWords.Select(w => w.Text)));
+        if (pageText.Length == 0) return false;
+
+        foreach (var phrase in BusyScreenPhrases)
+        {
+            if (IsFuzzyPhraseMatch(pageText, NormalizeLettersOnly(phrase))) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Letters only (a-z), lowercased — digits/punctuation/whitespace all dropped, so neither OCR spacing quirks nor stray digit noise affect a phrase match.</summary>
+    private static string NormalizeLettersOnly(string text) =>
+        new(text.Where(char.IsLetter).Select(char.ToLowerInvariant).ToArray());
+
+    /// <summary>
+    /// True if the (already letters-only, lowercase) `phrase` appears in
+    /// `text` exactly, or with any ONE of its own letters dropped —
+    /// tolerant of a single OCR-dropped letter (e.g. "PROCESSING" read as
+    /// "PROCESSNG"). Deliberately only tolerates a single drop, not two+,
+    /// to avoid false-positives against unrelated pharmacy text.
+    /// </summary>
+    private static bool IsFuzzyPhraseMatch(string text, string phrase)
+    {
+        if (phrase.Length == 0) return false;
+        if (text.Contains(phrase, StringComparison.Ordinal)) return true;
+        if (phrase.Length < 4) return false; // too short to safely drop a letter from without matching unrelated text
+
+        for (var i = 0; i < phrase.Length; i++)
+        {
+            var variant = phrase.Remove(i, 1);
+            if (text.Contains(variant, StringComparison.Ordinal)) return true;
+        }
+        return false;
     }
 
     /// <summary>UIA source path — reads the Escript tab's structured UIA tree directly via FieldReader.ReadSource() (the original "Verify" behavior). No OCR/screen capture involved.</summary>

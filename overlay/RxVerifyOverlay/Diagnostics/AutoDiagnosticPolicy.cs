@@ -52,11 +52,42 @@ public enum RefillsBoxRenderState
 /// </summary>
 public sealed class AutoDiagnosticRateLimitState
 {
-    /// <summary>Rx number -&gt; UTC instant of the last auto-report sent for it. A rolling 24h window (not a calendar-day boundary) — simpler, and avoids a report at 11:59pm/12:01am counting as two different "days" for the same Rx.</summary>
+    /// <summary>Rx number (or, for an unidentified Rx, the fallback context key — see AutoDiagnosticPolicy.GetContextKey) -&gt; UTC instant of the last auto-report sent for it. A rolling 24h window (not a calendar-day boundary) — simpler, and avoids a report at 11:59pm/12:01am counting as two different "days" for the same Rx.</summary>
     public Dictionary<string, DateTime> LastReportedUtcByRx { get; set; } = new();
 
     /// <summary>UTC instants of every auto-report sent in roughly the last hour on this PC — pruned (entries older than 1h dropped) on every ShouldReport call, so this never grows unbounded even across a long-running shift.</summary>
     public List<DateTime> RecentReportTimestampsUtc { get; set; } = new();
+
+    /// <summary>
+    /// The in-progress "refills box has been uncoloured N scans in a row"
+    /// streak for whichever context (see AutoDiagnosticPolicy.GetContextKey)
+    /// most recently produced an uncoloured result — see ShouldReport's
+    /// debounce gate doc. Null before the first uncoloured scan ever seen,
+    /// after a coloured scan, or (backward compatibility) when loading a
+    /// state file written before this field existed — either way, "no
+    /// field" and "field present with ConsecutiveMisses 0" both mean
+    /// exactly the same thing: no streak in progress.
+    /// </summary>
+    public AutoDiagnosticStreakState? Streak { get; set; }
+}
+
+/// <summary>
+/// One field's worth of ShouldReport's debounce bookkeeping — see
+/// AutoDiagnosticRateLimitState.Streak's doc. Only ever tracks the SINGLE
+/// most recently active context, same as the real workflow (a pharmacist
+/// looks at one Rx/window at a time): switching context overwrites this
+/// rather than keeping a per-context dictionary.
+/// </summary>
+public sealed class AutoDiagnosticStreakState
+{
+    /// <summary>rxNumber when present, otherwise the window-title+screen-mode fallback — see AutoDiagnosticPolicy.GetContextKey.</summary>
+    public string ContextKey { get; set; } = "";
+
+    /// <summary>How many consecutive ShouldReport calls for this SAME ContextKey have seen an uncoloured refills box, with no coloured result or context switch in between.</summary>
+    public int ConsecutiveMisses { get; set; }
+
+    /// <summary>UTC instant the streak started (the first of the consecutive uncoloured scans) — ShouldReport's persistence gate is nowUtc minus this.</summary>
+    public DateTime FirstMissUtc { get; set; }
 }
 
 /// <summary>
@@ -72,6 +103,12 @@ public static class AutoDiagnosticPolicy
 {
     /// <summary>Per-PC cap — see AutoDiagnosticRateLimitState.RecentReportTimestampsUtc's doc.</summary>
     public const int MaxReportsPerHour = 5;
+
+    /// <summary>Debounce gate (2026-09-16 field report — a transient "claim processing" popup burned a real Rx's daily budget): the refills box must be uncoloured on at least this many CONSECUTIVE engine results for the same context before a report can fire. See ShouldReport's doc.</summary>
+    public const int MinConsecutiveMisses = 3;
+
+    /// <summary>Debounce gate: the streak of consecutive misses (see MinConsecutiveMisses) must also span at least this many wall-clock seconds — a burst of 3 scans within a fraction of a second (e.g. a fast poll loop) is not, by itself, evidence the screen has actually settled.</summary>
+    public const double MinPersistenceSeconds = 5;
 
     private static readonly HashSet<string> UnreadableReasonCodes = new(StringComparer.Ordinal)
     {
@@ -111,35 +148,64 @@ public static class AutoDiagnosticPolicy
     /// Whether to automatically file ONE refills diagnostic report for
     /// this verification pass, and the rate-limit state to persist
     /// afterward either way (the caller must persist UpdatedState even
-    /// when ShouldReport is false — pruning of expired entries still
-    /// needs to be saved so the state file doesn't grow forever).
+    /// when ShouldReport is false — pruning of expired entries and streak
+    /// bookkeeping still need to be saved so a restart doesn't lose the
+    /// in-progress debounce, and so the state file doesn't grow forever).
+    ///
+    /// `contextKey` (see GetContextKey) identifies "the same screen" for
+    /// both the debounce streak (gate 3) and, when `rxNumber` is empty,
+    /// the daily cap (gate 4) — always pass the SAME value a caller would
+    /// get from GetContextKey(rxNumber, windowTitle, screenMode) for this
+    /// scan.
+    ///
+    /// Busy-screen scans (`isBusyScreen` true — see the overlay's
+    /// transient-dialog phrase list) are handled FIRST and are pure
+    /// no-information ticks: no report, and the streak/budget are left
+    /// completely untouched (not reset, not incremented, not consumed) —
+    /// only the routine hourly-bookkeeping prune still runs, same as
+    /// every other early-return branch below.
     ///
     /// Gate 1 — must actually be uncoloured (see IsUncoloured); a
     /// Green/Red refills box is working correctly and is never reported.
+    /// A coloured result, OR a scan for a DIFFERENT contextKey than the
+    /// in-progress streak, resets the streak (to zero, or to a fresh
+    /// 1-miss streak for the new context if this scan is itself
+    /// uncoloured).
     ///
     /// Gate 2 — must look like a prescription that should have had
-    /// refills at all: either `hasFillWords` (some OCR word on the page
-    /// matched /refill|fills?/i) or `isApproval` (the document classifies
-    /// as a refill approval/renewal response). Neither means this simply
-    /// isn't a refills-bearing document (e.g. a genuinely refill-less new
-    /// Rx) — not a bug, nothing to report.
+    /// refills at all: either `hasFillWords` (see the overlay's
+    /// AutoDiagnosticPolicy.IsFillWord — a normalised OCR word shaped
+    /// like "refill"/"fills"/"total fills", NOT a bare "Filled:"/"Fill:"
+    /// label) or `isApproval` (the document classifies as a refill
+    /// approval/renewal response). Neither means this simply isn't a
+    /// refills-bearing document (e.g. a genuinely refill-less new Rx) —
+    /// not a bug, nothing to report.
     ///
-    /// Gate 3 — per-Rx daily cap: `rxNumber` must not have been reported
-    /// in the last 24h (rolling, see AutoDiagnosticRateLimitState's doc).
-    /// A null/empty rxNumber (identity unavailable) skips this cap — never
-    /// suppresses solely because identity is unknown — but still counts
-    /// against gate 4.
+    /// Gate 3 — debounce: the streak for this contextKey must have
+    /// reached MinConsecutiveMisses consecutive uncoloured scans AND
+    /// span at least MinPersistenceSeconds of wall-clock time (2026-09-16
+    /// field report: a single transient-popup scan must never alone
+    /// trigger a report).
     ///
-    /// Gate 4 — per-PC hourly cap: at most MaxReportsPerHour reports
+    /// Gate 4 — per-Rx (or, when rxNumber is empty, per-fallback-context)
+    /// daily cap: the cap key must not have been reported in the last 24h
+    /// (rolling, see AutoDiagnosticRateLimitState's doc). An empty
+    /// rxNumber never SKIPS this cap (2026-09-16: previously it did) — it
+    /// keys the cap on contextKey instead, so an unidentified Rx still
+    /// gets a real per-screen daily limit rather than an unlimited one.
+    ///
+    /// Gate 5 — per-PC hourly cap: at most MaxReportsPerHour reports
     /// total (across every Rx) in the last rolling hour.
     /// </summary>
     public static (bool ShouldReport, AutoDiagnosticRateLimitState UpdatedState) ShouldReport(
         RefillsBoxRenderState refillsState,
         bool hasFillWords,
         bool isApproval,
+        bool isBusyScreen,
         AutoDiagnosticRateLimitState? rateLimitState,
         DateTime nowUtc,
-        string? rxNumber)
+        string? rxNumber,
+        string contextKey)
     {
         var state = Clone(rateLimitState);
 
@@ -151,11 +217,36 @@ public static class AutoDiagnosticPolicy
             .Where(t => nowUtc - t < TimeSpan.FromHours(1))
             .ToList();
 
-        if (!IsUncoloured(refillsState)) return (false, state);
+        // Busy-screen scan: no information either way — leave the streak
+        // and every cap completely untouched (see class doc above).
+        if (isBusyScreen) return (false, state);
+
+        var isUncoloured = IsUncoloured(refillsState);
+
+        if (!isUncoloured)
+        {
+            state.Streak = null;
+        }
+        else if (state.Streak is null || !string.Equals(state.Streak.ContextKey, contextKey, StringComparison.Ordinal))
+        {
+            state.Streak = new AutoDiagnosticStreakState { ContextKey = contextKey, ConsecutiveMisses = 1, FirstMissUtc = nowUtc };
+        }
+        else
+        {
+            state.Streak.ConsecutiveMisses++;
+        }
+
+        if (!isUncoloured) return (false, state);
         if (!hasFillWords && !isApproval) return (false, state);
 
-        if (!string.IsNullOrEmpty(rxNumber) &&
-            state.LastReportedUtcByRx.TryGetValue(rxNumber, out var lastForRx) &&
+        var persistedSeconds = (nowUtc - state.Streak!.FirstMissUtc).TotalSeconds;
+        if (state.Streak.ConsecutiveMisses < MinConsecutiveMisses || persistedSeconds < MinPersistenceSeconds)
+        {
+            return (false, state);
+        }
+
+        var dailyCapKey = string.IsNullOrEmpty(rxNumber) ? contextKey : rxNumber;
+        if (state.LastReportedUtcByRx.TryGetValue(dailyCapKey, out var lastForRx) &&
             nowUtc - lastForRx < TimeSpan.FromDays(1))
         {
             return (false, state);
@@ -164,8 +255,66 @@ public static class AutoDiagnosticPolicy
         if (state.RecentReportTimestampsUtc.Count >= MaxReportsPerHour) return (false, state);
 
         state.RecentReportTimestampsUtc.Add(nowUtc);
-        if (!string.IsNullOrEmpty(rxNumber)) state.LastReportedUtcByRx[rxNumber] = nowUtc;
+        state.LastReportedUtcByRx[dailyCapKey] = nowUtc;
         return (true, state);
+    }
+
+    /// <summary>
+    /// The identity ShouldReport's debounce streak and (when rxNumber is
+    /// empty) daily cap group scans by: `rxNumber` when present, otherwise
+    /// the window title plus screen mode — the same "best identity we
+    /// actually have" fallback already used elsewhere in this feature
+    /// (see ClassifyDocument's screenMode reuse). Two calls with a null
+    /// windowTitle still collide on the SAME key ("|screenMode") rather
+    /// than on two different null-derived keys, which is fine: a null
+    /// title only happens when the window read itself failed, and
+    /// treating every such tick as "the same unknown screen" is no worse
+    /// than treating them as unrelated.
+    /// </summary>
+    public static string GetContextKey(string? rxNumber, string? windowTitle, RxScreenMode screenMode) =>
+        !string.IsNullOrEmpty(rxNumber) ? rxNumber : $"{windowTitle}|{screenMode}";
+
+    /// <summary>
+    /// Gate 2 tightening (2026-09-16 field report: a PreCheck screen's own
+    /// "Filled:"/"Fill:" field LABELS were tripping the old bare
+    /// /refill|fills?/i regex — that regex matches "fill" as a SUBSTRING,
+    /// and "Filled"/"Fill" both contain it). True only when this OCR
+    /// word's normalised form (letters only, lowercased, with the OCR
+    /// digit-for-letter confusions 1-&gt;l, 0-&gt;o, 5-&gt;s undone — same
+    /// garble class already handled for "Total Fills" elsewhere in this
+    /// codebase) contains "refill", or "fills" (PLURAL — "filled"/"fill"
+    /// do NOT contain this), or the "Total Fills" garble shape
+    /// "totalfills" (already implied by the "fills" check for any garble
+    /// that keeps the trailing s; kept as an explicit second check to
+    /// match the brief's algorithm literally and to stay correct if the
+    /// "fills" check above is ever narrowed).
+    /// </summary>
+    public static bool IsFillWord(string? wordText)
+    {
+        if (string.IsNullOrEmpty(wordText)) return false;
+        var normalized = NormalizeFillWordCandidate(wordText);
+        return normalized.Contains("refill", StringComparison.Ordinal)
+            || normalized.Contains("fills", StringComparison.Ordinal)
+            || normalized.Contains("totalfills", StringComparison.Ordinal);
+    }
+
+    private static string NormalizeFillWordCandidate(string text)
+    {
+        var chars = new List<char>(text.Length);
+        foreach (var c in text)
+        {
+            if (char.IsLetter(c))
+            {
+                chars.Add(char.ToLowerInvariant(c));
+            }
+            else if (c == '1') chars.Add('l');
+            else if (c == '0') chars.Add('o');
+            else if (c == '5') chars.Add('s');
+            // every other non-letter character (remaining digits,
+            // punctuation, whitespace) is dropped, not kept — this is a
+            // shape check, not an exact-text check.
+        }
+        return new string(chars.ToArray());
     }
 
     /// <summary>
@@ -198,7 +347,15 @@ public static class AutoDiagnosticPolicy
         return new AutoDiagnosticRateLimitState
         {
             LastReportedUtcByRx = new Dictionary<string, DateTime>(source.LastReportedUtcByRx),
-            RecentReportTimestampsUtc = new List<DateTime>(source.RecentReportTimestampsUtc)
+            RecentReportTimestampsUtc = new List<DateTime>(source.RecentReportTimestampsUtc),
+            Streak = source.Streak is null
+                ? null
+                : new AutoDiagnosticStreakState
+                {
+                    ContextKey = source.Streak.ContextKey,
+                    ConsecutiveMisses = source.Streak.ConsecutiveMisses,
+                    FirstMissUtc = source.Streak.FirstMissUtc
+                }
         };
     }
 }
