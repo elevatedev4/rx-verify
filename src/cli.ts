@@ -225,12 +225,17 @@ function runVerify(input: CliInput): VerifyResult {
   const result = verify(resolvedSource, entered, provider, { skipDrugLookup, evidence: DRUG_EQUIVALENCE_EVIDENCE });
 
   // Diagnostic-only passthrough (see VerifyResult.refillsOcrRegionWords'
-  // doc) — verify() itself never sees OCR words, so this can only be
-  // attached here, from parseEscriptOcr's own PrescriptionRecord output,
-  // never inside verify().
+  // and .refillsMissReason's docs) — verify() itself never sees OCR
+  // words, so these can only be attached here, from parseEscriptOcr's own
+  // PrescriptionRecord output, never inside verify().
   const ocrRegionWords = resolvedSource.refillsOcrRegionWords;
-  if (ocrRegionWords && ocrRegionWords.length > 0) {
-    return { ...result, refillsOcrRegionWords: ocrRegionWords };
+  const missReason = resolvedSource.refillsMissReason;
+  if ((ocrRegionWords && ocrRegionWords.length > 0) || missReason) {
+    return {
+      ...result,
+      ...(ocrRegionWords && ocrRegionWords.length > 0 ? { refillsOcrRegionWords: ocrRegionWords } : {}),
+      ...(missReason ? { refillsMissReason: missReason } : {})
+    };
   }
   return result;
 }

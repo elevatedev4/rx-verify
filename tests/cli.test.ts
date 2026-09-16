@@ -169,6 +169,44 @@ describe('verify-cli (stdin/stdout JSON wrapper, subprocess smoke test)', () => 
     expect(result.refillsOcrRegionWords).toBeUndefined();
   }, 15000);
 
+  // Auto-diagnostic feature (2026-09-15): VerifyResult.refillsMissReason —
+  // same passthrough mechanism as refillsOcrRegionWords above, but carries
+  // WHY the OCR extraction missed (see types.ts PrescriptionRecord.
+  // refillsMissReason's doc), so the overlay's automatic report can say
+  // more than "(not provided)".
+  it('includes refillsMissReason in the wire response when refills is unresolved (OCR path)', async () => {
+    const ocr = [
+      { text: 'Patient:', x: 0, y: 0, w: 80, h: 18 },
+      { text: 'Jordan', x: 90, y: 0, w: 80, h: 18 },
+      { text: 'Testcase', x: 180, y: 0, w: 80, h: 18 }
+    ];
+    const input = JSON.stringify({
+      ocr,
+      entered: { patientName: 'Jordan Testcase', refills: 3 },
+      skipDrugLookup: true
+    });
+
+    const { stdout, code } = await runCli(input);
+    const result = JSON.parse(stdout);
+
+    expect(code).toBe(0);
+    expect(result.refillsMissReason).toBe('no-value-paired');
+  }, 15000);
+
+  it('omits refillsMissReason from the wire response when refills DOES resolve', async () => {
+    const input = JSON.stringify({
+      source: { patientName: 'John Smith', refills: 2 },
+      entered: { patientName: 'John Smith', refills: 2 },
+      skipDrugLookup: true
+    });
+
+    const { stdout, code } = await runCli(input);
+    const result = JSON.parse(stdout);
+
+    expect(code).toBe(0);
+    expect(result.refillsMissReason).toBeUndefined();
+  }, 15000);
+
   it('reports an error object + non-zero exit on invalid JSON', async () => {
     const { stdout, code } = await runCli('not json');
     const result = JSON.parse(stdout);
