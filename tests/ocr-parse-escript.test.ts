@@ -2917,3 +2917,61 @@ describe('refillsOcrRegionWords fallback anchor: approv/renew/refill request/rx 
     expect(record.refillsOcrRegionWords).toBeUndefined();
   });
 });
+
+// Field report 2026-09-16 (5th AUTO-DIAGNOSTIC, PRE-fix build 82f5294): a
+// jumbled "Refill Replace" row where "Total" is garbled to "To>l" (same
+// beyond-the-confusable-map garble as the "To>lFi11s" report above) AND
+// lands as its OWN separate OCR token from "Fills" (a real inter-word
+// space, not a glued/split-digit shape), with two more chrome-word
+// misspellings ("Medicabon:" for "Medication:", "Quantiy:" for
+// "Quantity:") thrown in for good measure. Verbatim shape (synthetic
+// values only):
+//   "Refill Replace This is Replaced message SN: Medicabon: Quantiy:
+//   60.0000 Each (60.0000 Capsule) To>l Fills 3 (including this fill)
+//   Directions: DS: 30"
+// Pre-fix engine returned refills undefined, reason not_provided.
+describe('field report 2026-09-16 (5th AUTO-DIAGNOSTIC): "To>l Fills" — garbled "Total" AND split into two separate tokens from "Fills"', () => {
+  function toLSpaceFillsRow(y: number, tail: string[]): OcrWord[] {
+    return row(y, [
+      'Refill',
+      'Replace',
+      'This',
+      'is',
+      'Replaced',
+      'message',
+      'SN:',
+      'Medicabon:',
+      'Quantiy:',
+      '60.0000',
+      'Each',
+      '(60.0000',
+      'Capsule)',
+      'To>l',
+      'Fills',
+      ...tail,
+      'Directions:',
+      'DS:',
+      '30'
+    ]);
+  }
+
+  it('"To>l Fills 3 (including this fill)" recovers refills=3/fromTotalFills=true via the same label-anywhere bounded-fuzzy tier (effective 2 at compare-time)', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), toLSpaceFillsRow(500, ['3', '(including', 'this', 'fill)'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('3');
+    expect(record.refillsFromTotalFills).toBe(true);
+    expect(record.refillsMissReason).toBeUndefined();
+
+    const result = compareRefills(record.refills, 2, record.refillsFromTotalFills);
+    expect(result.status).toBe('green');
+  });
+
+  it('"To>l Fills 3" with NO recognized tail phrase stays an honest miss (reason: no-value-paired) — never guesses a bare number near a garbled, space-split label', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), toLSpaceFillsRow(500, ['3'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-value-paired');
+  });
+});
