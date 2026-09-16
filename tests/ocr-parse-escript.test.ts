@@ -2548,3 +2548,236 @@ describe('parseEscriptOcr', () => {
     });
   });
 });
+
+// Field reports 2026-09-16 (two live AUTO-DIAGNOSTIC reports from the
+// EditRx/refill-approval screens): the engine returned refills undefined
+// with missReason 'validation-failed:not-numeric' on a document whose
+// PHI-filtered nearby OCR words were, verbatim shape (synthetic values
+// substituted here per this file's PHI rule):
+//   "Refill Replace SN: Medication: Quantiy: 60.0000 Each (60. 0000
+//   Tablet) TotalFi11s 1 (including this fill) Directions: DS: Note:"
+// Root cause (confirmed by direct reproduction, not just inspection):
+// this is ONE jumbled physical OCR row. The row's own leading word,
+// "Refill" (an UNRELATED "Refill / Replace" chrome button, "Refill" and
+// "Replace" as separate tokens — NOT a mangled "Refills" label), used to
+// fuzzy-match the 'refills' label at the row's START under the old
+// generic edit-distance budget (1 edit, well inside the old threshold of
+// 2 for a 7-char canonical). That false match consumed the row as
+// refills' own value, bounded at the next EXACT label match on the row
+// ("Medication:"), so raw.refills got set to garbage chrome text
+// ("Replace SN:") long before the row's REAL "TotalFi11s ... (including
+// this fill)" text was ever reached — and because both fallback pattern
+// anchors were gated on `raw.refills === undefined`, neither ever got a
+// chance to find the real value once that garbage was already paired.
+// "TotalFi11s" itself is OCR reading "Total Fills" with no space and
+// "ll" misread as "11".
+describe('field report 2026-09-16: "TotalFi11s" (OCR confusable "ll"->"11") jumbled into an unrelated "Refill Replace" row', () => {
+  // Builds the exact reported jumbled-row shape, substituting the tail
+  // count/phrase per test.
+  function jumbledTotalFillsRow(y: number, countAndTail: string[]): OcrWord[] {
+    return row(y, [
+      'Refill',
+      'Replace',
+      'SN:',
+      'Medication:',
+      'Quantiy:',
+      '60.0000',
+      'Each',
+      '(60.',
+      '0000',
+      'Tablet)',
+      'TotalFi11s',
+      ...countAndTail,
+      'Directions:',
+      'DS:',
+      'Note:'
+    ]);
+  }
+
+  it('recovers refills from "TotalFi11s 1 (including this fill)" as a Total-fills read (raw 1, effective 0 at compare-time) instead of a false not-numeric miss', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), jumbledTotalFillsRow(500, ['1', '(including', 'this', 'fill)'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('1');
+    expect(record.refillsFromTotalFills).toBe(true);
+    expect(record.refillsMissReason).toBeUndefined();
+
+    const result = compareRefills(record.refills, 0, record.refillsFromTotalFills);
+    expect(result.status).toBe('green');
+  });
+
+  it('"TotalFi11s 3 (additional refills)" in the same jumbled row reads refills=3 as-is (no N-1 math, no fromTotalFills flag)', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), jumbledTotalFillsRow(500, ['3', '(additional', 'refills)'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('3');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+    expect(record.refillsMissReason).toBeUndefined();
+  });
+
+  it('a plain "Refills 4" row elsewhere on the page is unaffected by this fix', () => {
+    const refillsRow = row(320, ['Refills', '4']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+
+  it('the bare "Refill" chrome word no longer fuzzy-matches the refills label at all (root-cause fix, not just a value-pairing workaround) — the jumbled row never even enters Pass A as a refills row', () => {
+    // Same row, but with no recoverable count/phrase at all after
+    // "TotalFi11s" — if "Refill" were still (wrongly) matching as the
+    // label, Pass A would report a paired-but-garbage value
+    // ('validation-failed:not-numeric'); with the false match removed at
+    // the source, the row is simply unrecognized ('no-value-paired').
+    const ocr = flatten([
+      TOOLBAR_ROW,
+      row(100, ['Patient']),
+      row(500, ['Refill', 'Replace', 'SN:', 'Medication:', 'Quantiy:', '60.0000', 'Each', 'Directions:', 'DS:', 'Note:'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-value-paired');
+  });
+});
+
+// Field report 2026-09-16, 4th AUTO-DIAGNOSTIC (PreCheck screen): the
+// label itself came through even MORE garbled — "To>lFi11s" ("Total"
+// misread as "To>l", dropping/merging two characters, not just a
+// confusable digit-for-letter substitution the confusable-collapse
+// normalizer alone can fix). Verbatim shape (synthetic values here):
+//   "Refill Replace SN: Quantiy: 60.0000 Each (60. 0000 Capsule)
+//   To>lFi11s 12 (including this fill) Directions: DS: 30"
+// Expected effective refills = 11 (raw 12, N-1 at compare-time).
+describe('field report 2026-09-16 (4th AUTO-DIAGNOSTIC): "To>lFi11s" — "Total" itself garbled beyond the confusable map', () => {
+  function toLFillsRow(y: number, tail: string[]): OcrWord[] {
+    return row(y, [
+      'Refill',
+      'Replace',
+      'SN:',
+      'Quantiy:',
+      '60.0000',
+      'Each',
+      '(60.',
+      '0000',
+      'Capsule)',
+      'To>lFi11s',
+      ...tail,
+      'Directions:',
+      'DS:',
+      '30'
+    ]);
+  }
+
+  it('"To>lFi11s 12 (including this fill)" recovers refills=12/fromTotalFills=true via the label-independent phrase anchor (effective 11 at compare-time)', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), toLFillsRow(500, ['12', '(including', 'this', 'fill)'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('12');
+    expect(record.refillsFromTotalFills).toBe(true);
+    expect(record.refillsMissReason).toBeUndefined();
+
+    const result = compareRefills(record.refills, 11, record.refillsFromTotalFills);
+    expect(result.status).toBe('green');
+  });
+
+  it('"To>lFi11s 12" with NO recognized tail phrase stays an honest miss (reason: no-value-paired) — never guesses a bare number near a garbled label', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), toLFillsRow(500, ['12'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    // Documented choice: with the "Refill" false-positive fixed at the
+    // source (see the describe block above), this row is never paired to
+    // ANY value at all — not paired-then-rejected — so the existing
+    // 'no-value-paired' reason applies exactly as documented, and no new
+    // reason code was needed for this shape.
+    expect(record.refillsMissReason).toBe('no-value-paired');
+  });
+});
+
+// Branch brief: an OCR-confusion-tolerant label normalizer, one shared
+// helper, used by the row-start label matcher, the "Total Fills anywhere"
+// anchor, and the phrase anchor's label detection — unit-tested end-to-end
+// (through parseEscriptOcr, matching this file's existing style) with the
+// exact fixtures named in the brief.
+describe('OCR-confusable-tolerant Total-Fills/Refills label matching (branch brief fixtures)', () => {
+  it('"TotalFi11s:" (glued, "ll"->"11") at a row start', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row(320, ['TotalFi11s:', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('"Total Fi1ls" (word-split, "l"->"1")', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row(320, ['Total', 'Fi1ls', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('"TOTAL FILLS" (clean, all-caps)', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row(320, ['TOTAL', 'FILLS', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('"Tota1Fills" (glued, "l"->"1" mid-word)', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row(320, ['Tota1Fills', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('"Refi11s" (glued, "ll"->"11")', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row(320, ['Refi11s', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+
+  it('"Refills:" (clean, with colon)', () => {
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), row(320, ['Refills:', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+});
+
+// The label-independent phrase anchor (findTotalFillsPhraseValue) is now
+// tolerant of the tail phrase's OWN OCR spacing/punctuation/confusable
+// noise, independent of the label-matching fixes above.
+describe('phrase-anchor tolerance for OCR spacing/punctuation/confusables in the tail phrase itself', () => {
+  it('tolerates the parentheses landing as their OWN separate tokens: "( including this fill )"', () => {
+    const valueRow = row(400, ['2', '(', 'including', 'this', 'fill', ')']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('2');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('tolerates a confusable inside the phrase word itself: "(including this fi11)" ("ll"->"11")', () => {
+    const valueRow = row(400, ['2', '(including', 'this', 'fi11)']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('2');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('still requires the recognized phrase words themselves — unrelated bracketed text never fires the anchor', () => {
+    const valueRow = row(400, ['2', '(', 'some', 'other', 'note', ')']);
+    const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), valueRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+  });
+});
