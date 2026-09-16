@@ -360,9 +360,20 @@
                             the box no longer blocks Pioneer's popup once Order
                             mode is active.
                         -->
-                        <ComboBox x:Name="ModeComboBoxNormal" Style="{StaticResource ModeComboBoxStyle}" Width="110" SelectionChanged="OnModeComboBoxChanged" ToolTip="Order mode highlights zero order quantities and cheaper secondary substitutions on Pioneer's order screens; Verify mode resumes normal rx-verification highlights">
+                        <ComboBox x:Name="ModeComboBoxNormal" Style="{StaticResource ModeComboBoxStyle}" Width="110" SelectionChanged="OnModeComboBoxChanged" ToolTip="Order mode highlights zero order quantities and cheaper secondary substitutions on Pioneer's order screens; Verify mode resumes normal rx-verification highlights; Reports opens the Reports window">
                             <ComboBoxItem Content="Mode: Verify" />
                             <ComboBoxItem Content="Mode: Order" />
+                            <!--
+                                Reports mode (branch feat/reports-mode) is NOT a
+                                third sticky layout state like Verify/Order —
+                                see OnModeComboBoxChanged's doc: picking this
+                                item opens/focuses Reports/ReportsWindow.xaml.cs
+                                and the combo immediately reverts to whichever
+                                of Verify/Order was actually active
+                                (ApplyModeLayout/_isOrderModeActive are never
+                                touched), so Verify/Order stay byte-identical.
+                            -->
+                            <ComboBoxItem Content="Mode: Reports" />
                         </ComboBox>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal">
@@ -409,9 +420,11 @@
             enough for "Mode: Verify"/"Mode: Order" at this FontSize.
         -->
         <StackPanel x:Name="CompactOrderPanel" Visibility="Collapsed" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-            <ComboBox x:Name="ModeComboBoxCompact" Style="{StaticResource ModeComboBoxStyle}" Width="100" SelectionChanged="OnModeComboBoxChanged" ToolTip="Switch back to Verify mode to resume rx-verification highlights">
+            <ComboBox x:Name="ModeComboBoxCompact" Style="{StaticResource ModeComboBoxStyle}" Width="100" SelectionChanged="OnModeComboBoxChanged" ToolTip="Switch back to Verify mode to resume rx-verification highlights, or open Reports">
                 <ComboBoxItem Content="Mode: Verify" />
                 <ComboBoxItem Content="Mode: Order" />
+                <!-- See ModeComboBoxNormal's XAML doc above — same non-sticky Reports behavior. -->
+                <ComboBoxItem Content="Mode: Reports" />
             </ComboBox>
             <Button x:Name="VerifyEscapeButton" Content="Verify" Margin="4,0,0,0" Padding="4,1" FontSize="9" MinHeight="18" MinWidth="0" Click="OnVerifyEscapeButtonClick" ToolTip="Switch straight back to Verify mode" />
         </StackPanel>

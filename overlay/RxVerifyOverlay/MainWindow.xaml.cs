@@ -120,6 +120,15 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     // posture as _integratedOverlay.
     private readonly OrderAssist.OrderAssistCoordinator _orderAssistCoordinator;
 
+    /// <summary>
+    /// Branch feat/reports-mode: the ONE Reports/ReportsWindow.xaml.cs
+    /// instance for this process — see OpenOrFocusReportsWindow's own
+    /// doc for the singleton lifecycle (created lazily on first "Mode:
+    /// Reports" pick, Activate()'d thereafter, cleared back to null on
+    /// its own Closed so a later pick creates a fresh one).
+    /// </summary>
+    private Reports.ReportsWindow? _reportsWindow;
+
     // UPDATE-READY CHECK (branch fix/rightclick-all-feedback-compact, task
     // 4) — how often CheckForUpdateAsync re-polls GitHub's commits/main
     // after the first, startup-time check (see the constructor's Loaded
@@ -280,6 +289,13 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         // visible surface) reaches the identical dialog/update path.
         _integratedOverlay.FeedbackRequested += (_, _) => OpenFeedbackWindow();
         _integratedOverlay.UpdateRequested += (_, _) => TriggerUpdate();
+        // Branch feat/reports-mode: "Mode: Reports" in the control box's
+        // dropdown — see Reports/ReportsWindow.xaml.cs and
+        // OpenOrFocusReportsWindow's own doc below. Never touches
+        // OrderAssistCoordinator/_settings.OrderAssistEnabled — Reports
+        // isn't a sticky mode like Order (see ControlBoxWindow.xaml.cs
+        // ReportsModeRequested's doc).
+        _integratedOverlay.ReportsModeRequested += (_, _) => OpenOrFocusReportsWindow();
         // "Report error…" (verdict-tooltips-reports branch): the boxes
         // window's per-field context menu bubbles up through the
         // coordinator to here, the one place that knows how to build a
@@ -522,6 +538,36 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             dialog.Topmost = true;
         };
         dialog.ShowDialog();
+    }
+
+    /// <summary>
+    /// Branch feat/reports-mode: "Mode: Reports" in the control box's
+    /// dropdown (via _integratedOverlay.ReportsModeRequested above) — see
+    /// Reports/ReportsWindow.xaml.cs's own class doc for why this is a
+    /// non-modal singleton (Show(), never ShowDialog()). Reused on every
+    /// subsequent "Mode: Reports" pick while still open (Activate() only,
+    /// restoring from minimized if needed); a fresh instance is created
+    /// only after the previous one was actually closed (Closed clears
+    /// _reportsWindow back to null). Closing this window — or switching
+    /// the control box back to Verify/Order, which never touches it at
+    /// all — does NOT cancel a run in progress; see ReportsWindow's own
+    /// class doc.
+    /// </summary>
+    private void OpenOrFocusReportsWindow()
+    {
+        if (_reportsWindow is null)
+        {
+            _reportsWindow = new Reports.ReportsWindow();
+            _reportsWindow.Closed += (_, _) => _reportsWindow = null;
+            _reportsWindow.Show();
+            return;
+        }
+
+        if (_reportsWindow.WindowState == WindowState.Minimized)
+        {
+            _reportsWindow.WindowState = WindowState.Normal;
+        }
+        _reportsWindow.Activate();
     }
 
     /// <summary>

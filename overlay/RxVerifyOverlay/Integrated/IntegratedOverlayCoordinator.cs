@@ -324,6 +324,9 @@ public sealed class IntegratedOverlayCoordinator
     /// </summary>
     public event EventHandler<bool>? OrderAssistToggleRequested;
 
+    /// <summary>Branch feat/reports-mode: relays ControlBoxWindow.ReportsModeRequested — MainWindow.xaml.cs subscribes to open/focus Reports/ReportsWindow.xaml.cs via its OpenOrFocusReportsWindow helper. Carries no state (see that event's own doc for why Reports isn't a sticky mode like Order) and never touches this coordinator's own display-mode/OrderAssist state.</summary>
+    public event EventHandler? ReportsModeRequested;
+
     public IntegratedOverlayCoordinator(OverlayViewModel viewModel, OverlaySettings settings)
     {
         _viewModel = viewModel;
@@ -945,6 +948,7 @@ public sealed class IntegratedOverlayCoordinator
         _controlBox.RefreshRequested += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.CloseApplicationRequested += (_, _) => CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.OrderAssistToggleRequested += (_, enabled) => OrderAssistToggleRequested?.Invoke(this, enabled);
+        _controlBox.ReportsModeRequested += (_, _) => ReportsModeRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.FeedbackRequested += (_, _) => FeedbackRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.UpdateRequested += (_, _) => UpdateRequested?.Invoke(this, EventArgs.Empty);
         _controlBox.HideOverlayToggleRequested += (_, hidden) =>
