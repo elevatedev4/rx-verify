@@ -17,6 +17,28 @@ public class AutoDiagnosticPolicyTests
 {
     private static readonly DateTime Now = new(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>
+    /// Most of the tests below exercise ShouldReport's OLDER gates
+    /// (fill-word/approval content, daily/hourly caps) and were written
+    /// before the debounce streak gate existed (see
+    /// AutoDiagnosticPolicyDebounceTests.cs for that gate's own dedicated
+    /// coverage). Rather than replaying 3 real ShouldReport calls 5+
+    /// seconds apart in every one of them, this seeds a rate-limit state
+    /// whose Streak has ALREADY satisfied MinConsecutiveMisses/
+    /// MinPersistenceSeconds for `contextKey`, so a single ShouldReport
+    /// call here exercises exactly the gate each test names, with the
+    /// debounce gate already a non-factor.
+    /// </summary>
+    private static AutoDiagnosticRateLimitState SeedSatisfiedStreak(string contextKey, DateTime nowUtc) => new()
+    {
+        Streak = new AutoDiagnosticStreakState
+        {
+            ContextKey = contextKey,
+            ConsecutiveMisses = AutoDiagnosticPolicy.MinConsecutiveMisses,
+            FirstMissUtc = nowUtc.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
+        }
+    };
+
     // ---- ClassifyRefillsBoxRenderState ----
 
     [Fact]
@@ -74,8 +96,8 @@ public class AutoDiagnosticPolicyTests
     public void UncolouredWithFillWordsReports()
     {
         var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
         Assert.True(shouldReport);
     }
@@ -84,8 +106,8 @@ public class AutoDiagnosticPolicyTests
     public void ColouredNeverReportsEvenWithFillWords()
     {
         var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.Green, hasFillWords: true, isApproval: true,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.Green, hasFillWords: true, isApproval: true, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
         Assert.False(shouldReport);
     }
@@ -94,8 +116,8 @@ public class AutoDiagnosticPolicyTests
     public void NoFillWordsAndNotApprovalNeverReports()
     {
         var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: false, isApproval: false,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: false, isApproval: false, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
         Assert.False(shouldReport);
     }
@@ -104,8 +126,8 @@ public class AutoDiagnosticPolicyTests
     public void ApprovalAloneWithoutFillWordsStillReports()
     {
         var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.UnparseableQuantity, hasFillWords: false, isApproval: true,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.UnparseableQuantity, hasFillWords: false, isApproval: true, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
         Assert.True(shouldReport);
     }
@@ -114,12 +136,12 @@ public class AutoDiagnosticPolicyTests
     public void SameRxTwiceInADayReportsOnlyOnce()
     {
         var (firstShouldReport, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
         var (secondShouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(2), rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(2), rxNumber: "RX-1001", contextKey: "RX-1001");
 
         Assert.True(firstShouldReport);
         Assert.False(secondShouldReport);
@@ -129,12 +151,12 @@ public class AutoDiagnosticPolicyTests
     public void SameRxAgainAfterTwentyFourHoursReportsAgain()
     {
         var (_, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
         var (shouldReportNextDay, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(25), rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(25), rxNumber: "RX-1001", contextKey: "RX-1001");
 
         Assert.True(shouldReportNextDay);
     }
@@ -143,12 +165,23 @@ public class AutoDiagnosticPolicyTests
     public void DifferentRxOnTheSameDayIsNotSuppressedByTheFirstsCap()
     {
         var (_, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: null, nowUtc: Now, rxNumber: "RX-1001");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+
+        // RX-2002 is a DIFFERENT context, so it needs its own satisfied
+        // streak seeded before this call — a fresh context always starts
+        // its own debounce clock (see AutoDiagnosticPolicyDebounceTests
+        // for that behavior's own dedicated coverage).
+        stateAfterFirst.Streak = new AutoDiagnosticStreakState
+        {
+            ContextKey = "RX-2002",
+            ConsecutiveMisses = AutoDiagnosticPolicy.MinConsecutiveMisses,
+            FirstMissUtc = Now.AddMinutes(5).AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
+        };
 
         var (shouldReportOther, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(5), rxNumber: "RX-2002");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(5), rxNumber: "RX-2002", contextKey: "RX-2002");
 
         Assert.True(shouldReportOther);
     }
@@ -162,18 +195,34 @@ public class AutoDiagnosticPolicyTests
         for (var i = 0; i < 5; i++)
         {
             var rxNumber = $"RX-{i}";
+            var now = Now.AddMinutes(i);
+            var seeded = state ?? new AutoDiagnosticRateLimitState();
+            seeded.Streak = new AutoDiagnosticStreakState
+            {
+                ContextKey = rxNumber,
+                ConsecutiveMisses = AutoDiagnosticPolicy.MinConsecutiveMisses,
+                FirstMissUtc = now.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
+            };
+
             var (shouldReport, updated) = AutoDiagnosticPolicy.ShouldReport(
-                RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-                rateLimitState: state, nowUtc: Now.AddMinutes(i), rxNumber: rxNumber);
+                RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+                rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber);
             state = updated;
             if (shouldReport) reportedCount++;
         }
 
         Assert.Equal(5, reportedCount);
 
+        state!.Streak = new AutoDiagnosticStreakState
+        {
+            ContextKey = "RX-5",
+            ConsecutiveMisses = AutoDiagnosticPolicy.MinConsecutiveMisses,
+            FirstMissUtc = Now.AddMinutes(6).AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
+        };
+
         var (sixthShouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: state, nowUtc: Now.AddMinutes(6), rxNumber: "RX-5");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: state, nowUtc: Now.AddMinutes(6), rxNumber: "RX-5", contextKey: "RX-5");
 
         Assert.False(sixthShouldReport);
     }
@@ -184,33 +233,58 @@ public class AutoDiagnosticPolicyTests
         AutoDiagnosticRateLimitState? state = null;
         for (var i = 0; i < 5; i++)
         {
+            var rxNumber = $"RX-{i}";
+            var now = Now.AddMinutes(i);
+            var seeded = state ?? new AutoDiagnosticRateLimitState();
+            seeded.Streak = new AutoDiagnosticStreakState
+            {
+                ContextKey = rxNumber,
+                ConsecutiveMisses = AutoDiagnosticPolicy.MinConsecutiveMisses,
+                FirstMissUtc = now.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
+            };
+
             var (_, updated) = AutoDiagnosticPolicy.ShouldReport(
-                RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-                rateLimitState: state, nowUtc: Now.AddMinutes(i), rxNumber: $"RX-{i}");
+                RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+                rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber);
             state = updated;
         }
 
+        var later = Now.AddHours(1).AddMinutes(10);
+        state!.Streak = new AutoDiagnosticStreakState
+        {
+            ContextKey = "RX-99",
+            ConsecutiveMisses = AutoDiagnosticPolicy.MinConsecutiveMisses,
+            FirstMissUtc = later.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
+        };
+
         var (shouldReportLater, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: state, nowUtc: Now.AddHours(1).AddMinutes(10), rxNumber: "RX-99");
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: state, nowUtc: later, rxNumber: "RX-99", contextKey: "RX-99");
 
         Assert.True(shouldReportLater);
     }
 
     [Fact]
-    public void MissingRxNumberSkipsThePerRxCapButStillCountsAgainstTheHourlyCap()
+    public void MissingRxNumberUsesTheFallbackContextKeyForTheDailyCap()
     {
-        var (first, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: null, nowUtc: Now, rxNumber: null);
+        // 2026-09-16 (brief item 4): an unidentified Rx no longer skips
+        // the daily cap outright — it keys the cap on the fallback
+        // context (window title + screen mode) instead, so the SAME
+        // fallback context reported once is suppressed for 24h just like
+        // a real Rx number would be.
+        const string fallbackContext = "Edit Rx - (no Rx number)|EditRx";
 
-        var (second, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(1), rxNumber: null);
+        var (first, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: SeedSatisfiedStreak(fallbackContext, Now), nowUtc: Now, rxNumber: null, contextKey: fallbackContext);
+
+        var (second, stateAfterSecond) = AutoDiagnosticPolicy.ShouldReport(
+            RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(1), rxNumber: null, contextKey: fallbackContext);
 
         Assert.True(first);
-        Assert.True(second); // no Rx identity to key the daily cap on — never suppressed solely for that reason
-        Assert.Single(stateAfterFirst.RecentReportTimestampsUtc); // still counts against the hourly cap
+        Assert.False(second); // same fallback context, same day -> suppressed
+        Assert.Single(stateAfterSecond.RecentReportTimestampsUtc); // only the first actually consumed the hourly budget
     }
 
     // ---- ClassifyDocument ----
