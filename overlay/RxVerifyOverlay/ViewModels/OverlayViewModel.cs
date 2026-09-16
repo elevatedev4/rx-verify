@@ -496,11 +496,49 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private readonly RxReportSubmitter _autoDiagnosticSubmitter;
 
-    /// <summary>Trigger condition 1a (brief item 1) — any OCR word shaped like "refill"/"refills"/"fills"/"fill", case-insensitive. Same regex shape as src/ocr/parseEscriptOcr.ts's own isFillShaped (normalize(text).includes('fill')), just applied client-side to the raw word list this ViewModel already has, since the engine's own PHI-filtered region-words diagnostic isn't always populated (only when refills is UNRESOLVED — see refillsMissReason's doc; a wrong ENTERED value alone can also land here).</summary>
-    private static readonly Regex FillWordRegex = new("refill|fills?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>
+    /// In-memory copy of the auto-diagnostic rate-limit state, lazily
+    /// populated by the FIRST MaybeSendAutoDiagnosticReportAsync call and
+    /// kept in sync thereafter (see that method) — added 2026-09-16 review
+    /// fix: WatchAsync's 250ms poll (MainWindow.xaml.cs) calls
+    /// RefreshAsync, and therefore MaybeSendAutoDiagnosticReportAsync, on
+    /// every tick, so hitting AutoDiagnosticStateStore.Load/Save
+    /// unconditionally turned into a synchronous file read+write on the
+    /// calling thread every ~250ms even in the common steady-state case
+    /// (refills box coloured, no debounce streak in progress). Null only
+    /// before the very first call this process has ever made.
+    /// </summary>
+    private AutoDiagnosticRateLimitState? _cachedRateLimitState;
 
     /// <summary>Trigger condition 1b (brief item 1) / document-classification signal — an OCR word suggesting this document is a refill-approval/renewal response, independent of whether it also happens to say "fill" anywhere.</summary>
     private static readonly Regex ApprovalWordRegex = new("approv|renew", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Busy-screen skip (2026-09-16 field report: a real report fired on a
+    /// PreCheck screen while Pioneer's "Please wait while the claim
+    /// processes" popup was still up — the only fill-shaped words visible
+    /// were "Filled:"/"Fill:" labels, not real refill content). Checked
+    /// against the WHOLE page's OCR text (letters-only, case-folded — see
+    /// IsBusyScreenText) rather than per-word, since every phrase here is
+    /// multi-word. Matching is tolerant of a single OCR-dropped letter
+    /// (see IsFuzzyPhraseMatch) — "PROCESSING" read as "PROCESSNG" still
+    /// counts as busy.
+    ///
+    /// Deliberately does NOT include bare "processing" or "loading" — a
+    /// real refills-bearing screen can legitimately contain either word
+    /// (a "processing" status column, a "loading" line item) for its
+    /// entire time on screen, which would stall that Rx's debounce streak
+    /// indefinitely (2026-09-16 review fix). Every phrase kept here names
+    /// the transient claim-processing DIALOG specifically, not a bare
+    /// status word.
+    /// </summary>
+    private static readonly string[] BusyScreenPhrases =
+    {
+        "please wait",
+        "claim processes",
+        "claim processing",
+        "processing claim"
+    };
 
     public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
     {
@@ -788,25 +826,59 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             if (refillsRow is null) return; // defensive: should always exist (FieldOrder.Fields is unconditional for refills) — never crash the refresh if it somehow doesn't
 
             var renderState = AutoDiagnosticPolicy.ClassifyRefillsBoxRenderState(refillsRow.Status, refillsRow.ReasonCode, refillsRow.ScreenRect.HasValue);
-            if (!AutoDiagnosticPolicy.IsUncoloured(renderState)) return; // working correctly (green/red) — nothing to diagnose, skip the state-file I/O below entirely
 
-            var hasFillWords = ocrWords.Any(w => FillWordRegex.IsMatch(w.Text));
+            // Fast path (2026-09-16 review fix): WatchAsync's 250ms poll
+            // calls this on EVERY refresh, so the common steady-state case
+            // — refills box coloured, no debounce streak in progress —
+            // must never touch AutoDiagnosticStateStore's file I/O.
+            // _cachedRateLimitState is the in-memory copy of whatever's on
+            // disk; if it's already loaded and already shows no active
+            // streak, a coloured result can't possibly change anything
+            // (see AutoDiagnosticPolicy.ShouldReport: a coloured result
+            // only ever CLEARS a streak, it never creates a cap entry) —
+            // bail before even computing the OCR-word flags below. On the
+            // very first call this process makes, the cache is empty, so
+            // one Load happens to find out whether an old streak was left
+            // over from a previous run; every coloured call after that is
+            // then free until an uncoloured scan (or a streak that still
+            // needs clearing) touches the state again.
+            var isColoured = !AutoDiagnosticPolicy.IsUncoloured(renderState);
+            if (isColoured)
+            {
+                _cachedRateLimitState ??= AutoDiagnosticStateStore.Load();
+                if (_cachedRateLimitState.Streak is null) return;
+            }
+
+            // NOTE: unlike gate 2 (hasFillWords/isApproval) below, a
+            // colored (Green/Red) render state is deliberately NOT
+            // short-circuited any further here — once we know (above)
+            // there IS an active streak to clear, this must still go
+            // through ShouldReport/Save once so the streak actually gets
+            // reset, or a LATER uncoloured tick for the same Rx/window
+            // would wrongly resume the old stale streak instead of
+            // starting a fresh one.
+            var isBusyScreen = IsBusyScreenText(ocrWords);
+            var hasFillWords = ocrWords.Any(w => AutoDiagnosticPolicy.IsFillWord(w.Text));
             var isApproval = ocrWords.Any(w => ApprovalWordRegex.IsMatch(w.Text));
-            if (!hasFillWords && !isApproval) return; // doesn't look like a prescription that should have refills at all — not a bug
 
-            var rateLimitState = AutoDiagnosticStateStore.Load();
-            var (shouldReport, updatedState) = AutoDiagnosticPolicy.ShouldReport(
-                renderState, hasFillWords, isApproval, rateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity);
-            AutoDiagnosticStateStore.Save(updatedState);
+            var contextKey = AutoDiagnosticPolicy.GetContextKey(CurrentVerdictsRxIdentity, _lastRxWindowTitle, window.ScreenMode);
+            _cachedRateLimitState ??= AutoDiagnosticStateStore.Load();
+            var (shouldReport, updatedState, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
+                renderState, hasFillWords, isApproval, isBusyScreen, _cachedRateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity, contextKey);
+            _cachedRateLimitState = updatedState; // cheap, in-memory — keep regardless of whether disk needs writing
+            if (stateChanged) AutoDiagnosticStateStore.Save(updatedState);
 
             // One line, state names + reason code only — no OCR text, no
             // patient/prescriber/drug values — same "safe to always log"
             // posture as every other [TAG]-prefixed OcrLogger.LogTiming
             // line in this file (e.g. "[PRECHECK-GATE]" above).
             OcrLogger.LogTiming(
-                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
+                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} isBusyScreen={isBusyScreen} streak={updatedState.Streak?.ConsecutiveMisses ?? 0} stateChanged={stateChanged} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
 
             if (!shouldReport) return;
+
+            var streak = updatedState.Streak?.ConsecutiveMisses ?? 0;
+            var persistedSeconds = updatedState.Streak is null ? 0 : (DateTime.UtcNow - updatedState.Streak.FirstMissUtc).TotalSeconds;
 
             var documentClassification = AutoDiagnosticPolicy.ClassifyDocument(isApproval, window.ScreenMode);
             var note = AutoDiagnosticNoteBuilder.Build(
@@ -816,7 +888,9 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
                 window.ScreenMode,
                 documentClassification,
                 AppDiagnostics.GetCommitSha(),
-                RefillsOcrRegionWords);
+                RefillsOcrRegionWords,
+                streak,
+                persistedSeconds);
 
             // "(auto)" for Source per the feature spec — this is an
             // automatic report, not a pharmacist reading and transcribing
@@ -852,6 +926,52 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             // AutoDiagnosticStateStore) — a bug here must never break the
             // pharmacist's own verification refresh.
         }
+    }
+
+    /// <summary>
+    /// True when the page's OCR text as a whole contains one of
+    /// BusyScreenPhrases — see that field's doc. Joins every OCR word
+    /// into one string before matching (not per-word) since these
+    /// phrases are multi-word, then normalizes both sides down to
+    /// letters-only/lowercase so OCR word-splitting/spacing quirks never
+    /// matter, and tolerates a single OCR-dropped letter per phrase (see
+    /// IsFuzzyPhraseMatch).
+    /// </summary>
+    private static bool IsBusyScreenText(IReadOnlyList<OcrWord> ocrWords)
+    {
+        var pageText = NormalizeLettersOnly(string.Join(" ", ocrWords.Select(w => w.Text)));
+        if (pageText.Length == 0) return false;
+
+        foreach (var phrase in BusyScreenPhrases)
+        {
+            if (IsFuzzyPhraseMatch(pageText, NormalizeLettersOnly(phrase))) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Letters only (a-z), lowercased — digits/punctuation/whitespace all dropped, so neither OCR spacing quirks nor stray digit noise affect a phrase match.</summary>
+    private static string NormalizeLettersOnly(string text) =>
+        new(text.Where(char.IsLetter).Select(char.ToLowerInvariant).ToArray());
+
+    /// <summary>
+    /// True if the (already letters-only, lowercase) `phrase` appears in
+    /// `text` exactly, or with any ONE of its own letters dropped —
+    /// tolerant of a single OCR-dropped letter (e.g. "PROCESSING" read as
+    /// "PROCESSNG"). Deliberately only tolerates a single drop, not two+,
+    /// to avoid false-positives against unrelated pharmacy text.
+    /// </summary>
+    private static bool IsFuzzyPhraseMatch(string text, string phrase)
+    {
+        if (phrase.Length == 0) return false;
+        if (text.Contains(phrase, StringComparison.Ordinal)) return true;
+        if (phrase.Length < 4) return false; // too short to safely drop a letter from without matching unrelated text
+
+        for (var i = 0; i < phrase.Length; i++)
+        {
+            var variant = phrase.Remove(i, 1);
+            if (text.Contains(variant, StringComparison.Ordinal)) return true;
+        }
+        return false;
     }
 
     /// <summary>UIA source path — reads the Escript tab's structured UIA tree directly via FieldReader.ReadSource() (the original "Verify" behavior). No OCR/screen capture involved.</summary>

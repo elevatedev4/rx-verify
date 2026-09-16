@@ -71,10 +71,20 @@ public class AutoDiagnosticNoteBuilderTests
         var words = new List<string> { "Fulfillment" };
         var note = AutoDiagnosticNoteBuilder.Build(
             RefillsBoxRenderState.NotProvided, "3", "no-value-paired",
-            RxScreenMode.NewRx, "new Rx", "deadbee", words);
+            RxScreenMode.NewRx, "new Rx", "deadbee", words, streak: 3, persistedSeconds: 5);
 
         Assert.Equal(
-            "AUTO-DIAGNOSTIC refills unassessed — boxState=NotProvided; engineRefillsValue=3; missReason=no-value-paired; screenMode=NewRx; document=new Rx; commit=deadbee; nearbyOcrWords=[Fulfillment]",
+            "AUTO-DIAGNOSTIC refills unassessed — boxState=NotProvided; engineRefillsValue=3; missReason=no-value-paired; screenMode=NewRx; document=new Rx; commit=deadbee; nearbyOcrWords=[Fulfillment]; streak=3;persistedSeconds=5",
             note);
+    }
+
+    [Fact]
+    public void AppendsStreakAndPersistedSecondsAsDebounceEvidence()
+    {
+        var note = AutoDiagnosticNoteBuilder.Build(
+            RefillsBoxRenderState.NotProvided, "(not provided)", "no-value-paired",
+            RxScreenMode.PreCheck, "unknown", "abc1234", null, streak: 4, persistedSeconds: 12.7);
+
+        Assert.EndsWith("streak=4;persistedSeconds=13", note);
     }
 }

@@ -31,7 +31,9 @@ public static class AutoDiagnosticNoteBuilder
         RxScreenMode screenMode,
         string documentClassification,
         string? appCommit,
-        IReadOnlyList<string>? refillsOcrRegionWords)
+        IReadOnlyList<string>? refillsOcrRegionWords,
+        int streak = 0,
+        double persistedSeconds = 0)
     {
         var sourceText = string.IsNullOrEmpty(sourceValueText) ? "undefined" : sourceValueText;
         var missReasonText = string.IsNullOrEmpty(refillsMissReason) ? "none" : refillsMissReason;
@@ -45,6 +47,7 @@ public static class AutoDiagnosticNoteBuilder
                $"screenMode={screenMode}; " +
                $"document={documentClassification}; " +
                $"commit={commitText}; " +
-               $"nearbyOcrWords=[{ocrWordsText}]";
+               $"nearbyOcrWords=[{ocrWordsText}]; " +
+               $"streak={streak};persistedSeconds={persistedSeconds:0}";
     }
 }
