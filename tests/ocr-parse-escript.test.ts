@@ -607,15 +607,21 @@ describe('parseEscriptOcr', () => {
   });
 
   it('never throws on garbage/empty input and returns a blank record', () => {
-    expect(parseEscriptOcr([])).toEqual({});
-    expect(parseEscriptOcr(null)).toEqual({});
-    expect(parseEscriptOcr(undefined)).toEqual({});
+    // 2026-09-16 addition: every exit that leaves refills undefined now
+    // sets a refillsMissReason (field report — an unresolved refills
+    // field with NO reason at all gave an automatic error report nothing
+    // to go on) — see the dedicated describe block below. These
+    // otherwise-blank records now carry that one field instead of being
+    // fully empty.
+    expect(parseEscriptOcr([])).toEqual({ refillsMissReason: 'ocr-empty' });
+    expect(parseEscriptOcr(null)).toEqual({ refillsMissReason: 'ocr-empty' });
+    expect(parseEscriptOcr(undefined)).toEqual({ refillsMissReason: 'ocr-empty' });
     expect(
       parseEscriptOcr([
         { text: '###', x: 0, y: 0, w: 5, h: 5 },
         { text: '', x: 5, y: 0, w: 5, h: 5 }
       ])
-    ).toEqual({});
+    ).toEqual({ refillsMissReason: 'no-refills-text-found' });
   });
 
   // -----------------------------------------------------------------
@@ -2779,5 +2785,135 @@ describe('phrase-anchor tolerance for OCR spacing/punctuation/confusables in the
     const record = parseEscriptOcr(ocr);
 
     expect(record.refills).toBeUndefined();
+  });
+});
+
+// Field report 2026-09-16, 3rd AUTO-DIAGNOSTIC: an unresolved refills
+// field came back with refillsMissReason=none and nearbyOcrWords empty —
+// an automatic error report with nothing to go on. Every exit that
+// leaves refills undefined now sets a reason.
+describe('refillsMissReason: new "ocr-empty" and "no-refills-text-found" reasons (field report 2026-09-16)', () => {
+  it("is 'ocr-empty' when parseEscriptOcr is called with null", () => {
+    const record = parseEscriptOcr(null);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('ocr-empty');
+  });
+
+  it("is 'ocr-empty' when parseEscriptOcr is called with an empty array", () => {
+    const record = parseEscriptOcr([]);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('ocr-empty');
+  });
+
+  it("is 'ocr-empty' when every word is blank/whitespace-only (nothing survives the blank-word filter)", () => {
+    const record = parseEscriptOcr([{ text: '   ', x: 0, y: 0, w: 10, h: 10 }]);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('ocr-empty');
+  });
+
+  it("is 'no-refills-text-found' when OCR produced words but NONE of them are recognized as any field label at all", () => {
+    const noiseRow = row(100, ['Completely', 'unrecognized', 'noise']);
+    const record = parseEscriptOcr(noiseRow);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it("stays 'no-value-paired' (unchanged) when at least one OTHER field label WAS recognized but nothing refills-shaped was ever paired", () => {
+    // Pre-existing behavior/contract — 'no-value-paired' is the ordinary
+    // "parsing ran normally, nothing found" case and must not regress
+    // just because a NEW, narrower 'no-refills-text-found' reason exists
+    // for the "nothing recognizable on the page AT ALL" case above.
+    const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+    const noiseRow = row(300, ['Random', 'unrelated', 'text']);
+    const ocr = flatten([TOOLBAR_ROW, patientRow, noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-value-paired');
+  });
+});
+
+// Field report 2026-09-16, 3rd AUTO-DIAGNOSTIC: a refill-request/approval
+// summary document can miss refills with NO "fill"-shaped word anywhere
+// on the page at all (the AUTO-DIAGNOSTIC report fired on its OWN
+// separate isApproval heuristic — some "approv"/"renew" word present —
+// while refillsOcrRegionWords came back empty since it only ever looked
+// for "fill"-shaped text). buildRefillsOcrRegionWords now falls back to
+// an approv/renew/refill-request/rx-request anchor when the primary
+// "fill" anchor finds nothing.
+describe('refillsOcrRegionWords fallback anchor: approv/renew/refill request/rx request (field report 2026-09-16)', () => {
+  // Mirrors the established working pattern from the pre-existing
+  // "refillsOcrRegionWords diagnostic" describe block above: a spacer row
+  // (medicationRow) between the patient label row and the anchor row.
+  // buildRefillsOcrRegionWords' own row-level PHI exclusion (layer 2)
+  // drops a sensitive label row's OWN NEXT physical row wholesale,
+  // regardless of content — an anchor row sitting DIRECTLY adjacent to a
+  // patient/dob/address/prescriber/phone label row would otherwise have
+  // its own words excluded before ever being collected; this is
+  // pre-existing behavior of the row-level exclusion, unrelated to this
+  // branch's fallback-anchor addition, so these fixtures avoid it exactly
+  // like every other passing regionWords test in this file already does.
+  const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+  const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+
+  it('captures words near an "Approved"/"Renewal" token when no "fill"-shaped word exists anywhere on the page', () => {
+    const noiseRow = row(300, ['Status', 'Approved', 'Warehouse']);
+    const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsOcrRegionWords).toBeDefined();
+    expect(record.refillsOcrRegionWords).toContain('Approved');
+    expect(record.refillsOcrRegionWords).toContain('Warehouse');
+  });
+
+  it('recognizes a "Refill Request" phrase split across two OCR tokens as the fallback anchor', () => {
+    const noiseRow = row(300, ['Refill', 'Request', 'Warehouse']);
+    const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsOcrRegionWords).toBeDefined();
+    expect(record.refillsOcrRegionWords).toContain('Warehouse');
+  });
+
+  it('recognizes an "Rx Request" phrase split across two OCR tokens as the fallback anchor', () => {
+    const noiseRow = row(300, ['Rx', 'Request', 'Warehouse']);
+    const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsOcrRegionWords).toBeDefined();
+    expect(record.refillsOcrRegionWords).toContain('Warehouse');
+  });
+
+  it('still prefers the "fill"-shaped anchor when it exists, ignoring an unrelated approv/renew row elsewhere', () => {
+    const fillRow = row(300, ['Fulfillment', 'status:', 'pending']);
+    // A spacer row keeps approvalRow OUT of fillRow's own +/-1 neighbor
+    // window (see this function's own doc: an anchor match always pulls
+    // in its immediate neighbor row regardless of content) — this test
+    // is specifically about the FALLBACK anchor never being tried at all
+    // once the primary "fill" anchor already found something, not about
+    // that unrelated neighbor-window behavior.
+    const spacerRow = row(340, ['Spacer', 'row', 'text']);
+    const approvalRow = row(400, ['Renewal', 'summary']);
+    const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, fillRow, spacerRow, approvalRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+    expect(record.refillsOcrRegionWords).not.toContain('Renewal');
+  });
+
+  it('is still undefined (never an empty array) when NEITHER anchor finds anything', () => {
+    const noiseRow = row(300, ['Nothing', 'relevant', 'here']);
+    const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsOcrRegionWords).toBeUndefined();
   });
 });

@@ -1383,7 +1383,73 @@ function rowLooksNameLike(line: OcrWord[]): boolean {
  * Only whole PHYSICAL ROWS containing a "fill"-shaped word, plus their
  * immediate row-before/row-after neighbors (±1, never further), are ever
  * considered as candidates at all. Capped at `maxWords` total.
+ *
+ * FALLBACK (field report 2026-09-16, 3rd AUTO-DIAGNOSTIC): a document can
+ * miss refills with NO "fill"-shaped word anywhere on the page at all
+ * (the report fired on the isApproval heuristic alone: some "approv"/
+ * "renew" word present, nearbyOcrWords empty) — a refill-request/approval
+ * summary screen that never renders the word "fill(s)" in any spelling.
+ * When the primary "fill"-shaped scan above finds nothing, this retries
+ * the EXACT same three-layer PHI filtering against rows containing an
+ * "approv"/"renew"/"refill request"/"rx request"-shaped word instead, so
+ * the next report from THIS kind of document still carries proof of what
+ * OCR saw, instead of an empty array.
  */
+const isFillShaped = (text: string) => normalize(text).includes('fill');
+const isApprovalRenewalWordShaped = (text: string) => {
+  const n = normalize(text);
+  return n.includes('approv') || n.includes('renew');
+};
+
+/**
+ * True if ROW `line` carries "approv"/"renew" text (either as its own
+ * word) OR a "refill request"/"rx request" phrase — checked against the
+ * WHOLE row's joined-then-normalized text (same normalize() used
+ * everywhere else in this file to make label matching space-insensitive)
+ * since OCR can split either two-word phrase across separate tokens.
+ */
+function isApprovalRenewalRowShaped(line: OcrWord[]): boolean {
+  if (line.some((w) => isApprovalRenewalWordShaped(w.text))) return true;
+  const joined = normalize(wordsToText(line));
+  return joined.includes('refillrequest') || joined.includes('rxrequest');
+}
+
+function collectRefillsRegionWords(
+  lines: OcrWord[][],
+  isAnchorLine: (line: OcrWord[]) => boolean,
+  sensitiveKeys: ReadonlySet<string>,
+  sensitiveLineIndices: ReadonlySet<number>,
+  maxWords: number
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li] ?? [];
+    if (!isAnchorLine(line)) continue;
+
+    for (const neighborIdx of [li - 1, li, li + 1]) {
+      const candidateLine = lines[neighborIdx];
+      if (!candidateLine) continue;
+      // Layer 2 (label rows) and layer 3 (unlabeled name-shaped rows) —
+      // both drop the ENTIRE row, never just individual tokens.
+      if (sensitiveLineIndices.has(neighborIdx)) continue;
+      if (rowLooksNameLike(candidateLine)) continue;
+
+      for (const w of candidateLine) {
+        const key = ocrWordKey(w);
+        if (seen.has(key)) continue;
+        // Layer 1 (resolved-field words) and layer 3 (shape-based
+        // per-token exclusions: dates, phone/NPI-shaped digit runs).
+        if (sensitiveKeys.has(key) || isDateShapedToken(w.text) || isSensitiveDigitRun(w.text)) continue;
+        seen.add(key);
+        out.push(w.text);
+        if (out.length >= maxWords) return out;
+      }
+    }
+  }
+  return out;
+}
+
 function buildRefillsOcrRegionWords(
   lines: OcrWord[][],
   resolutionMeta: Partial<Record<LabelKey, { strategy: FieldDiagnostic['strategy']; words: OcrWord[] }>>,
@@ -1408,35 +1474,17 @@ function buildRefillsOcrRegionWords(
     }
   }
 
-  const isFillShaped = (text: string) => normalize(text).includes('fill');
+  const fillWords = collectRefillsRegionWords(
+    lines,
+    (line) => line.some((w) => isFillShaped(w.text)),
+    sensitiveKeys,
+    sensitiveLineIndices,
+    maxWords
+  );
+  if (fillWords.length > 0) return fillWords;
 
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li] ?? [];
-    if (!line.some((w) => isFillShaped(w.text))) continue;
-
-    for (const neighborIdx of [li - 1, li, li + 1]) {
-      const candidateLine = lines[neighborIdx];
-      if (!candidateLine) continue;
-      // Layer 2 (label rows) and layer 3 (unlabeled name-shaped rows) —
-      // both drop the ENTIRE row, never just individual tokens.
-      if (sensitiveLineIndices.has(neighborIdx)) continue;
-      if (rowLooksNameLike(candidateLine)) continue;
-
-      for (const w of candidateLine) {
-        const key = ocrWordKey(w);
-        if (seen.has(key)) continue;
-        // Layer 1 (resolved-field words) and layer 3 (shape-based
-        // per-token exclusions: dates, phone/NPI-shaped digit runs).
-        if (sensitiveKeys.has(key) || isDateShapedToken(w.text) || isSensitiveDigitRun(w.text)) continue;
-        seen.add(key);
-        out.push(w.text);
-        if (out.length >= maxWords) return out;
-      }
-    }
-  }
-  return out;
+  // Fallback anchor — see this function's doc, "FALLBACK" paragraph.
+  return collectRefillsRegionWords(lines, isApprovalRenewalRowShaped, sensitiveKeys, sensitiveLineIndices, maxWords);
 }
 
 /**
@@ -1700,9 +1748,22 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
   const diagnostics: FieldDiagnostic[] = [];
 
   try {
-    if (!ocr || ocr.length === 0) return record;
+    // Field report 2026-09-16, 3rd AUTO-DIAGNOSTIC: an unresolved refills
+    // field with NO refillsMissReason at all gave an automatic error
+    // report nothing to go on ("missReason=none"). Every exit from this
+    // function that leaves refills undefined now sets one — these two
+    // earliest exits (no OCR input at all) get their own distinct
+    // 'ocr-empty' reason, since it's a meaningfully different situation
+    // from "OCR ran but found nothing refills-shaped".
+    if (!ocr || ocr.length === 0) {
+      record.refillsMissReason = 'ocr-empty';
+      return record;
+    }
     const words = ocr.filter((w) => w && typeof w.text === 'string' && w.text.trim().length > 0);
-    if (words.length === 0) return record;
+    if (words.length === 0) {
+      record.refillsMissReason = 'ocr-empty';
+      return record;
+    }
 
     let lines = groupLines(words);
 
@@ -1710,7 +1771,12 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // label (chrome always renders above the data pane — see branch
     // brief "OBSERVED LAYOUT").
     const firstLabelIdx = lines.findIndex((line) => findLabelAtLineStart(line) !== null);
-    if (firstLabelIdx === -1) return record; // nothing recognizable at all
+    if (firstLabelIdx === -1) {
+      // Nothing recognizable as ANY field label anywhere on the page —
+      // certainly nothing refills-shaped either.
+      record.refillsMissReason = 'no-refills-text-found';
+      return record;
+    }
     lines = lines.slice(firstLabelIdx);
 
     // Defensive secondary chrome filter, in case a chrome-ish line
