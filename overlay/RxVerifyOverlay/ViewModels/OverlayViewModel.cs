@@ -496,6 +496,20 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private readonly RxReportSubmitter _autoDiagnosticSubmitter;
 
+    /// <summary>
+    /// In-memory copy of the auto-diagnostic rate-limit state, lazily
+    /// populated by the FIRST MaybeSendAutoDiagnosticReportAsync call and
+    /// kept in sync thereafter (see that method) — added 2026-09-16 review
+    /// fix: WatchAsync's 250ms poll (MainWindow.xaml.cs) calls
+    /// RefreshAsync, and therefore MaybeSendAutoDiagnosticReportAsync, on
+    /// every tick, so hitting AutoDiagnosticStateStore.Load/Save
+    /// unconditionally turned into a synchronous file read+write on the
+    /// calling thread every ~250ms even in the common steady-state case
+    /// (refills box coloured, no debounce streak in progress). Null only
+    /// before the very first call this process has ever made.
+    /// </summary>
+    private AutoDiagnosticRateLimitState? _cachedRateLimitState;
+
     /// <summary>Trigger condition 1b (brief item 1) / document-classification signal — an OCR word suggesting this document is a refill-approval/renewal response, independent of whether it also happens to say "fill" anywhere.</summary>
     private static readonly Regex ApprovalWordRegex = new("approv|renew", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -509,15 +523,21 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// multi-word. Matching is tolerant of a single OCR-dropped letter
     /// (see IsFuzzyPhraseMatch) — "PROCESSING" read as "PROCESSNG" still
     /// counts as busy.
+    ///
+    /// Deliberately does NOT include bare "processing" or "loading" — a
+    /// real refills-bearing screen can legitimately contain either word
+    /// (a "processing" status column, a "loading" line item) for its
+    /// entire time on screen, which would stall that Rx's debounce streak
+    /// indefinitely (2026-09-16 review fix). Every phrase kept here names
+    /// the transient claim-processing DIALOG specifically, not a bare
+    /// status word.
     /// </summary>
     private static readonly string[] BusyScreenPhrases =
     {
         "please wait",
         "claim processes",
         "claim processing",
-        "processing claim",
-        "processing",
-        "loading"
+        "processing claim"
     };
 
     public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
@@ -807,30 +827,53 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
 
             var renderState = AutoDiagnosticPolicy.ClassifyRefillsBoxRenderState(refillsRow.Status, refillsRow.ReasonCode, refillsRow.ScreenRect.HasValue);
 
+            // Fast path (2026-09-16 review fix): WatchAsync's 250ms poll
+            // calls this on EVERY refresh, so the common steady-state case
+            // — refills box coloured, no debounce streak in progress —
+            // must never touch AutoDiagnosticStateStore's file I/O.
+            // _cachedRateLimitState is the in-memory copy of whatever's on
+            // disk; if it's already loaded and already shows no active
+            // streak, a coloured result can't possibly change anything
+            // (see AutoDiagnosticPolicy.ShouldReport: a coloured result
+            // only ever CLEARS a streak, it never creates a cap entry) —
+            // bail before even computing the OCR-word flags below. On the
+            // very first call this process makes, the cache is empty, so
+            // one Load happens to find out whether an old streak was left
+            // over from a previous run; every coloured call after that is
+            // then free until an uncoloured scan (or a streak that still
+            // needs clearing) touches the state again.
+            var isColoured = !AutoDiagnosticPolicy.IsUncoloured(renderState);
+            if (isColoured)
+            {
+                _cachedRateLimitState ??= AutoDiagnosticStateStore.Load();
+                if (_cachedRateLimitState.Streak is null) return;
+            }
+
             // NOTE: unlike gate 2 (hasFillWords/isApproval) below, a
             // colored (Green/Red) render state is deliberately NOT
-            // short-circuited here before the state-file I/O — the
-            // debounce streak (see AutoDiagnosticPolicy.ShouldReport)
-            // must be reset to null the moment this context's box is
-            // seen colored again, or a LATER uncoloured tick for the
-            // same Rx/window would wrongly resume the old stale streak
-            // instead of starting a fresh one.
+            // short-circuited any further here — once we know (above)
+            // there IS an active streak to clear, this must still go
+            // through ShouldReport/Save once so the streak actually gets
+            // reset, or a LATER uncoloured tick for the same Rx/window
+            // would wrongly resume the old stale streak instead of
+            // starting a fresh one.
             var isBusyScreen = IsBusyScreenText(ocrWords);
             var hasFillWords = ocrWords.Any(w => AutoDiagnosticPolicy.IsFillWord(w.Text));
             var isApproval = ocrWords.Any(w => ApprovalWordRegex.IsMatch(w.Text));
 
             var contextKey = AutoDiagnosticPolicy.GetContextKey(CurrentVerdictsRxIdentity, _lastRxWindowTitle, window.ScreenMode);
-            var rateLimitState = AutoDiagnosticStateStore.Load();
-            var (shouldReport, updatedState) = AutoDiagnosticPolicy.ShouldReport(
-                renderState, hasFillWords, isApproval, isBusyScreen, rateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity, contextKey);
-            AutoDiagnosticStateStore.Save(updatedState);
+            _cachedRateLimitState ??= AutoDiagnosticStateStore.Load();
+            var (shouldReport, updatedState, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
+                renderState, hasFillWords, isApproval, isBusyScreen, _cachedRateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity, contextKey);
+            _cachedRateLimitState = updatedState; // cheap, in-memory — keep regardless of whether disk needs writing
+            if (stateChanged) AutoDiagnosticStateStore.Save(updatedState);
 
             // One line, state names + reason code only — no OCR text, no
             // patient/prescriber/drug values — same "safe to always log"
             // posture as every other [TAG]-prefixed OcrLogger.LogTiming
             // line in this file (e.g. "[PRECHECK-GATE]" above).
             OcrLogger.LogTiming(
-                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} isBusyScreen={isBusyScreen} streak={updatedState.Streak?.ConsecutiveMisses ?? 0} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
+                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} isBusyScreen={isBusyScreen} streak={updatedState.Streak?.ConsecutiveMisses ?? 0} stateChanged={stateChanged} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
 
             if (!shouldReport) return;
 

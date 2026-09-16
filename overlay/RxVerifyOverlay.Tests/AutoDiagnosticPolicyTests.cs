@@ -95,7 +95,7 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void UncolouredWithFillWordsReports()
     {
-        var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -105,7 +105,7 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void ColouredNeverReportsEvenWithFillWords()
     {
-        var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.Green, hasFillWords: true, isApproval: true, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -115,7 +115,7 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void NoFillWordsAndNotApprovalNeverReports()
     {
-        var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: false, isApproval: false, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -125,7 +125,7 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void ApprovalAloneWithoutFillWordsStillReports()
     {
-        var (shouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.UnparseableQuantity, hasFillWords: false, isApproval: true, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -135,11 +135,11 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void SameRxTwiceInADayReportsOnlyOnce()
     {
-        var (firstShouldReport, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
+        var (firstShouldReport, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
-        var (secondShouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (secondShouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(2), rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -150,11 +150,11 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void SameRxAgainAfterTwentyFourHoursReportsAgain()
     {
-        var (_, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
+        var (_, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
-        var (shouldReportNextDay, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReportNextDay, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(25), rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -164,7 +164,7 @@ public class AutoDiagnosticPolicyTests
     [Fact]
     public void DifferentRxOnTheSameDayIsNotSuppressedByTheFirstsCap()
     {
-        var (_, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
+        var (_, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
 
@@ -179,7 +179,7 @@ public class AutoDiagnosticPolicyTests
             FirstMissUtc = Now.AddMinutes(5).AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
         };
 
-        var (shouldReportOther, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReportOther, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(5), rxNumber: "RX-2002", contextKey: "RX-2002");
 
@@ -204,7 +204,7 @@ public class AutoDiagnosticPolicyTests
                 FirstMissUtc = now.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
             };
 
-            var (shouldReport, updated) = AutoDiagnosticPolicy.ShouldReport(
+            var (shouldReport, updated, _) = AutoDiagnosticPolicy.ShouldReport(
                 RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
                 rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber);
             state = updated;
@@ -220,7 +220,7 @@ public class AutoDiagnosticPolicyTests
             FirstMissUtc = Now.AddMinutes(6).AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
         };
 
-        var (sixthShouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (sixthShouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: state, nowUtc: Now.AddMinutes(6), rxNumber: "RX-5", contextKey: "RX-5");
 
@@ -243,7 +243,7 @@ public class AutoDiagnosticPolicyTests
                 FirstMissUtc = now.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
             };
 
-            var (_, updated) = AutoDiagnosticPolicy.ShouldReport(
+            var (_, updated, _) = AutoDiagnosticPolicy.ShouldReport(
                 RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
                 rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber);
             state = updated;
@@ -257,7 +257,7 @@ public class AutoDiagnosticPolicyTests
             FirstMissUtc = later.AddSeconds(-AutoDiagnosticPolicy.MinPersistenceSeconds)
         };
 
-        var (shouldReportLater, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReportLater, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: state, nowUtc: later, rxNumber: "RX-99", contextKey: "RX-99");
 
@@ -274,11 +274,11 @@ public class AutoDiagnosticPolicyTests
         // a real Rx number would be.
         const string fallbackContext = "Edit Rx - (no Rx number)|EditRx";
 
-        var (first, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
+        var (first, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: SeedSatisfiedStreak(fallbackContext, Now), nowUtc: Now, rxNumber: null, contextKey: fallbackContext);
 
-        var (second, stateAfterSecond) = AutoDiagnosticPolicy.ShouldReport(
+        var (second, stateAfterSecond, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
             rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(1), rxNumber: null, contextKey: fallbackContext);
 

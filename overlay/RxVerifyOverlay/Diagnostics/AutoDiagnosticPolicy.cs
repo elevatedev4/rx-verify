@@ -196,8 +196,16 @@ public static class AutoDiagnosticPolicy
     ///
     /// Gate 5 — per-PC hourly cap: at most MaxReportsPerHour reports
     /// total (across every Rx) in the last rolling hour.
+    ///
+    /// `StateChanged` (2026-09-16 review fix) is true only when
+    /// UpdatedState actually differs from `rateLimitState` (pruning
+    /// removed something, the streak moved, or a report was recorded) —
+    /// the caller should skip AutoDiagnosticStateStore.Save entirely when
+    /// it's false, since the common steady-state case (refills box
+    /// coloured, no streak in progress) leaves nothing to persist and
+    /// otherwise forces a disk write on every single scan.
     /// </summary>
-    public static (bool ShouldReport, AutoDiagnosticRateLimitState UpdatedState) ShouldReport(
+    public static (bool ShouldReport, AutoDiagnosticRateLimitState UpdatedState, bool StateChanged) ShouldReport(
         RefillsBoxRenderState refillsState,
         bool hasFillWords,
         bool isApproval,
@@ -209,17 +217,20 @@ public static class AutoDiagnosticPolicy
     {
         var state = Clone(rateLimitState);
 
+        (bool, AutoDiagnosticRateLimitState, bool) Result(bool shouldReportNow) =>
+            (shouldReportNow, state, !StatesEqual(rateLimitState, state));
+
         // Prune expired bookkeeping FIRST, unconditionally — the caller
-        // persists UpdatedState regardless of the boolean outcome, so a
-        // long run of "nothing to report" ticks still keeps the file from
-        // growing forever.
+        // persists UpdatedState (when StateChanged) regardless of the
+        // boolean outcome, so a long run of "nothing to report" ticks
+        // still keeps the file from growing forever.
         state.RecentReportTimestampsUtc = state.RecentReportTimestampsUtc
             .Where(t => nowUtc - t < TimeSpan.FromHours(1))
             .ToList();
 
         // Busy-screen scan: no information either way — leave the streak
         // and every cap completely untouched (see class doc above).
-        if (isBusyScreen) return (false, state);
+        if (isBusyScreen) return Result(false);
 
         var isUncoloured = IsUncoloured(refillsState);
 
@@ -236,27 +247,60 @@ public static class AutoDiagnosticPolicy
             state.Streak.ConsecutiveMisses++;
         }
 
-        if (!isUncoloured) return (false, state);
-        if (!hasFillWords && !isApproval) return (false, state);
+        if (!isUncoloured) return Result(false);
+        if (!hasFillWords && !isApproval) return Result(false);
 
         var persistedSeconds = (nowUtc - state.Streak!.FirstMissUtc).TotalSeconds;
         if (state.Streak.ConsecutiveMisses < MinConsecutiveMisses || persistedSeconds < MinPersistenceSeconds)
         {
-            return (false, state);
+            return Result(false);
         }
 
         var dailyCapKey = string.IsNullOrEmpty(rxNumber) ? contextKey : rxNumber;
         if (state.LastReportedUtcByRx.TryGetValue(dailyCapKey, out var lastForRx) &&
             nowUtc - lastForRx < TimeSpan.FromDays(1))
         {
-            return (false, state);
+            return Result(false);
         }
 
-        if (state.RecentReportTimestampsUtc.Count >= MaxReportsPerHour) return (false, state);
+        if (state.RecentReportTimestampsUtc.Count >= MaxReportsPerHour) return Result(false);
 
         state.RecentReportTimestampsUtc.Add(nowUtc);
         state.LastReportedUtcByRx[dailyCapKey] = nowUtc;
-        return (true, state);
+        return Result(true);
+    }
+
+    /// <summary>
+    /// Structural equality for the StateChanged dirty-check above — a
+    /// null `a` (no persisted/cached state yet) compares as a fresh empty
+    /// state, so "nothing persisted, nothing to persist" correctly comes
+    /// back equal.
+    /// </summary>
+    private static bool StatesEqual(AutoDiagnosticRateLimitState? a, AutoDiagnosticRateLimitState b)
+    {
+        var left = a ?? new AutoDiagnosticRateLimitState();
+
+        if (left.RecentReportTimestampsUtc.Count != b.RecentReportTimestampsUtc.Count) return false;
+        for (var i = 0; i < left.RecentReportTimestampsUtc.Count; i++)
+        {
+            if (left.RecentReportTimestampsUtc[i] != b.RecentReportTimestampsUtc[i]) return false;
+        }
+
+        if (left.LastReportedUtcByRx.Count != b.LastReportedUtcByRx.Count) return false;
+        foreach (var (key, value) in left.LastReportedUtcByRx)
+        {
+            if (!b.LastReportedUtcByRx.TryGetValue(key, out var otherValue) || otherValue != value) return false;
+        }
+
+        if ((left.Streak is null) != (b.Streak is null)) return false;
+        if (left.Streak is not null && b.Streak is not null)
+        {
+            if (!string.Equals(left.Streak.ContextKey, b.Streak.ContextKey, StringComparison.Ordinal)) return false;
+            if (left.Streak.ConsecutiveMisses != b.Streak.ConsecutiveMisses) return false;
+            if (left.Streak.FirstMissUtc != b.Streak.FirstMissUtc) return false;
+        }
+
+        return true;
     }
 
     /// <summary>

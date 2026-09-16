@@ -29,15 +29,15 @@ public class AutoDiagnosticPolicyDebounceTests
         const string contextKey = "RX-2001";
         AutoDiagnosticRateLimitState? state = null;
 
-        var (firstReport, stateAfterFirst) = AutoDiagnosticPolicy.ShouldReport(
+        var (firstReport, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, state, Now, contextKey, contextKey);
         Assert.False(firstReport);
 
-        var (secondReport, stateAfterSecond) = AutoDiagnosticPolicy.ShouldReport(
+        var (secondReport, stateAfterSecond, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, stateAfterFirst, Now.AddSeconds(10), contextKey, contextKey);
         Assert.False(secondReport); // only 2 consecutive misses so far
 
-        var (thirdReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (thirdReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, stateAfterSecond, Now.AddSeconds(12), contextKey, contextKey);
         Assert.True(thirdReport); // 3rd consecutive miss, already 12s since the first
     }
@@ -50,26 +50,26 @@ public class AutoDiagnosticPolicyDebounceTests
         const string contextKey = "RX-2002";
         AutoDiagnosticRateLimitState? state = null;
 
-        var (r1, s1) = AutoDiagnosticPolicy.ShouldReport(
+        var (r1, s1, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, state, Now, contextKey, contextKey);
         Assert.False(r1);
 
-        var (r2, s2) = AutoDiagnosticPolicy.ShouldReport(
+        var (r2, s2, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, s1, Now.AddSeconds(1), contextKey, contextKey);
         Assert.False(r2);
 
         // 3rd consecutive miss — count threshold met, but only 2s have
         // passed since the first miss, so the persistence gate still
         // blocks it.
-        var (r3, s3) = AutoDiagnosticPolicy.ShouldReport(
+        var (r3, s3, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, s2, Now.AddSeconds(2), contextKey, contextKey);
         Assert.False(r3);
 
-        var (r4, s4) = AutoDiagnosticPolicy.ShouldReport(
+        var (r4, s4, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, s3, Now.AddSeconds(4.9), contextKey, contextKey);
         Assert.False(r4); // still under 5s
 
-        var (r5, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (r5, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, s4, Now.AddSeconds(5), contextKey, contextKey);
         Assert.True(r5); // exactly 5s since the first miss, and well past 3 consecutive misses
     }
@@ -85,7 +85,7 @@ public class AutoDiagnosticPolicyDebounceTests
             Streak = new AutoDiagnosticStreakState { ContextKey = contextKey, ConsecutiveMisses = 3, FirstMissUtc = Now.AddSeconds(-10) }
         };
 
-        var (shouldReportOnGreen, afterGreen) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReportOnGreen, afterGreen, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.Green, true, false, false, seeded, Now, contextKey, contextKey);
 
         Assert.False(shouldReportOnGreen);
@@ -95,10 +95,48 @@ public class AutoDiagnosticPolicyDebounceTests
         // brand-new 1-miss streak — it must NOT immediately report just
         // because the old (now-cleared) streak had already satisfied the
         // debounce thresholds.
-        var (shouldReportAfterReset, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReportAfterReset, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, afterGreen, Now.AddSeconds(1), contextKey, contextKey);
 
         Assert.False(shouldReportAfterReset);
+    }
+
+    // ---- StateChanged dirty flag (2026-09-16 review fix — the caller
+    // must be able to skip AutoDiagnosticStateStore.Save entirely for the
+    // common steady-state "coloured, nothing persisted" case, since
+    // WatchAsync's 250ms poll calls this on every single refresh) ----
+
+    [Fact]
+    public void ColouredResultWithNoActiveStreakReportsNoStateChange()
+    {
+        const string contextKey = "RX-5001";
+
+        // No persisted state at all (the common steady-state case — a
+        // pharmacist working through a stack of Rxs that all verify
+        // clean, nothing ever left an in-progress streak behind).
+        var (shouldReport, updated, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
+            RefillsBoxRenderState.Green, true, false, false, null, Now, contextKey, contextKey);
+
+        Assert.False(shouldReport);
+        Assert.False(stateChanged); // nothing to persist — the caller should skip Save() entirely
+        Assert.Null(updated.Streak);
+    }
+
+    [Fact]
+    public void ColouredResultWithActiveStreakClearsItAndReportsStateChanged()
+    {
+        const string contextKey = "RX-5002";
+        var seeded = new AutoDiagnosticRateLimitState
+        {
+            Streak = new AutoDiagnosticStreakState { ContextKey = contextKey, ConsecutiveMisses = 2, FirstMissUtc = Now.AddSeconds(-3) }
+        };
+
+        var (shouldReport, updated, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
+            RefillsBoxRenderState.Green, true, false, false, seeded, Now, contextKey, contextKey);
+
+        Assert.False(shouldReport);
+        Assert.True(stateChanged); // the streak WAS cleared — the caller must Save() this once
+        Assert.Null(updated.Streak);
     }
 
     // ---- (d) busy-screen scan is pure no-information ----
@@ -113,7 +151,7 @@ public class AutoDiagnosticPolicyDebounceTests
             Streak = new AutoDiagnosticStreakState { ContextKey = contextKey, ConsecutiveMisses = 2, FirstMissUtc = firstMissUtc }
         };
 
-        var (shouldReport, updated) = AutoDiagnosticPolicy.ShouldReport(
+        var (shouldReport, updated, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, true, seeded, Now, contextKey, contextKey);
 
         Assert.False(shouldReport);
@@ -147,16 +185,16 @@ public class AutoDiagnosticPolicyDebounceTests
         var t0 = Now;
         AutoDiagnosticRateLimitState? state = null;
 
-        (_, state) = AutoDiagnosticPolicy.ShouldReport(
+        (_, state, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, state, t0, null, fallbackContext);
-        (_, state) = AutoDiagnosticPolicy.ShouldReport(
+        (_, state, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, state, t0.AddSeconds(3), null, fallbackContext);
 
-        var (thirdShouldReport, stateAfterThird) = AutoDiagnosticPolicy.ShouldReport(
+        var (thirdShouldReport, stateAfterThird, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, state, t0.AddSeconds(6), null, fallbackContext);
         Assert.True(thirdShouldReport);
 
-        var (fourthShouldReport, _) = AutoDiagnosticPolicy.ShouldReport(
+        var (fourthShouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, true, false, false, stateAfterThird, t0.AddMinutes(1), null, fallbackContext);
         Assert.False(fourthShouldReport); // same fallback context, same rolling day -> suppressed by the daily cap
     }
