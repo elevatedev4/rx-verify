@@ -6,11 +6,14 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using RxVerifyOverlay.Diagnostics;
 using RxVerifyOverlay.Engine;
+using RxVerifyOverlay.Integrated;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Ocr;
+using RxVerifyOverlay.Reporting;
 using RxVerifyOverlay.Uia;
 
 namespace RxVerifyOverlay.ViewModels;
@@ -374,6 +377,18 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     public IReadOnlyList<string>? RefillsOcrRegionWords { get; private set; }
 
+    /// <summary>
+    /// Diagnostic-only (auto-diagnostic feature, 2026-09-15 — Will reports
+    /// refills sometimes shows NO box color): the WHY counterpart to
+    /// RefillsOcrRegionWords' WHAT — see Models/EngineModels.cs
+    /// VerifyResult.RefillsMissReason's doc. Same OCR-path-only / Uia-path-
+    /// null gating as RefillsOcrRegionWords above; set from
+    /// RefreshFromOcrAsync's engine result. No UI binding — carried
+    /// through to Diagnostics/AutoDiagnosticPolicy and the auto-report
+    /// note only.
+    /// </summary>
+    public string? RefillsMissReason { get; private set; }
+
     private string _statusMessage = "Not attached to PioneerRx yet.";
     public string StatusMessage
     {
@@ -472,12 +487,28 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
     /// </summary>
     private RefreshTiming? _lastTiming;
 
+    /// <summary>
+    /// Auto-diagnostic feature (2026-09-15) — reuses the SAME HQ report
+    /// transport a pharmacist's manual "Report error…" already uses (see
+    /// MaybeSendAutoDiagnosticReportAsync). One instance for this
+    /// ViewModel's lifetime, same "one long-lived instance" posture
+    /// RxReportSubmitter's own HttpClient field doc recommends.
+    /// </summary>
+    private readonly RxReportSubmitter _autoDiagnosticSubmitter;
+
+    /// <summary>Trigger condition 1a (brief item 1) — any OCR word shaped like "refill"/"refills"/"fills"/"fill", case-insensitive. Same regex shape as src/ocr/parseEscriptOcr.ts's own isFillShaped (normalize(text).includes('fill')), just applied client-side to the raw word list this ViewModel already has, since the engine's own PHI-filtered region-words diagnostic isn't always populated (only when refills is UNRESOLVED — see refillsMissReason's doc; a wrong ENTERED value alone can also land here).</summary>
+    private static readonly Regex FillWordRegex = new("refill|fills?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Trigger condition 1b (brief item 1) / document-classification signal — an OCR word suggesting this document is a refill-approval/renewal response, independent of whether it also happens to say "fill" anywhere.</summary>
+    private static readonly Regex ApprovalWordRegex = new("approv|renew", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     public OverlayViewModel(EngineClient engineClient, OverlaySettings settings, IOverlayVisibilityController? overlayVisibilityController = null, OcrFieldReader? ocrFieldReader = null)
     {
         _engineClient = engineClient;
         _settings = settings;
         _overlayVisibilityController = overlayVisibilityController;
         _ocrFieldReader = ocrFieldReader ?? new OcrFieldReader();
+        _autoDiagnosticSubmitter = new RxReportSubmitter(settings);
 
         // Categories are created once, in fixed display order, and their
         // Rows are cleared/repopulated on every refresh below — never
@@ -703,6 +734,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         // the (not-yet-run) drug lookup, so fastResult already carries
         // this diagnostic's final value for this refresh.
         RefillsOcrRegionWords = fastResult.RefillsOcrRegionWords;
+        RefillsMissReason = fastResult.RefillsMissReason;
 
         if (generation != _refreshGeneration) return; // superseded by a newer refresh while we were awaiting
 
@@ -720,12 +752,106 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         StatusMessage = $"Checked {DateTime.Now:h:mm:ss tt} ({timing.Phase1TotalMs}ms). Drug lookup running…";
         OcrLogger.LogTiming(RxLogFormatter.FormatTimingLine(timing, CurrentCaptureExclusionActive));
 
+        // Auto-diagnostic (2026-09-15, Will reports refills sometimes
+        // shows NO box color — see AutoDiagnosticPolicy's doc): refills
+        // never depends on the drug lookup either (same reasoning as
+        // RefillsOcrRegionWords above), so this verification pass is
+        // already final for refills right here. NOT awaited — best-effort,
+        // fire-and-forget, same "never block the pharmacist's own refresh"
+        // posture as RefreshDrugFieldAsync below.
+        _ = MaybeSendAutoDiagnosticReportAsync(window, ocrWords);
+
         // Phase 2: NOT awaited — runs in the background so this method
         // (and whatever caller triggered it, e.g. the Refresh button
         // click handler) returns immediately. See RefreshDrugFieldAsync
         // for the staleness guard against a newer refresh superseding
         // this one before it resolves.
         _ = RefreshDrugFieldAsync(ocrWords, entered, generation, timing);
+    }
+
+    /// <summary>
+    /// Auto-diagnostic feature (2026-09-15 field report — Will: "the
+    /// refills box now shows NO colour, neither red nor green"). Will
+    /// doesn't like pressing buttons, so this posts the SAME HQ report a
+    /// pharmacist's manual "Report error…" right-click already posts
+    /// (Reporting/RxReportSubmitter.cs -&gt;
+    /// https://manager-hq.vercel.app/api/rxverify-reports), automatically,
+    /// at most once per Rx per day and MaxReportsPerHour times per hour on
+    /// this PC (see AutoDiagnosticPolicy.ShouldReport's doc) — never
+    /// interrupts the pharmacist, never throws into the caller.
+    /// </summary>
+    private async Task MaybeSendAutoDiagnosticReportAsync(PioneerRxWindow window, IReadOnlyList<OcrWord> ocrWords)
+    {
+        try
+        {
+            var refillsRow = Categories.SelectMany(c => c.Rows).FirstOrDefault(r => r.FieldKey == "refills");
+            if (refillsRow is null) return; // defensive: should always exist (FieldOrder.Fields is unconditional for refills) — never crash the refresh if it somehow doesn't
+
+            var renderState = AutoDiagnosticPolicy.ClassifyRefillsBoxRenderState(refillsRow.Status, refillsRow.ReasonCode, refillsRow.ScreenRect.HasValue);
+            if (!AutoDiagnosticPolicy.IsUncoloured(renderState)) return; // working correctly (green/red) — nothing to diagnose, skip the state-file I/O below entirely
+
+            var hasFillWords = ocrWords.Any(w => FillWordRegex.IsMatch(w.Text));
+            var isApproval = ocrWords.Any(w => ApprovalWordRegex.IsMatch(w.Text));
+            if (!hasFillWords && !isApproval) return; // doesn't look like a prescription that should have refills at all — not a bug
+
+            var rateLimitState = AutoDiagnosticStateStore.Load();
+            var (shouldReport, updatedState) = AutoDiagnosticPolicy.ShouldReport(
+                renderState, hasFillWords, isApproval, rateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity);
+            AutoDiagnosticStateStore.Save(updatedState);
+
+            // One line, state names + reason code only — no OCR text, no
+            // patient/prescriber/drug values — same "safe to always log"
+            // posture as every other [TAG]-prefixed OcrLogger.LogTiming
+            // line in this file (e.g. "[PRECHECK-GATE]" above).
+            OcrLogger.LogTiming(
+                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
+
+            if (!shouldReport) return;
+
+            var documentClassification = AutoDiagnosticPolicy.ClassifyDocument(isApproval, window.ScreenMode);
+            var note = AutoDiagnosticNoteBuilder.Build(
+                renderState,
+                refillsRow.SourceValue,
+                RefillsMissReason,
+                window.ScreenMode,
+                documentClassification,
+                AppDiagnostics.GetCommitSha(),
+                RefillsOcrRegionWords);
+
+            // "(auto)" for Source per the feature spec — this is an
+            // automatic report, not a pharmacist reading and transcribing
+            // the real source value, so the real (already non-PHI, but
+            // still field-specific) source text is deliberately replaced
+            // with a fixed marker rather than reused. Entered stays the
+            // real entered value ("a number is fine" — refills is never a
+            // patient-identity field, see VerdictFieldInfo.IsPatientField).
+            var fieldInfo = new VerdictFieldInfo(
+                refillsRow.FieldKey,
+                refillsRow.DisplayName,
+                refillsRow.Status,
+                "(auto)",
+                refillsRow.EnteredValue,
+                refillsRow.Explanation,
+                refillsRow.ReasonCode,
+                RefillsOcrRegionWords: RefillsOcrRegionWords);
+
+            var payload = RxReportBuilder.Build(
+                fieldInfo,
+                note,
+                _engineClient.EngineBuildSha,
+                AppDiagnostics.GetCommitSha(),
+                DateTime.UtcNow,
+                sourceInputMode: "ocr");
+
+            await _autoDiagnosticSubmitter.SubmitOrQueueAsync(payload).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort only, same posture as every other diagnostic/
+            // report path in this app (PendingReportsQueue, RxReportSubmitter,
+            // AutoDiagnosticStateStore) — a bug here must never break the
+            // pharmacist's own verification refresh.
+        }
     }
 
     /// <summary>UIA source path — reads the Escript tab's structured UIA tree directly via FieldReader.ReadSource() (the original "Verify" behavior). No OCR/screen capture involved.</summary>
@@ -755,6 +881,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             // Not applicable on this (Uia) path — see RefillsOcrRegionWords'
             // own doc, mirroring RefillsTotalFillsLabelSeen's OCR-path reset.
             RefillsOcrRegionWords = null;
+            RefillsMissReason = null;
         }
         catch (Exception ex)
         {
@@ -1080,6 +1207,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         RefillsTotalFillsLabelSeen = null; // not applicable — no source was read this pass, or the pharmacist is on the OCR path (see property doc)
         RefillsTotalFillsLabelPrefix = null;
         RefillsOcrRegionWords = null; // not applicable — no source was read this pass, or the pharmacist is on the Uia path (see property doc)
+        RefillsMissReason = null; // not applicable — no source was read this pass, or the pharmacist is on the Uia path (see property doc)
 
         // ADDENDUM item 7: no verdicts currently displayed for ANY Rx —
         // see CurrentVerdictsRxIdentity's doc. _pendingRxIdentity too, so

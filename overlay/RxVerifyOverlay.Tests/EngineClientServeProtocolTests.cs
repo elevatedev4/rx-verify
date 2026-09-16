@@ -70,6 +70,34 @@ public class EngineClientServeProtocolTests
         Assert.Null(result.RefillsOcrRegionWords);
     }
 
+    // Auto-diagnostic feature (2026-09-15, Will reports refills sometimes
+    // shows NO box color): VerifyResult.RefillsMissReason (Models/
+    // EngineModels.cs) must pass through ParseResponseLine unchanged too
+    // — same mechanical passthrough as RefillsOcrRegionWords above.
+    [Fact]
+    public void RefillsMissReasonPassesThroughWhenPresent()
+    {
+        const string line = """
+            {"id":"1","verdicts":[{"field":"refills","status":"yellow","reasonCode":"not_provided","explanation":"Source e-prescription did not provide a refill count to compare.","sourceValue":null,"enteredValue":"3"}],"summary":{"green":0,"yellow":1,"red":0,"total":1},"refillsMissReason":"no-value-paired"}
+            """;
+
+        var result = EngineClient.ParseResponseLine(line, "1");
+
+        Assert.Equal("no-value-paired", result.RefillsMissReason);
+    }
+
+    [Fact]
+    public void RefillsMissReasonIsNullWhenAbsent()
+    {
+        const string line = """
+            {"id":"1","verdicts":[{"field":"patientName","status":"green","reasonCode":"exact_match","explanation":"Name matches.","sourceValue":"John Smith","enteredValue":"John Smith"}],"summary":{"green":1,"yellow":0,"red":0,"total":1}}
+            """;
+
+        var result = EngineClient.ParseResponseLine(line, "1");
+
+        Assert.Null(result.RefillsMissReason);
+    }
+
     [Fact]
     public void ErrorResponseIsPrefixedAsAnEngineError()
     {

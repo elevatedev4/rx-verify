@@ -133,6 +133,25 @@ export interface PrescriptionRecord {
    */
   refillsOcrRegionWords?: string[];
   /**
+   * SOURCE-side, DIAGNOSTIC ONLY, OCR path only: set ONLY when `refills`
+   * above ends up undefined — WHY it ended up undefined, independent of
+   * refillsOcrRegionWords above (which is WHAT OCR saw nearby). One of:
+   *   - 'no-value-paired' — no label match ever produced a raw refills
+   *     value at all (the ordinary "nothing found" case).
+   *   - 'validation-failed:not-numeric' — a raw value WAS paired but
+   *     parseRefills couldn't read a leading integer out of it.
+   *   - 'internal-error:label-anywhere-anchor' — findTotalFillsLabelAnywhere
+   *     (src/ocr/parseEscriptOcr.ts) threw before it could resolve
+   *     anything; see that call site's local try/catch doc (2026-09-15
+   *     hardening fix).
+   * Never set on the entered side, never set when refills DID resolve.
+   * Threaded through to the overlay (Integrated/VerdictFieldInfo.cs)
+   * alongside refillsOcrRegionWords so an automatic diagnostic report can
+   * self-describe why the OCR extraction missed, not just what nearby
+   * text looked like.
+   */
+  refillsMissReason?: string;
+  /**
    * SOURCE-side only: true when the e-script's MedicationPrescribed >
    * Substitutions indicator states the prescriber does NOT allow
    * substitution (NCPDP SCRIPT code 1, "Substitution Not Allowed by
@@ -179,4 +198,11 @@ export interface VerifyResult {
    * refillsTotalFillsLabelSeen already get there.
    */
   refillsOcrRegionWords?: string[];
+  /**
+   * Diagnostic-only passthrough of PrescriptionRecord.refillsMissReason
+   * (see that field's doc) — attached by src/cli.ts's runVerify, same
+   * "only present when the OCR path was used AND refills came back
+   * unresolved" gating as refillsOcrRegionWords above.
+   */
+  refillsMissReason?: string;
 }

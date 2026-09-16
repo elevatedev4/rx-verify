@@ -234,6 +234,20 @@ public sealed class VerifyResult
     /// RefillsTotalFillsLabelSeen/Prefix below.
     /// </summary>
     public List<string>? RefillsOcrRegionWords { get; set; }
+
+    /// <summary>
+    /// Diagnostic-only (auto-diagnostic feature, 2026-09-15 — Will reports
+    /// refills sometimes shows NO box color, neither red nor green):
+    /// mirrors src/types.ts VerifyResult.refillsMissReason exactly — WHY
+    /// the OCR extraction left refills unresolved (e.g. "no-value-paired",
+    /// "validation-failed:not-numeric", "internal-error:label-anywhere-anchor"),
+    /// the counterpart to RefillsOcrRegionWords' WHAT-OCR-saw. Only present
+    /// when the OCR path was used AND refills came back unresolved; null
+    /// otherwise. Threaded through unchanged to OverlayViewModel -&gt;
+    /// VerdictFieldInfo -&gt; Diagnostics/AutoDiagnosticPolicy, same
+    /// mechanical passthrough pattern as RefillsOcrRegionWords above.
+    /// </summary>
+    public string? RefillsMissReason { get; set; }
 }
 
 /// <summary>

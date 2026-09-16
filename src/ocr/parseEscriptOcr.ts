@@ -1612,6 +1612,14 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // raw.refills) and would otherwise look phrase-less at the final
     // resolution site.
     let refillsPhraseOverride: boolean | undefined;
+    // Set only when findTotalFillsLabelAnywhere's local try/catch (see
+    // that call site's doc, 2026-09-15 hardening fix) actually catches a
+    // throw -- the one miss reason that can't be inferred later purely
+    // from raw.refills' final state, since every other miss reason is
+    // already fully determined by whether raw.refills ended up set and
+    // whether parseRefills could read it. Takes priority over the default
+    // 'no-value-paired' reason at the final assembly site below.
+    let refillsMissReasonOverride: string | undefined;
     const leftoverLines: OcrWord[][] = [];
     // How each raw[key] was actually resolved — populated at every
     // assignment site (Pass A inline, Pass B block-column) and consumed
@@ -2211,6 +2219,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
           resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
         }
       } catch {
+        refillsMissReasonOverride = 'internal-error:label-anywhere-anchor';
         diagnostics.push({ field: 'refills', status: 'miss', reason: 'internal-error:label-anywhere-anchor' });
       }
     }
@@ -2464,10 +2473,17 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         if (isTotalFills) record.refillsFromTotalFills = true;
         pushResolved('refills', 'refills', refills);
       } else {
+        record.refillsMissReason = 'validation-failed:not-numeric';
         pushMiss('refills', 'refills', 'validation-failed:not-numeric');
       }
     } else {
-      pushMiss('refills', 'refills', 'no-value-paired');
+      // refillsMissReasonOverride wins when set (the label-anywhere
+      // anchor threw before it could even try to pair a value) — every
+      // other route to "no raw.refills at all" is the plain, ordinary
+      // "nothing found" case. See refillsMissReasonOverride's doc.
+      const reason = refillsMissReasonOverride ?? 'no-value-paired';
+      record.refillsMissReason = reason;
+      pushMiss('refills', 'refills', reason);
     }
 
     const prescriber: Prescriber = {};

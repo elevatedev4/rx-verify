@@ -450,6 +450,9 @@ public sealed class EngineClient : IDisposable
 
         /// <summary>See Models/EngineModels.cs VerifyResult.RefillsOcrRegionWords' doc — mirrored here purely so ParseResponseLine below can pass it through unchanged.</summary>
         public List<string>? RefillsOcrRegionWords { get; set; }
+
+        /// <summary>See Models/EngineModels.cs VerifyResult.RefillsMissReason's doc — mirrored here purely so ParseResponseLine below can pass it through unchanged, same mechanical passthrough as RefillsOcrRegionWords above.</summary>
+        public string? RefillsMissReason { get; set; }
     }
 
     /// <summary>
@@ -555,7 +558,8 @@ public sealed class EngineClient : IDisposable
         {
             Verdicts = envelope.Verdicts ?? new List<FieldVerdict>(),
             Summary = envelope.Summary ?? new VerifySummary(),
-            RefillsOcrRegionWords = envelope.RefillsOcrRegionWords
+            RefillsOcrRegionWords = envelope.RefillsOcrRegionWords,
+            RefillsMissReason = envelope.RefillsMissReason
         };
     }
 

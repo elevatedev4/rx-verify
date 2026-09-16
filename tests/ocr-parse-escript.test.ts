@@ -1618,6 +1618,53 @@ describe('parseEscriptOcr', () => {
     });
   });
 
+  // Auto-diagnostic feature (2026-09-15): PrescriptionRecord.refillsMissReason
+  // is the WHY counterpart to refillsOcrRegionWords' WHAT — set in every
+  // case refills ends up undefined, not just the label-anywhere-anchor
+  // internal-error path, so the overlay's automatic HQ report can say more
+  // than "(not provided)".
+  describe('refillsMissReason diagnostic (refills unresolved — proves WHY, not just WHAT)', () => {
+    it("is 'no-value-paired' when no label ever produced a raw refills value at all", () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const noiseRow = row(300, ['Random', 'unrelated', 'text']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, noiseRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.refillsMissReason).toBe('no-value-paired');
+    });
+
+    it("is 'validation-failed:not-numeric' when a refills value WAS paired but doesn't start with a number", () => {
+      const refillsRow = row(320, ['Refills:', 'Unclear']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.refillsMissReason).toBe('validation-failed:not-numeric');
+    });
+
+    it('is undefined (never set) when refills DID resolve — no diagnostic noise on a normal successful parse', () => {
+      const refillsRow = row(320, ['Refills:', '4']);
+      const ocr = flatten([TOOLBAR_ROW, row(100, ['Patient']), refillsRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBe('4');
+      expect(record.refillsMissReason).toBeUndefined();
+    });
+
+    it('is set alongside refillsOcrRegionWords on the same unresolved-refills document (both diagnostics coexist)', () => {
+      const patientRow = row(100, ['Patient', 'Jordan', 'Testcase']);
+      const medicationRow = row(200, ['Medication', 'Fakedrugin', '10', 'Mg', 'Tablet']);
+      const noiseRow = row(300, ['Fulfillment', 'status:', 'pending']);
+      const ocr = flatten([TOOLBAR_ROW, patientRow, medicationRow, noiseRow]);
+      const record = parseEscriptOcr(ocr);
+
+      expect(record.refills).toBeUndefined();
+      expect(record.refillsMissReason).toBe('no-value-paired');
+      expect(record.refillsOcrRegionWords).toBeDefined();
+    });
+  });
+
   // Live report (2026-08-17): pharmacist flagged a wrong YELLOW — engine
   // showed source refills "(not provided)", entered "2", when the page
   // actually reads "Total Fills: 3 (including this fill)" on a
