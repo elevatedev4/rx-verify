@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -54,9 +56,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private static readonly TimeSpan SaveVerifyTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
+    private const uint WM_CLOSE = 0x0010;
+
     private UIA3Automation? _automation;
     private AutomationElement? _mainWindow;
     private int _pioneerProcessId;
+
+    /// <summary>
+    /// The report-preview window's own AutomationElement/native handle,
+    /// captured the moment IsPreviewReady finds it (see FindPreviewWindow)
+    /// — review fix (safety blocker 2): ClosePreview must target THIS
+    /// specific window, never "whatever is currently foreground", so a
+    /// focus change after Save As closes can never make it close
+    /// Pioneer's main window instead. Cleared back to null/Zero at the
+    /// end of ClosePreview.
+    /// </summary>
+    private AutomationElement? _previewWindowElement;
+    private IntPtr _previewWindowHandle = IntPtr.Zero;
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
@@ -66,6 +82,9 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     private UIA3Automation GetOrCreateAutomation() => _automation ??= new UIA3Automation();
 
@@ -156,13 +175,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Exporting to PDF...");
-            if (!InvokeExportButton("Export to PDF", "PDF", log)) return ReportRunResult.Failed("Could not find the PDF export button", stopwatch.Elapsed);
+            if (_previewWindowElement is null) return ReportRunResult.Failed("Report preview window was not found", stopwatch.Elapsed);
+            if (!InvokeExportButton(_previewWindowElement, "Export to PDF", "PDF", log)) return ReportRunResult.Failed("Could not find the PDF export button", stopwatch.Elapsed);
 
             var saved = await SaveAsAndVerify(item.OutputFilePath, log, ct).ConfigureAwait(false);
             if (!saved) return ReportRunResult.Failed("Save As did not produce the expected file", stopwatch.Elapsed);
 
             log("Closing report preview...");
-            ClosePreview();
+            ClosePreview(log);
 
             return ReportRunResult.Saved(item.OutputFilePath, stopwatch.Elapsed);
         }
@@ -212,7 +232,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Exporting results to Excel...");
-            if (!InvokeExportButton("Export search results to Excel", "Excel", log))
+            if (!InvokeExportButton(_mainWindow!, "Export search results to Excel", "Excel", log))
                 return ReportRunResult.Failed("Could not find the Excel export command", stopwatch.Elapsed);
 
             var saved = await SaveAsAndVerify(item.OutputFilePath, log, ct).ConfigureAwait(false);
@@ -279,10 +299,10 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     {
         try
         {
-            var handle = window.FrameworkAutomationElement.NativeWindowHandle;
-            if (handle is { } h && h != IntPtr.Zero)
+            var handle = SafeNativeHandle(window);
+            if (handle != IntPtr.Zero)
             {
-                SetForegroundWindow(h);
+                SetForegroundWindow(handle);
             }
         }
         catch
@@ -296,6 +316,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     {
         try { return element.FrameworkAutomationElement.ProcessId; }
         catch { return 0; }
+    }
+
+    /// <summary>Shared by BringToForeground, EnumeratePioneerOwnedTopLevelWindows, FindPreviewWindow, and IsPreviewReady — the one place this app reads an AutomationElement's native HWND.</summary>
+    private static IntPtr SafeNativeHandle(AutomationElement element)
+    {
+        try
+        {
+            var handle = element.FrameworkAutomationElement.NativeWindowHandle;
+            return handle ?? IntPtr.Zero;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
     }
 
     private static bool IsPioneerProcess(int processId)
@@ -337,11 +371,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         log($"UIA navigation to '{tabName}' > '{buttonName}' failed - trying keyboard fallback.");
         try
         {
+            // Review fix (non-blocking item a): re-check foreground before
+            // EACH keystroke, not just once before the whole sequence -
+            // three separate sends (ALT, tab-name letter, button-name
+            // letter) is enough time for focus to move between them.
+            if (!EnsurePioneerForeground(log)) return false;
             Keyboard.Press(VirtualKeyShort.ALT);
             Keyboard.Release(VirtualKeyShort.ALT);
             Thread.Sleep(200);
+
+            if (!EnsurePioneerForeground(log)) return false;
             Keyboard.Type(tabName.Substring(0, 1));
             Thread.Sleep(300);
+
+            if (!EnsurePioneerForeground(log)) return false;
             Keyboard.Type(buttonName.Substring(0, 1));
             Thread.Sleep(500);
         }
@@ -388,9 +431,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
     }
 
-    private bool InvokeExportButton(string primaryName, string toolTipContains, Action<string> log)
+    /// <summary>
+    /// <paramref name="searchRoot"/> is the actual window that owns the
+    /// export control — the PDF export button lives on the report
+    /// PREVIEW window's own toolbar (a separate top-level window from
+    /// Pioneer's main ribbon window - see FindPreviewWindow), while the
+    /// Excel export command lives inside the Payments screen hosted on
+    /// _mainWindow itself. Passed explicitly rather than assumed, so this
+    /// method never accidentally searches (or clicks into) the wrong
+    /// window.
+    /// </summary>
+    private bool InvokeExportButton(AutomationElement searchRoot, string primaryName, string toolTipContains, Action<string> log)
     {
-        var button = FindDescendantByName(_mainWindow!, primaryName);
+        var button = FindDescendantByName(searchRoot, primaryName);
         if (button is not null && SelectOrInvoke(button)) return true;
 
         // Fallback: some toolbar buttons expose only an icon Name with the
@@ -399,7 +452,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         // whose HelpText/Name contains the expected substring.
         try
         {
-            var descendants = _mainWindow!.FindAllDescendants();
+            var descendants = searchRoot.FindAllDescendants();
             foreach (var candidate in descendants)
             {
                 string? name;
@@ -572,18 +625,91 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     /// <summary>
     /// True once no "Please wait while the report is generated..." modal
-    /// is present AND at least one report-preview-shaped top-level window
-    /// exists (a window whose toolbar exposes the preview's known icons —
-    /// approximated here by presence of a "Print Immediately" or "Export
-    /// to PDF"-named element anywhere under the desktop's Pioneer-owned
-    /// windows).
+    /// is present on any Pioneer-owned window AND the report preview has
+    /// appeared as its own top-level window (see FindPreviewWindow) — its
+    /// AutomationElement/native handle are captured into
+    /// _previewWindowElement/_previewWindowHandle as a side effect, since
+    /// this is the ONLY moment the preview can be reliably identified
+    /// (review fix, safety blocker 2: ClosePreview must target this exact
+    /// captured handle later, never "whatever is foreground then").
     /// </summary>
     private bool IsPreviewReady()
     {
-        if (FindDescendantByName(_mainWindow!, "Please wait") is not null) return false;
+        foreach (var (window, _) in EnumeratePioneerOwnedTopLevelWindows())
+        {
+            if (FindDescendantByName(window, "Please wait") is not null) return false;
+        }
 
-        return FindDescendantByName(_mainWindow!, "Print Immediately") is not null
-            || FindDescendantByName(_mainWindow!, "Export to PDF") is not null;
+        var preview = FindPreviewWindow();
+        if (preview is null) return false;
+
+        _previewWindowElement = preview;
+        _previewWindowHandle = SafeNativeHandle(preview);
+        return _previewWindowHandle != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Enumerates top-level desktop windows belonging to Pioneer's own
+    /// process (_pioneerProcessId, captured by FindMainWindow) — the
+    /// shared building block behind FindPreviewWindow, the Save As dialog
+    /// lookup (SaveAsWindowSelector.Choose), and the overwrite-confirm
+    /// prompt search, so none of those three ever consider a window
+    /// belonging to some other running application (review fix, safety
+    /// blocker 1's root cause).
+    /// </summary>
+    private List<(AutomationElement Window, WindowCandidate Candidate)> EnumeratePioneerOwnedTopLevelWindows()
+    {
+        var result = new List<(AutomationElement, WindowCandidate)>();
+        try
+        {
+            var automation = GetOrCreateAutomation();
+            var desktop = automation.GetDesktop();
+            foreach (var window in desktop.FindAllChildren())
+            {
+                var processId = SafeProcessId(window);
+                if (processId != _pioneerProcessId) continue;
+
+                string? name;
+                try { name = window.Name; } catch { name = null; }
+
+                var handle = SafeNativeHandle(window);
+                result.Add((window, new WindowCandidate(name ?? string.Empty, processId, handle)));
+            }
+        }
+        catch
+        {
+            // Best-effort - an empty list here just means the callers
+            // above find nothing and fail the report, never guess.
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The report preview is its OWN top-level window (a separate window
+    /// from Pioneer's main ribbon window - confirmed by its toolbar icons
+    /// in the GOAL brief: Home/Print Immediately/Export to PDF/etc.), so
+    /// this explicitly excludes _mainWindow's own handle before matching
+    /// on those toolbar icon names - a false match here would make
+    /// InvokeExportButton search (and ClosePreview eventually try to
+    /// close) the wrong window.
+    /// </summary>
+    private AutomationElement? FindPreviewWindow()
+    {
+        var mainHandle = _mainWindow is null ? IntPtr.Zero : SafeNativeHandle(_mainWindow);
+
+        foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+        {
+            if (candidate.Handle != IntPtr.Zero && candidate.Handle == mainHandle) continue;
+
+            if (FindDescendantByName(window, "Print Immediately") is not null
+                || FindDescendantByName(window, "Export to PDF") is not null)
+            {
+                return window;
+            }
+        }
+
+        return null;
     }
 
     private bool IsResultsTabReady()
@@ -615,14 +741,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// </summary>
     private async Task<bool> SaveAsAndVerify(string fullPath, Action<string> log, CancellationToken ct)
     {
-        var dialogAppeared = await WaitUntilAsync(() => FindSaveAsFileNameField() is not null, DialogTimeout, ct).ConfigureAwait(false);
+        var dialogAppeared = await WaitUntilAsync(() => FindSaveAsDialog().Field is not null, DialogTimeout, ct).ConfigureAwait(false);
         if (!dialogAppeared)
         {
             log("Save As dialog did not appear.");
             return false;
         }
 
-        var fileNameField = FindSaveAsFileNameField();
+        var (fileNameField, saveAsHandle) = FindSaveAsDialog();
         if (fileNameField is null)
         {
             log("Save As dialog appeared but its File name box could not be found.");
@@ -644,6 +770,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 Keyboard.Type(fullPath);
             }
 
+            // Review follow-up ("apply the same specific-window-handle rule
+            // anywhere else a keystroke could hit the main window
+            // unintentionally"): Enter is an untargeted keystroke - go
+            // straight to whatever the OS foreground window is. Re-verify
+            // that's still THIS SPECIFIC Save As window (by handle, not
+            // merely "some Pioneer-owned window") immediately before
+            // sending it, rather than assuming focus never moved between
+            // SetValue/Focus above and this line.
+            if (GetForegroundWindow() != saveAsHandle)
+            {
+                log("Save As dialog lost focus before Enter could be sent - aborting rather than risk it going to the wrong window.");
+                return false;
+            }
+
             Keyboard.Type(VirtualKeyShort.RETURN);
         }
         catch (Exception ex)
@@ -653,16 +793,33 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
 
         // "If duplicate, overwrite" - answer any confirmation prompt with
-        // Yes (macro strings: "Confirm Save As"). Best-effort - if none
-        // appears within a short window this is simply a no-op.
+        // Yes (macro strings: "Confirm Save As"). Review fix (non-blocking
+        // item b): a Windows confirmation dialog is its OWN top-level
+        // window, not a descendant of _mainWindow - search every
+        // Pioneer-owned top-level window (never any other application's)
+        // for one that looks like a "Confirm"/"Save As"-titled prompt and
+        // press ITS "Yes" button. Best-effort/fail-safe as before - if
+        // none appears within a short window this is simply a no-op (no
+        // duplicate file, or Pioneer didn't ask).
         await WaitUntilAsync(() =>
         {
-            var yesButton = _mainWindow is null ? null : FindDescendantByName(_mainWindow, "Yes", ControlType.Button);
-            if (yesButton is not null)
+            foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
             {
-                SelectOrInvoke(yesButton);
-                return true;
+                if (string.IsNullOrEmpty(candidate.Title)) continue;
+                if (!candidate.Title.Contains("Confirm", StringComparison.OrdinalIgnoreCase)
+                    && !candidate.Title.Contains("Save As", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var yesButton = FindDescendantByName(window, "Yes", ControlType.Button);
+                if (yesButton is not null)
+                {
+                    SelectOrInvoke(yesButton);
+                    return true;
+                }
             }
+
             return false;
         }, TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
 
@@ -676,41 +833,87 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return true;
     }
 
-    private AutomationElement? FindSaveAsFileNameField()
+    /// <summary>
+    /// Review fix (safety blocker 1): restricted to top-level windows
+    /// belonging to Pioneer's OWN process (SaveAsWindowSelector.Choose),
+    /// never "any window on the desktop whose title merely contains
+    /// 'Save As'" - a same-titled window from an unrelated application can
+    /// no longer receive Pioneer's output path + Enter.
+    /// </summary>
+    /// <summary>Returns both the File name edit field AND the dialog's own window handle — SaveAsAndVerify needs the handle to re-verify (by specific handle, not just process) that this exact dialog is still frontmost immediately before the untargeted Enter keystroke.</summary>
+    private (AutomationElement? Field, IntPtr WindowHandle) FindSaveAsDialog()
     {
+        var owned = EnumeratePioneerOwnedTopLevelWindows();
+        var candidates = owned.Select(o => o.Candidate).ToList();
+        var chosenHandle = SaveAsWindowSelector.Choose(candidates, _pioneerProcessId, GetForegroundWindow());
+        if (chosenHandle is null) return (null, IntPtr.Zero);
+
+        var match = owned.FirstOrDefault(o => o.Candidate.Handle == chosenHandle.Value);
+        if (match.Window is null) return (null, IntPtr.Zero);
+
         try
         {
-            var automation = GetOrCreateAutomation();
-            var desktop = automation.GetDesktop();
-            foreach (var window in desktop.FindAllChildren())
-            {
-                string? name;
-                try { name = window.Name; } catch { continue; }
-                if (name is null || !name.Contains("Save As", StringComparison.OrdinalIgnoreCase)) continue;
-
-                var editFields = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
-                if (editFields.Length > 0) return editFields[0];
-            }
+            var editFields = match.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
+            var field = editFields.Length > 0 ? editFields[0] : null;
+            return (field, chosenHandle.Value);
         }
         catch
         {
-            // fall through to null
+            return (null, IntPtr.Zero);
         }
-
-        return null;
     }
 
-    private void ClosePreview()
+    /// <summary>
+    /// Review fix (safety blocker 2): closes the SPECIFIC preview window
+    /// captured by IsPreviewReady (_previewWindowHandle/_previewWindowElement)
+    /// - never blindly Alt+F4s "whatever is currently focused". Primary
+    /// path is a WM_CLOSE posted straight to that window's own HWND
+    /// (targeted, works regardless of focus); Alt+F4 is only ever used as
+    /// a last-resort fallback, and only when PreviewCloseDecision confirms
+    /// the OS foreground window IS that exact preview handle right now -
+    /// if focus has reverted to Pioneer's main window (or anywhere else)
+    /// after Save As closed, Alt+F4 is never sent.
+    /// </summary>
+    private void ClosePreview(Action<string> log)
     {
-        try
+        var previewHandle = _previewWindowHandle;
+        var primaryCloseSucceeded = false;
+
+        if (previewHandle != IntPtr.Zero)
         {
-            Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.F4);
+            try
+            {
+                primaryCloseSucceeded = PostMessage(previewHandle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            }
+            catch
+            {
+                primaryCloseSucceeded = false;
+            }
         }
-        catch
+
+        if (!primaryCloseSucceeded)
         {
-            // Best-effort only - a preview left open is a nuisance, not a
-            // failed report (the file was already verified saved before
-            // this is called).
+            var foreground = GetForegroundWindow();
+            if (PreviewCloseDecision.ShouldFallBackToAltF4(primaryCloseSucceeded, previewHandle, foreground))
+            {
+                try
+                {
+                    Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.F4);
+                }
+                catch
+                {
+                    // Best-effort only - a preview left open is a nuisance,
+                    // not a failed report (the file was already verified
+                    // saved before this is called).
+                }
+            }
+            else
+            {
+                log("Could not confirm the report preview window to close it safely - leaving it open rather than risk closing the wrong window.");
+            }
         }
+
+        _previewWindowElement = null;
+        _previewWindowHandle = IntPtr.Zero;
     }
 }
