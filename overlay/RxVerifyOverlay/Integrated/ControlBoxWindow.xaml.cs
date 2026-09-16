@@ -136,6 +136,18 @@ public sealed partial class ControlBoxWindow : Window
     /// </summary>
     public event EventHandler<bool>? OrderAssistToggleRequested;
 
+    /// <summary>
+    /// Branch feat/reports-mode: raised whenever the pharmacist picks
+    /// "Mode: Reports" (index 2) in either Mode dropdown —
+    /// IntegratedOverlayCoordinator relays this straight through to
+    /// MainWindow.xaml.cs's OpenOrFocusReportsWindow. UNLIKE
+    /// OrderAssistToggleRequested this carries no state and never touches
+    /// ApplyModeLayout/_isOrderModeActive — see OnModeComboBoxChanged's
+    /// own doc for why Reports is deliberately NOT a third sticky layout
+    /// mode alongside Verify/Order.
+    /// </summary>
+    public event EventHandler? ReportsModeRequested;
+
     public ControlBoxWindow()
     {
         InitializeComponent();
@@ -490,7 +502,34 @@ public sealed partial class ControlBoxWindow : Window
     private void OnModeComboBoxChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressOrderAssistHandler) return;
-        var isOrderMode = ((ComboBox)sender).SelectedIndex == 1;
+        var selectedIndex = ((ComboBox)sender).SelectedIndex;
+
+        // Branch feat/reports-mode: index 2 ("Mode: Reports") is a
+        // one-shot action, not a sticky layout state — see
+        // ReportsModeRequested's own doc for why. Restore the combo to
+        // whatever Verify/Order state is ACTUALLY active (never touch
+        // ApplyModeLayout/_isOrderModeActive for this branch) before
+        // raising the event, so the dropdown never appears stuck on
+        // "Mode: Reports" and Verify/Order stay byte-identical.
+        if (selectedIndex == 2)
+        {
+            _suppressOrderAssistHandler = true;
+            try
+            {
+                var restoreIndex = _isOrderModeActive ? 1 : 0;
+                ModeComboBoxNormal.SelectedIndex = restoreIndex;
+                ModeComboBoxCompact.SelectedIndex = restoreIndex;
+            }
+            finally
+            {
+                _suppressOrderAssistHandler = false;
+            }
+
+            ReportsModeRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        var isOrderMode = selectedIndex == 1;
         ApplyModeLayout(isOrderMode);
         OrderAssistToggleRequested?.Invoke(this, isOrderMode);
     }
