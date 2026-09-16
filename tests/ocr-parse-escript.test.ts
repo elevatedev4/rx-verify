@@ -2975,3 +2975,132 @@ describe('field report 2026-09-16 (5th AUTO-DIAGNOSTIC): "To>l Fills" — garble
     expect(record.refillsMissReason).toBe('no-value-paired');
   });
 });
+
+// Branch brief (2026-09-16, diagnostic-region-anchor fix): Pioneer's
+// EditRx grid has column headers ("Last Filled", "Au Fill", "Future
+// Fill") that are themselves "fill"-shaped and can sit ABOVE the real
+// "Total Fills" row — the old single first-fill-word anchor always
+// picked whichever "fill"-shaped row came first on the page, so a real
+// report showed the grid header row and nothing from the e-script pane.
+// buildRefillsOcrRegionWords now tries a strict priority of anchors
+// (matched-label -> tail-phrase -> plural-label -> fill-word -> approval)
+// and tags the surfaced words with which one fired.
+describe('refillsOcrRegionWords anchor priority (branch brief item 1, 2026-09-16 diagnostic-region-anchor fix)', () => {
+  it('anchors on the "Total Fills" row (matched-label), not an earlier "fill"-shaped EditRx grid header row', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    // The EditRx grid header — "Filled" is fill-shaped and comes FIRST on
+    // the page, exactly the old bug's repro shape.
+    const gridHeaderRow = row(150, ['Rx', 'Num', 'Written', 'Last', 'Filled', 'Dispensed', 'Item']);
+    // Spacer so the grid header is NOT a +/-1 neighbor of the real Total
+    // Fills row below — proves the real anchor was found directly, not
+    // stumbled into via the neighbor window.
+    const spacerRow = row(200, ['Spacer', 'row', 'text']);
+    // The label matches cleanly (Pass A recognizes "Total Fills:"), but
+    // the value itself never parses as a number — refillsResolvedCanonical
+    // still gets set even though refills ends up unresolved (see
+    // refillsAnchorWordKeys' doc).
+    const totalFillsRow = row(300, ['Total', 'Fills:', 'N/A']);
+    const ocr = flatten([quantityRow, gridHeaderRow, spacerRow, totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('validation-failed:not-numeric');
+    expect(record.refillsOcrRegionWords).toBeDefined();
+    expect(record.refillsOcrRegionWords?.[0]).toBe('[anchor=matched-label]');
+    expect(record.refillsOcrRegionWords).toContain('Total');
+    expect(record.refillsOcrRegionWords).toContain('Fills:');
+    expect(record.refillsOcrRegionWords).toContain('N/A');
+    // The grid header row is more than +/-1 away from the matched row —
+    // its words must NOT leak into the region dump.
+    expect(record.refillsOcrRegionWords).not.toContain('Written');
+    expect(record.refillsOcrRegionWords).not.toContain('Dispensed');
+  });
+
+  it('anchors on a "(including this fill)" tail-phrase row when no label ever matched anything', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    // No preceding number at all, so findTotalFillsPhraseValue itself
+    // can't recover a value from this row (numIdx < 0) — refills stays
+    // unresolved via the ordinary 'no-value-paired' route, with no label
+    // ever matched anywhere on the page — but the phrase words are still
+    // the best diagnostic anchor available.
+    const phraseRow = row(300, ['(including', 'this', 'fill)']);
+    const ocr = flatten([quantityRow, phraseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-value-paired');
+    expect(record.refillsOcrRegionWords).toBeDefined();
+    expect(record.refillsOcrRegionWords?.[0]).toBe('[anchor=tail-phrase]');
+    expect(record.refillsOcrRegionWords).toContain('this');
+  });
+
+  it('falls all the way back to the plain fill-word anchor (today\'s behaviour) when nothing more specific matches, now tagged', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    const fillRow = row(200, ['Fulfillment', 'status:', 'pending']);
+    const neighborRow = row(240, ['Warehouse', 'code', 'ABC123']);
+    const ocr = flatten([quantityRow, fillRow, neighborRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsOcrRegionWords).toBeDefined();
+    expect(record.refillsOcrRegionWords?.[0]).toBe('[anchor=fill-word]');
+    expect(record.refillsOcrRegionWords).toContain('Fulfillment');
+    expect(record.refillsOcrRegionWords).toContain('Warehouse');
+  });
+});
+
+// Branch brief item 2 (2026-09-16 diagnostic-region-anchor fix):
+// PrescriptionRecord.refillsLabelSeen/.ocrLineCount, exposed alongside
+// refillsOcrRegionWords/refillsMissReason with the same "OCR path only,
+// only on an actual refills miss" gating.
+describe('refillsLabelSeen / ocrLineCount diagnostics (branch brief item 2)', () => {
+  it('refillsLabelSeen is the matched label\'s raw text plus the next 6 raw tokens, when an actual label token matched', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    const totalFillsRow = row(300, ['Total', 'Fills:', 'N/A']);
+    const ocr = flatten([quantityRow, totalFillsRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsLabelSeen).toBe('Total Fills: N/A');
+  });
+
+  it('refillsLabelSeen is undefined when the anchor came from a tail phrase alone, with no label token ever matched', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    const phraseRow = row(300, ['(including', 'this', 'fill)']);
+    const ocr = flatten([quantityRow, phraseRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsLabelSeen).toBeUndefined();
+  });
+
+  it('refillsLabelSeen is undefined when the anchor came from the plain fill-word fallback, with no label token ever matched', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    const fillRow = row(200, ['Fulfillment', 'status:', 'pending']);
+    const ocr = flatten([quantityRow, fillRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsLabelSeen).toBeUndefined();
+  });
+
+  it('ocrLineCount counts the physical OCR rows considered (before the defensive chrome filter) when refills is unresolved', () => {
+    const quantityRow = row(100, ['Quantity', '30']);
+    const fillRow = row(200, ['Fulfillment', 'status:', 'pending']);
+    const neighborRow = row(240, ['Warehouse', 'code', 'ABC123']);
+    const ocr = flatten([quantityRow, fillRow, neighborRow]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.ocrLineCount).toBe(3);
+  });
+
+  it('is undefined/absent when refills DOES resolve — no diagnostic noise on a normal successful parse', () => {
+    const ocr = flatten([row(100, ['Quantity', '30']), row(200, ['Refills:', '4'])]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsLabelSeen).toBeUndefined();
+    expect(record.ocrLineCount).toBeUndefined();
+  });
+});

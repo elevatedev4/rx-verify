@@ -162,6 +162,39 @@ export interface PrescriptionRecord {
    */
   refillsMissReason?: string;
   /**
+   * SOURCE-side, DIAGNOSTIC ONLY, OCR path only: set ONLY when `refills`
+   * above ends up undefined AND the anchor line used for
+   * refillsOcrRegionWords was found via an actual matched LABEL token
+   * (Pass A/B's inline/block-column pairing, or the findTotalFillsLabelAnywhere
+   * pattern-anchor fallback) — the "[anchor=matched-label]"/
+   * "[anchor=fill-word]"/etc tags in refillsOcrRegionWords say which
+   * anchor tier actually fired; this field is the matched label's own raw
+   * OCR text plus the next 6 raw tokens on that same physical row (e.g.
+   * `"Total Fills 2 ( including this fill )"`), so a filed report can show
+   * the exact label+value text OCR captured, not just the surrounding
+   * region words. undefined whenever no label token was matched at all —
+   * including when refillsOcrRegionWords' anchor came from a bare tail
+   * phrase (findTotalFillsPhraseValue, which recovers a value with NO
+   * "Total Fills"/"Refills" label text anywhere on the page — see that
+   * function's doc) or from the plain fill-word/approval fallback tiers.
+   * Built in src/ocr/parseEscriptOcr.ts (buildRefillsOcrRegionWords' call
+   * site). Never set on the entered side, never set when refills DID
+   * resolve.
+   */
+  refillsLabelSeen?: string;
+  /**
+   * SOURCE-side, DIAGNOSTIC ONLY, OCR path only: set ONLY when `refills`
+   * above ends up undefined — how many physical OCR rows
+   * (linesBeforeChromeFilter, i.e. before the defensive chrome-line
+   * filter, same row set refillsOcrRegionWords/refillsLabelSeen are
+   * anchored against) this document reconstructed, so a filed report has
+   * a sense of how much of the page OCR actually captured (a near-empty
+   * page reads very differently from a full one that still missed
+   * refills). Never set on the entered side, never set when refills DID
+   * resolve.
+   */
+  ocrLineCount?: number;
+  /**
    * SOURCE-side only: true when the e-script's MedicationPrescribed >
    * Substitutions indicator states the prescriber does NOT allow
    * substitution (NCPDP SCRIPT code 1, "Substitution Not Allowed by
@@ -215,4 +248,19 @@ export interface VerifyResult {
    * unresolved" gating as refillsOcrRegionWords above.
    */
   refillsMissReason?: string;
+  /**
+   * Diagnostic-only passthrough of PrescriptionRecord.refillsLabelSeen
+   * (see that field's doc) — attached by src/cli.ts's runVerify, same
+   * "only present when the OCR path was used AND refills came back
+   * unresolved (AND, specifically for this field, an actual label token
+   * was matched)" gating as refillsOcrRegionWords above.
+   */
+  refillsLabelSeen?: string;
+  /**
+   * Diagnostic-only passthrough of PrescriptionRecord.ocrLineCount (see
+   * that field's doc) — attached by src/cli.ts's runVerify, same "only
+   * present when the OCR path was used AND refills came back unresolved"
+   * gating as refillsOcrRegionWords above.
+   */
+  ocrLineCount?: number;
 }

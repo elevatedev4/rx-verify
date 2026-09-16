@@ -988,6 +988,28 @@ export interface ParsedRefillsValue {
 }
 
 /**
+ * Branch brief item 1 (diagnostic-region anchor fix): return shape shared
+ * by the two label-independent/label-anywhere pattern anchors below
+ * (findTotalFillsPhraseValue, findTotalFillsLabelAnywhere) so their call
+ * sites in parseEscriptOcr can populate refillsAnchorWordKeys/
+ * refillsLabelSeenText the exact same way Pass A/B already do, instead of
+ * this diagnostic evidence being lost the moment either anchor fires.
+ */
+interface RefillsAnchorMatch extends ParsedRefillsValue {
+  /** The physical OCR row (an element of the `lines` argument) this match was found on. */
+  matchedLine: OcrWord[];
+  /**
+   * The [start, start+consumed) word range within matchedLine holding the
+   * actual LABEL text (e.g. "Total Fills") — present only for
+   * findTotalFillsLabelAnywhere, which requires a label. Absent for
+   * findTotalFillsPhraseValue, which recovers a value from a trailing
+   * phrase alone with NO label text anywhere on the page (see that
+   * function's doc) — refillsLabelSeen must stay undefined in that case.
+   */
+  label?: { start: number; consumed: number };
+}
+
+/**
  * Field report (2026-09, owner verbatim, refill-approval documents): the
  * value after a "Total Fills"/"Refills" label can carry a DESCRIPTIVE
  * PARENTHETICAL *before* the actual number, not just after it — see
@@ -1145,7 +1167,7 @@ function phraseWordMatches(tokenText: string, expectedWord: string): boolean {
   return normalizeOcrConfusableLabel(bare) === normalizeOcrConfusableLabel(expectedWord);
 }
 
-function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | undefined {
+function findTotalFillsPhraseValue(lines: OcrWord[][]): RefillsAnchorMatch | undefined {
   for (const line of lines) {
     for (let i = 0; i < line.length; i++) {
       for (const phrase of TOTAL_FILLS_TAIL_PHRASES) {
@@ -1185,7 +1207,7 @@ function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | und
             if (/^\d$/.test(prior)) digits = prior + digits;
           }
         }
-        if (digits) return { value: digits, isTotalFillsPhrase: phrase.isTotalFillsPhrase };
+        if (digits) return { value: digits, isTotalFillsPhrase: phrase.isTotalFillsPhrase, matchedLine: line };
       }
     }
   }
@@ -1217,7 +1239,7 @@ function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | und
  * own — see that function's own doc for why this can't cost more than
  * the label-independent phrase anchor already would.
  */
-function findTotalFillsLabelAnywhere(lines: OcrWord[][]): ParsedRefillsValue | undefined {
+function findTotalFillsLabelAnywhere(lines: OcrWord[][]): RefillsAnchorMatch | undefined {
   for (const line of lines) {
     for (let start = 0; start < line.length; start++) {
       const match = findLabelAt(line, start);
@@ -1225,7 +1247,7 @@ function findTotalFillsLabelAnywhere(lines: OcrWord[][]): ParsedRefillsValue | u
         const remainder = wordsToText(stripLeadingColon(line.slice(start + match.consumed)));
         if (remainder) {
           const parsed = parseRefills(remainder);
-          if (parsed) return parsed;
+          if (parsed) return { ...parsed, matchedLine: line, label: { start, consumed: match.consumed } };
         }
       }
 
@@ -1236,7 +1258,9 @@ function findTotalFillsLabelAnywhere(lines: OcrWord[][]): ParsedRefillsValue | u
         if (!remainder) continue;
         const parsed = parseRefills(remainder);
         // Only ever accepted alongside a RECOGNIZED tail phrase — see doc.
-        if (parsed && parsed.isTotalFillsPhrase !== undefined) return parsed;
+        if (parsed && parsed.isTotalFillsPhrase !== undefined) {
+          return { ...parsed, matchedLine: line, label: { start, consumed } };
+        }
       }
     }
   }
@@ -1414,6 +1438,35 @@ function isApprovalRenewalRowShaped(line: OcrWord[]): boolean {
   return joined.includes('refillrequest') || joined.includes('rxrequest');
 }
 
+/**
+ * Anchor tier (b) (branch brief item 1): true if ROW `line` carries one of
+ * TOTAL_FILLS_TAIL_PHRASES' phrases ANYWHERE in its joined, normalized
+ * text — deliberately looser than findTotalFillsPhraseValue's own exact,
+ * position-anchored word-by-word match (that function has to locate the
+ * PRECEDING NUMBER too, to actually read a value; this only has to
+ * recognize "this row is the Total-Fills row" well enough to anchor a
+ * diagnostic dump on it).
+ */
+function lineHasTotalFillsTailPhrase(line: OcrWord[]): boolean {
+  const joined = normalize(wordsToText(line));
+  return TOTAL_FILLS_TAIL_PHRASES.some((phrase) => joined.includes(normalize(phrase.words.join(' '))));
+}
+
+/**
+ * Anchor tier (c) (branch brief item 1): true if ROW `line`'s joined text
+ * contains the OCR-confusable-collapsed form of "totalfills" or (plural)
+ * "refills" ANYWHERE — reuses normalizeOcrConfusableLabel/the two
+ * REFILLS_CONFUSABLE_CANONICAL/TOTALFILLS_CONFUSABLE_CANONICAL constants
+ * so this gets the exact same OCR-confusable tolerance ("Tota1Fi11s",
+ * "Refi11s") as the label matchers do, without a bare singular "Refill"
+ * (e.g. a "Refill / Replace" button) counting — see REFILLS_CONFUSABLE_
+ * CANONICAL's doc for why that distinction matters.
+ */
+function lineHasTotalFillsOrRefillsText(line: OcrWord[]): boolean {
+  const joined = normalizeOcrConfusableLabel(wordsToText(line));
+  return joined.includes(TOTALFILLS_CONFUSABLE_CANONICAL) || joined.includes(REFILLS_CONFUSABLE_CANONICAL);
+}
+
 function collectRefillsRegionWords(
   lines: OcrWord[][],
   isAnchorLine: (line: OcrWord[]) => boolean,
@@ -1450,9 +1503,48 @@ function collectRefillsRegionWords(
   return out;
 }
 
+/**
+ * ANCHOR PRIORITY (branch brief item 1, 2026-09-16 5th AUTO-DIAGNOSTIC):
+ * a Pioneer EditRx screen's grid has column headers ("Last Filled", "Au
+ * Fill", "Future Fill") that are themselves "fill"-shaped, and can sit
+ * ABOVE the real "Total Fills" row — the old single fill-word anchor
+ * always took the FIRST such word on the page, so the report showed the
+ * grid header row and nothing from the e-script pane at all. Anchors are
+ * now tried in order, each strictly more specific/reliable than the
+ * last, and the FIRST one that actually produces any words wins (never
+ * blended):
+ *   (a) matchedLabelAnchorKeys — the physical row that actually PRODUCED
+ *       refillsResolvedCanonical (Pass A/B, or either pattern-anchor
+ *       fallback — see refillsAnchorWordKeys' doc at its call sites).
+ *       This is the strongest possible anchor: it's not a guess at all,
+ *       it's exactly where the parser itself found (or tried to read) the
+ *       value.
+ *   (b) lineHasTotalFillsTailPhrase — a "(including this fill)"/
+ *       "(additional refills)" tail phrase, when (a) never fired (no
+ *       label/pattern anchor resolved anything at all).
+ *   (c) lineHasTotalFillsOrRefillsText — a plain "Total Fills"/"Refills"
+ *       (plural) OCR-confusable match anywhere in the row, when neither
+ *       (a) nor (b) fired.
+ *   (d) the original first-"fill"-shaped-word anchor (grid headers and
+ *       all) — kept as a last-resort text anchor, unchanged from before
+ *       this fix, for a layout with none of the above.
+ *   (e) the approval/renewal fallback — see this function's original
+ *       "FALLBACK" doc paragraph below, unchanged.
+ * Each tier's surfaced words are prefixed with a `[anchor=<tag>]` token
+ * (branch brief item 1) so a filed report says WHICH anchor fired,
+ * without having to guess from the words alone.
+ */
+const REFILLS_REGION_ANCHOR_TIERS: ReadonlyArray<{ tag: string; isAnchorLine: (line: OcrWord[]) => boolean }> = [
+  { tag: 'tail-phrase', isAnchorLine: lineHasTotalFillsTailPhrase },
+  { tag: 'plural-label', isAnchorLine: lineHasTotalFillsOrRefillsText },
+  { tag: 'fill-word', isAnchorLine: (line) => line.some((w) => isFillShaped(w.text)) },
+  { tag: 'approval', isAnchorLine: isApprovalRenewalRowShaped }
+];
+
 function buildRefillsOcrRegionWords(
   lines: OcrWord[][],
   resolutionMeta: Partial<Record<LabelKey, { strategy: FieldDiagnostic['strategy']; words: OcrWord[] }>>,
+  matchedLabelAnchorKeys: ReadonlySet<string> | undefined,
   maxWords = 40
 ): string[] {
   const sensitiveKeys = new Set<string>();
@@ -1474,17 +1566,24 @@ function buildRefillsOcrRegionWords(
     }
   }
 
-  const fillWords = collectRefillsRegionWords(
-    lines,
-    (line) => line.some((w) => isFillShaped(w.text)),
-    sensitiveKeys,
-    sensitiveLineIndices,
-    maxWords
-  );
-  if (fillWords.length > 0) return fillWords;
+  // Tier (a) — see ANCHOR PRIORITY doc above.
+  if (matchedLabelAnchorKeys && matchedLabelAnchorKeys.size > 0) {
+    const words = collectRefillsRegionWords(
+      lines,
+      (line) => line.some((w) => matchedLabelAnchorKeys.has(ocrWordKey(w))),
+      sensitiveKeys,
+      sensitiveLineIndices,
+      maxWords
+    );
+    if (words.length > 0) return [`[anchor=matched-label]`, ...words];
+  }
 
-  // Fallback anchor — see this function's doc, "FALLBACK" paragraph.
-  return collectRefillsRegionWords(lines, isApprovalRenewalRowShaped, sensitiveKeys, sensitiveLineIndices, maxWords);
+  // Tiers (b)-(e) — see ANCHOR PRIORITY doc above.
+  for (const tier of REFILLS_REGION_ANCHOR_TIERS) {
+    const words = collectRefillsRegionWords(lines, tier.isAnchorLine, sensitiveKeys, sensitiveLineIndices, maxWords);
+    if (words.length > 0) return [`[anchor=${tier.tag}]`, ...words];
+  }
+  return [];
 }
 
 /**
@@ -1864,6 +1963,27 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // whether parseRefills could read it. Takes priority over the default
     // 'no-value-paired' reason at the final assembly site below.
     let refillsMissReasonOverride: string | undefined;
+    // Branch brief item 1 (diagnostic-region anchor fix): set ALONGSIDE
+    // refillsResolvedCanonical at every one of its 4 assignment sites
+    // (Pass A inline just below, Pass B assignGroup, and both pattern-
+    // anchor fallbacks further down) to the WORD-IDENTITY keys
+    // (ocrWordKey) of the physical OCR row that actually produced the
+    // match. Word-identity rather than a line index deliberately: Pass A
+    // can re-slice/re-queue a row (split-label handling above) and Pass B
+    // pairs a label row against a DIFFERENT leftover value row, so no
+    // single flat index is stable across every site, but the underlying
+    // OcrWord objects are never cloned/copied, only sliced — a subset's
+    // keys still uniquely identify its parent physical row inside
+    // linesBeforeChromeFilter. Consumed only by buildRefillsOcrRegionWords'
+    // tier (a) ("matched-label") anchor below.
+    let refillsAnchorWordKeys: Set<string> | undefined;
+    // Companion to refillsAnchorWordKeys above, but ONLY populated when an
+    // actual LABEL token (not just a trailing "(including this fill)"-
+    // style phrase) was matched — see PrescriptionRecord.refillsLabelSeen's
+    // doc (types.ts) for the exact shape. Left undefined at the phrase-only
+    // fallback site (findTotalFillsPhraseValue), which recovers a value
+    // with no "Total Fills"/"Refills" label text anywhere on the page.
+    let refillsLabelSeenText: string | undefined;
     const leftoverLines: OcrWord[][] = [];
     // How each raw[key] was actually resolved — populated at every
     // assignment site (Pass A inline, Pass B block-column) and consumed
@@ -2001,6 +2121,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
             raw.refills = remainder;
             resolutionMeta.refills = { strategy: 'inline-row', words: remainderWords };
             refillsResolvedCanonical = match.label.canonical;
+            // See refillsAnchorWordKeys/refillsLabelSeenText docs above.
+            // `line` here is the physical (possibly split-remainder) row
+            // this label matched on; the label itself is always its first
+            // `match.consumed` words (findLabelAtLineStart only ever
+            // matches at a line's start).
+            refillsAnchorWordKeys = new Set(line.map(ocrWordKey));
+            refillsLabelSeenText = wordsToText(line.slice(0, match.consumed + 6));
           }
         } else if (NAME_FIELDS.has(match.label.key) && isImplausibleNameValue(remainder)) {
           // Discarded, not assigned: a decoy label match with a
@@ -2309,7 +2436,21 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
           // (missingIdx filters on that), so there is no explicit-vs-
           // totalfills conflict to arbitrate here -- just record which
           // canonical resolved it, mirroring the Pass A tracking above.
-          if (key === 'refills') refillsResolvedCanonical = labelCanonicals[groupIdxs[g] as number];
+          if (key === 'refills') {
+            refillsResolvedCanonical = labelCanonicals[groupIdxs[g] as number];
+            // See refillsAnchorWordKeys/refillsLabelSeenText docs above.
+            // Pass B pairs a label row against a DIFFERENT (leftover)
+            // value row by column geometry, so the label's own row --
+            // where "Total Fills"/"Refills" text actually sits -- has to
+            // be looked up separately via labelRowIds, not `line` (this
+            // function's value row) or `seg` (the value's column slice).
+            const labelLine = lines[labelRowIds[groupIdxs[g] as number] as number];
+            if (labelLine) {
+              refillsAnchorWordKeys = new Set(labelLine.map(ocrWordKey));
+              const labelMatch = findLabelAtLineStart(labelLine);
+              if (labelMatch) refillsLabelSeenText = wordsToText(labelLine.slice(0, labelMatch.consumed + 6));
+            }
+          }
         }
       });
     }
@@ -2426,6 +2567,13 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         refillsPhraseOverride = totalFillsPhrase.isTotalFillsPhrase;
         refillsResolvedCanonical = 'totalfills';
         resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
+        // See refillsAnchorWordKeys/refillsLabelSeenText docs above — this
+        // anchor recovers a value from a trailing phrase ALONE, with no
+        // "Total Fills"/"Refills" label text anywhere on the page (that's
+        // the whole reason it exists — see this function's own doc), so
+        // only the anchor-line keys are set; refillsLabelSeenText stays
+        // undefined.
+        refillsAnchorWordKeys = new Set(totalFillsPhrase.matchedLine.map(ocrWordKey));
       }
     }
 
@@ -2477,6 +2625,14 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
           refillsPhraseOverride = anywhereMatch.isTotalFillsPhrase;
           refillsResolvedCanonical = 'totalfills';
           resolutionMeta.refills = { strategy: 'pattern-anchor-fallback', words: [] };
+          // See refillsAnchorWordKeys/refillsLabelSeenText docs above —
+          // unlike the phrase-only anchor just above, this one always
+          // matches an actual "Total Fills" label token, so both are set.
+          refillsAnchorWordKeys = new Set(anywhereMatch.matchedLine.map(ocrWordKey));
+          if (anywhereMatch.label) {
+            const { start, consumed } = anywhereMatch.label;
+            refillsLabelSeenText = wordsToText(anywhereMatch.matchedLine.slice(start, start + consumed + 6));
+          }
         }
       } catch {
         refillsMissReasonOverride = 'internal-error:label-anywhere-anchor';
@@ -2815,7 +2971,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // where that log is most needed to diagnose why.
     if (record.refills === undefined) {
       try {
-        const regionWords = buildRefillsOcrRegionWords(linesBeforeChromeFilter, resolutionMeta);
+        const regionWords = buildRefillsOcrRegionWords(linesBeforeChromeFilter, resolutionMeta, refillsAnchorWordKeys);
         if (regionWords.length > 0) {
           record.refillsOcrRegionWords = regionWords;
           diagnostics.push({ field: 'refills.ocrRegionWords', status: 'resolved', regionWords });
@@ -2824,6 +2980,12 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
         // Best-effort diagnostic only — never let it block the real
         // diagnostics log below from being written.
       }
+      // Branch brief item 2: exposed alongside refillsOcrRegionWords/
+      // refillsMissReason above (same "diagnostic-only, OCR-path-only,
+      // only on an actual refills miss" gating) — see
+      // PrescriptionRecord.refillsLabelSeen/.ocrLineCount docs (types.ts).
+      if (refillsLabelSeenText !== undefined) record.refillsLabelSeen = refillsLabelSeenText;
+      record.ocrLineCount = linesBeforeChromeFilter.length;
     }
 
     appendOcrDiagnosticsLog(diagnostics);

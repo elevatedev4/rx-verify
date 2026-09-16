@@ -224,17 +224,28 @@ function runVerify(input: CliInput): VerifyResult {
   const provider = skipDrugLookup ? NULL_PROVIDER : new LocalNdcProvider();
   const result = verify(resolvedSource, entered, provider, { skipDrugLookup, evidence: DRUG_EQUIVALENCE_EVIDENCE });
 
-  // Diagnostic-only passthrough (see VerifyResult.refillsOcrRegionWords'
-  // and .refillsMissReason's docs) — verify() itself never sees OCR
-  // words, so these can only be attached here, from parseEscriptOcr's own
-  // PrescriptionRecord output, never inside verify().
+  // Diagnostic-only passthrough (see VerifyResult.refillsOcrRegionWords',
+  // .refillsMissReason's, .refillsLabelSeen's, and .ocrLineCount's docs) —
+  // verify() itself never sees OCR words, so these can only be attached
+  // here, from parseEscriptOcr's own PrescriptionRecord output, never
+  // inside verify(). refillsLabelSeen/ocrLineCount added branch brief item
+  // 2 (2026-09-16 diagnostic-region-anchor fix) — grepped every existing
+  // refillsMissReason hop (this file, src/types.ts) to add them at each
+  // one, since a prior new-field addition here was once dropped by the
+  // --serve envelope and only caught by CI (see this file's header doc's
+  // reasoning for why the CLI/serve code paths are unified into one
+  // runVerify below instead of duplicated).
   const ocrRegionWords = resolvedSource.refillsOcrRegionWords;
   const missReason = resolvedSource.refillsMissReason;
-  if ((ocrRegionWords && ocrRegionWords.length > 0) || missReason) {
+  const labelSeen = resolvedSource.refillsLabelSeen;
+  const lineCount = resolvedSource.ocrLineCount;
+  if ((ocrRegionWords && ocrRegionWords.length > 0) || missReason || labelSeen !== undefined || lineCount !== undefined) {
     return {
       ...result,
       ...(ocrRegionWords && ocrRegionWords.length > 0 ? { refillsOcrRegionWords: ocrRegionWords } : {}),
-      ...(missReason ? { refillsMissReason: missReason } : {})
+      ...(missReason ? { refillsMissReason: missReason } : {}),
+      ...(labelSeen !== undefined ? { refillsLabelSeen: labelSeen } : {}),
+      ...(lineCount !== undefined ? { ocrLineCount: lineCount } : {})
     };
   }
   return result;
