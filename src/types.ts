@@ -136,14 +136,24 @@ export interface PrescriptionRecord {
    * SOURCE-side, DIAGNOSTIC ONLY, OCR path only: set ONLY when `refills`
    * above ends up undefined — WHY it ended up undefined, independent of
    * refillsOcrRegionWords above (which is WHAT OCR saw nearby). One of:
-   *   - 'no-value-paired' — no label match ever produced a raw refills
-   *     value at all (the ordinary "nothing found" case).
+   *   - 'no-value-paired' — parsing ran normally (at least one field
+   *     label was recognized somewhere on the page) but no label match
+   *     ever produced a raw refills value at all (the ordinary "nothing
+   *     found" case).
    *   - 'validation-failed:not-numeric' — a raw value WAS paired but
    *     parseRefills couldn't read a leading integer out of it.
    *   - 'internal-error:label-anywhere-anchor' — findTotalFillsLabelAnywhere
    *     (src/ocr/parseEscriptOcr.ts) threw before it could resolve
    *     anything; see that call site's local try/catch doc (2026-09-15
    *     hardening fix).
+   * ONLY set on every refills-undefined exit — 2026-09-16 addition,
+   * field report (3rd AUTO-DIAGNOSTIC): an unresolved refills field with
+   * NO reason at all gave an automatic error report nothing to go on.
+   *   - 'ocr-empty' — parseEscriptOcr was called with a null/empty OCR
+   *     word list; nothing was ever parsed at all.
+   *   - 'no-refills-text-found' — OCR produced words, but NOTHING on the
+   *     page was recognized as ANY field label at all (not just refills)
+   *     — a document/screen shape this parser has no anchor on.
    * Never set on the entered side, never set when refills DID resolve.
    * Threaded through to the overlay (Integrated/VerdictFieldInfo.cs)
    * alongside refillsOcrRegionWords so an automatic diagnostic report can

@@ -473,6 +473,92 @@ function isFuzzyMatch(candidate: string, canonical: string): boolean {
 }
 
 // ---------------------------------------------------------------------
+// Refills / "Total Fills" label matching — OCR-confusion tolerant
+// (field reports 2026-09-16: "TotalFi11s", "Tota1Fills", "To>lFi11s" —
+// see the three call sites below for where this is used).
+// ---------------------------------------------------------------------
+
+/**
+ * OCR-confusion-tolerant label normalizer for the refills/"Total Fills"
+ * label family ONLY. Lowercases, strips everything but a-z0-9 (plus a
+ * bare "|", a documented OCR misread of "I"/"l" that would otherwise be
+ * stripped before it could ever be remapped), then collapses the classic
+ * OCR letter/digit confusable GROUPS to one representative each: 1/l/I/|
+ * -> l, 0/O -> o, 5/S -> s, 8/B -> b. Two spellings that are the "same"
+ * label under any mix of these confusables normalize to the exact SAME
+ * output, so callers compare by plain equality (never a generic edit-
+ * distance budget) — see REFILLS_CONFUSABLE_CANONICAL's doc for why a
+ * distance budget is the wrong tool for THIS label family specifically.
+ */
+function normalizeOcrConfusableLabel(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9|]/g, '')
+    .replace(/[1li|]/g, 'l')
+    .replace(/[0o]/g, 'o')
+    .replace(/[5s]/g, 's')
+    .replace(/[8b]/g, 'b');
+}
+
+/**
+ * Post-confusable-collapse forms of the two BARE refills-family canonicals
+ * (the 1-2 word "refills" and "totalfills" entries in LABELS — NOT the
+ * "refillsauthorized"/"refillsremaining" variants, which stay on the
+ * ordinary generic-fuzzy path unchanged, since real captures of those are
+ * either exact or need genuine multi-letter tolerance the confusable map
+ * alone wouldn't help with anyway).
+ *
+ * Deliberately does NOT recognize a bare "refill" (singular) as an
+ * additional match target for the 'refills' canonical, even though it's
+ * only 1 edit away: a live field report's OCR word dump (2026-09-16) put
+ * an UNRELATED chrome word "Refill" (from a "Refill / Replace" button —
+ * "Refill" and "Replace" as separate OCR tokens) at the very START of a
+ * jumbled data row, well ahead of that same row's real "TotalFi11s ...
+ * (including this fill)" text. The old generic label matcher accepted
+ * that bare "Refill" as a fuzzy hit for the 'refills' canonical (1 edit,
+ * well inside its distance budget), which consumed the WHOLE row as
+ * refills' own (garbage, non-numeric) value before the label-anywhere/
+ * phrase fallback anchors ever got a chance to see the real label further
+ * along — confirmed live by reproducing the exact reported OCR shape
+ * end-to-end. Requiring an EXACT match after confusable-collapse (instead
+ * of a generic distance budget) fixes this: "totalfi11s"/"tota1fills"/etc
+ * all collapse to the SAME string as "totalfills" (an honest confusable
+ * respelling, length-preserving), while bare "refill" collapses to a
+ * SHORTER string than "refills" (a genuinely missing letter, not a
+ * confusable respelling) and so never matches. A genuine on-screen label
+ * that really is just "Refill" (no "s") would need its own
+ * disambiguation (e.g. requiring an immediately-following numeric token)
+ * rather than being folded into this set blind.
+ */
+const REFILLS_CONFUSABLE_CANONICAL = normalizeOcrConfusableLabel('refills');
+const TOTALFILLS_CONFUSABLE_CANONICAL = normalizeOcrConfusableLabel('totalfills');
+
+/** True if `rawText` (the ORIGINAL, un-normalized OCR text of a candidate label window) is an OCR-confusable match for `targetCanonical` (one of the two constants above). */
+function isConfusableLabelMatch(rawText: string, targetCanonical: string): boolean {
+  const normalized = normalizeOcrConfusableLabel(rawText);
+  return normalized.length > 0 && normalized === targetCanonical;
+}
+
+/**
+ * SECONDARY, bounded fuzzy tier for "totalfills" only — field report
+ * 2026-09-16 (4th AUTO-DIAGNOSTIC): "To>lFi11s" has OCR DROPPING/merging
+ * 2 characters of "Total" (not just substituting a confusable one), so
+ * even after confusable-collapse it's edit distance 2 from "totalfills",
+ * short of an exact match. Used ONLY by findTotalFillsLabelAnywhere,
+ * and ONLY ever accepted there when the very next tokens are ALSO an
+ * unambiguous numeric-value-then-recognized-tail-phrase shape — the
+ * exact same shape findTotalFillsPhraseValue already trusts completely
+ * on its own with NO label at all — so a badly-garbled false positive on
+ * this bounded tier can never cost more than what the label-independent
+ * phrase anchor would have accepted anyway.
+ */
+function isTotalFillsBoundedFuzzyMatch(rawText: string): boolean {
+  const normalized = normalizeOcrConfusableLabel(rawText);
+  if (!normalized) return false;
+  return levenshtein(normalized, TOTALFILLS_CONFUSABLE_CANONICAL) <= 2;
+}
+
+// ---------------------------------------------------------------------
 // Line reconstruction from word bounding boxes
 // ---------------------------------------------------------------------
 
@@ -529,7 +615,8 @@ function findLabelAtLineStart(line: OcrWord[]): LabelMatch | null {
   const maxConsume = Math.min(3, line.length);
 
   for (let consumed = 1; consumed <= maxConsume; consumed++) {
-    const candidate = normalize(wordsToText(line.slice(0, consumed)));
+    const rawSlice = wordsToText(line.slice(0, consumed));
+    const candidate = normalize(rawSlice);
     if (!candidate) continue;
 
     for (const label of LABELS) {
@@ -538,6 +625,20 @@ function findLabelAtLineStart(line: OcrWord[]): LabelMatch | null {
       // the label column/top-of-page region is never a valid label
       // anchor, regardless of how well its text matches lexically.
       if (label.key === 'patient' && !isPlausiblePatientLabelWord(line[0])) continue;
+      // Refills/"Total Fills" bare canonicals use the OCR-confusable
+      // EXACT-match tier instead of the generic distance budget — see
+      // REFILLS_CONFUSABLE_CANONICAL's doc for why (a generic budget
+      // loose enough to catch "TotalFi11s" is ALSO loose enough to
+      // mistake an unrelated bare "Refill" for the label).
+      if (label.canonical === 'refills' || label.canonical === 'totalfills') {
+        const target = label.canonical === 'refills' ? REFILLS_CONFUSABLE_CANONICAL : TOTALFILLS_CONFUSABLE_CANONICAL;
+        if (!isConfusableLabelMatch(rawSlice, target)) continue;
+        const ratio = 0;
+        if (!best || ratio < best.ratio || (ratio === best.ratio && consumed > best.consumed)) {
+          best = { label, consumed, ratio };
+        }
+        continue;
+      }
       const dist = levenshtein(candidate, label.canonical);
       if (dist > fuzzyThreshold(label.canonical.length)) continue;
       const ratio = dist / label.canonical.length;
@@ -562,13 +663,26 @@ function findLabelAt(words: OcrWord[], start: number): LabelMatch | null {
   const maxConsume = Math.min(3, words.length - start);
 
   for (let consumed = 1; consumed <= maxConsume; consumed++) {
-    const candidate = normalize(wordsToText(words.slice(start, start + consumed)));
+    const rawSlice = wordsToText(words.slice(start, start + consumed));
+    const candidate = normalize(rawSlice);
     if (!candidate) continue;
 
     for (const label of LABELS) {
       if (consumed > label.maxWords) continue;
       // See PATIENT_LABEL_MAX_X doc.
       if (label.key === 'patient' && !isPlausiblePatientLabelWord(words[start])) continue;
+      // See findLabelAtLineStart's matching comment — same tolerant tier,
+      // same false-positive rationale, shared for all refills/Total
+      // Fills matching in this file.
+      if (label.canonical === 'refills' || label.canonical === 'totalfills') {
+        const target = label.canonical === 'refills' ? REFILLS_CONFUSABLE_CANONICAL : TOTALFILLS_CONFUSABLE_CANONICAL;
+        if (!isConfusableLabelMatch(rawSlice, target)) continue;
+        const ratio = 0;
+        if (!best || ratio < best.ratio) {
+          best = { label, consumed, ratio };
+        }
+        continue;
+      }
       const dist = levenshtein(candidate, label.canonical);
       if (dist > fuzzyThreshold(label.canonical.length)) continue;
       const ratio = dist / label.canonical.length;
@@ -1007,26 +1121,69 @@ function findNdcToken(words: OcrWord[], exclude: Set<string>): OcrWord | null {
  * two single-digit tokens "1" "1" — never an unbounded run — so an
  * unrelated multi-digit value from elsewhere on the row can never
  * concatenate in).
+ *
+ * BROADENED (field report 2026-09-16, 4th AUTO-DIAGNOSTIC): a stray
+ * bracket can land as its OWN OCR token ("(", ")") rather than glued onto
+ * the adjacent word — "( including this fill )" — and a phrase word
+ * itself can carry the SAME letter/digit confusables as the label
+ * ("fi11)" for "fill)"). Both are tolerated now: isBracketPunctuationToken
+ * lets a lone "(" / ")" sit between/around the real phrase words (and
+ * between the number and the phrase) without breaking the match, and
+ * phraseWordMatches compares each word through the SAME confusable
+ * collapse as normalizeOcrConfusableLabel, not a plain string compare.
+ * Still an exact-shape match otherwise — never a generic "any number near
+ * parentheses" guess.
  */
+function isBracketPunctuationToken(text: string): boolean {
+  const t = text.trim();
+  return t.length > 0 && /^[()., ]+$/.test(t);
+}
+
+function phraseWordMatches(tokenText: string, expectedWord: string): boolean {
+  const bare = tokenText.toLowerCase().replace(/^\(+/, '').replace(/[).,]+$/, '');
+  if (!bare) return false;
+  return normalizeOcrConfusableLabel(bare) === normalizeOcrConfusableLabel(expectedWord);
+}
+
 function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | undefined {
   for (const line of lines) {
-    for (const phrase of TOTAL_FILLS_TAIL_PHRASES) {
-      for (let i = 0; i + phrase.words.length <= line.length; i++) {
-        const tailWords = phrase.words.map((_, k) => {
-          const raw = (line[i + k]?.text ?? '').toLowerCase();
-          return k === 0 ? raw.replace(/^\(+/, '') : k === phrase.words.length - 1 ? raw.replace(/[).,]+$/, '') : raw;
-        });
-        if (!phrase.words.every((w, k) => tailWords[k] === w)) continue;
-        if (i - 1 < 0) continue;
+    for (let i = 0; i < line.length; i++) {
+      for (const phrase of TOTAL_FILLS_TAIL_PHRASES) {
+        // Try to match phrase.words in order starting at token i,
+        // skipping over any stray bracket-only tokens interspersed
+        // between them (never skipping real content).
+        let idx = i;
+        let matched = true;
+        for (const word of phrase.words) {
+          while (idx < line.length && isBracketPunctuationToken((line[idx] as OcrWord).text)) idx++;
+          const tok = line[idx];
+          if (!tok || !phraseWordMatches(tok.text, word)) {
+            matched = false;
+            break;
+          }
+          idx++;
+        }
+        if (!matched) continue;
 
-        const immediate = repairDigits((line[i - 1]?.text ?? '').trim());
+        // Walk back from the phrase's first real token to find the
+        // immediately preceding numeric token, skipping stray bracket-only
+        // tokens the same way.
+        let numIdx = i - 1;
+        while (numIdx >= 0 && isBracketPunctuationToken((line[numIdx] as OcrWord).text)) numIdx--;
+        if (numIdx < 0) continue;
+
+        const immediate = repairDigits((line[numIdx]?.text ?? '').trim());
         if (!/^\d+$/.test(immediate)) continue;
         let digits = immediate;
         // At most ONE further single-digit token merges in front, and
         // only while staying within the cap — mirrors parseRefills exactly.
-        if (digits.length < MAX_MERGED_REFILL_DIGITS && i - 2 >= 0) {
-          const prior = repairDigits((line[i - 2]?.text ?? '').trim());
-          if (/^\d$/.test(prior)) digits = prior + digits;
+        if (digits.length < MAX_MERGED_REFILL_DIGITS) {
+          let priorIdx = numIdx - 1;
+          while (priorIdx >= 0 && isBracketPunctuationToken((line[priorIdx] as OcrWord).text)) priorIdx--;
+          if (priorIdx >= 0) {
+            const prior = repairDigits((line[priorIdx]?.text ?? '').trim());
+            if (/^\d$/.test(prior)) digits = prior + digits;
+          }
         }
         if (digits) return { value: digits, isTotalFillsPhrase: phrase.isTotalFillsPhrase };
       }
@@ -1050,16 +1207,37 @@ function findTotalFillsPhraseValue(lines: OcrWord[][]): ParsedRefillsValue | und
  * skipLeadingParenthetical step, for the "Total fills (renewal: ...): 4"
  * shape) so this anchor and a normal label match behave identically once
  * the label itself is found.
+ *
+ * SECONDARY TIER (field report 2026-09-16, 4th AUTO-DIAGNOSTIC —
+ * "To>lFi11s"): OCR dropped/merged 2 characters of "Total" itself, not
+ * just a confusable substitution, so it falls short of the primary tier's
+ * exact (post-confusable-collapse) match. isTotalFillsBoundedFuzzyMatch
+ * covers this, but ONLY when accompanied by the same numeric-value-then-
+ * recognized-tail-phrase shape findTotalFillsPhraseValue trusts on its
+ * own — see that function's own doc for why this can't cost more than
+ * the label-independent phrase anchor already would.
  */
 function findTotalFillsLabelAnywhere(lines: OcrWord[][]): ParsedRefillsValue | undefined {
   for (const line of lines) {
     for (let start = 0; start < line.length; start++) {
       const match = findLabelAt(line, start);
-      if (!match || match.label.key !== 'refills' || match.label.canonical !== 'totalfills') continue;
-      const remainder = wordsToText(stripLeadingColon(line.slice(start + match.consumed)));
-      if (!remainder) continue;
-      const parsed = parseRefills(remainder);
-      if (parsed) return parsed;
+      if (match && match.label.key === 'refills' && match.label.canonical === 'totalfills') {
+        const remainder = wordsToText(stripLeadingColon(line.slice(start + match.consumed)));
+        if (remainder) {
+          const parsed = parseRefills(remainder);
+          if (parsed) return parsed;
+        }
+      }
+
+      for (let consumed = 1; consumed <= Math.min(2, line.length - start); consumed++) {
+        const rawSlice = wordsToText(line.slice(start, start + consumed));
+        if (!isTotalFillsBoundedFuzzyMatch(rawSlice)) continue;
+        const remainder = wordsToText(stripLeadingColon(line.slice(start + consumed)));
+        if (!remainder) continue;
+        const parsed = parseRefills(remainder);
+        // Only ever accepted alongside a RECOGNIZED tail phrase — see doc.
+        if (parsed && parsed.isTotalFillsPhrase !== undefined) return parsed;
+      }
     }
   }
   return undefined;
@@ -1205,7 +1383,73 @@ function rowLooksNameLike(line: OcrWord[]): boolean {
  * Only whole PHYSICAL ROWS containing a "fill"-shaped word, plus their
  * immediate row-before/row-after neighbors (±1, never further), are ever
  * considered as candidates at all. Capped at `maxWords` total.
+ *
+ * FALLBACK (field report 2026-09-16, 3rd AUTO-DIAGNOSTIC): a document can
+ * miss refills with NO "fill"-shaped word anywhere on the page at all
+ * (the report fired on the isApproval heuristic alone: some "approv"/
+ * "renew" word present, nearbyOcrWords empty) — a refill-request/approval
+ * summary screen that never renders the word "fill(s)" in any spelling.
+ * When the primary "fill"-shaped scan above finds nothing, this retries
+ * the EXACT same three-layer PHI filtering against rows containing an
+ * "approv"/"renew"/"refill request"/"rx request"-shaped word instead, so
+ * the next report from THIS kind of document still carries proof of what
+ * OCR saw, instead of an empty array.
  */
+const isFillShaped = (text: string) => normalize(text).includes('fill');
+const isApprovalRenewalWordShaped = (text: string) => {
+  const n = normalize(text);
+  return n.includes('approv') || n.includes('renew');
+};
+
+/**
+ * True if ROW `line` carries "approv"/"renew" text (either as its own
+ * word) OR a "refill request"/"rx request" phrase — checked against the
+ * WHOLE row's joined-then-normalized text (same normalize() used
+ * everywhere else in this file to make label matching space-insensitive)
+ * since OCR can split either two-word phrase across separate tokens.
+ */
+function isApprovalRenewalRowShaped(line: OcrWord[]): boolean {
+  if (line.some((w) => isApprovalRenewalWordShaped(w.text))) return true;
+  const joined = normalize(wordsToText(line));
+  return joined.includes('refillrequest') || joined.includes('rxrequest');
+}
+
+function collectRefillsRegionWords(
+  lines: OcrWord[][],
+  isAnchorLine: (line: OcrWord[]) => boolean,
+  sensitiveKeys: ReadonlySet<string>,
+  sensitiveLineIndices: ReadonlySet<number>,
+  maxWords: number
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li] ?? [];
+    if (!isAnchorLine(line)) continue;
+
+    for (const neighborIdx of [li - 1, li, li + 1]) {
+      const candidateLine = lines[neighborIdx];
+      if (!candidateLine) continue;
+      // Layer 2 (label rows) and layer 3 (unlabeled name-shaped rows) —
+      // both drop the ENTIRE row, never just individual tokens.
+      if (sensitiveLineIndices.has(neighborIdx)) continue;
+      if (rowLooksNameLike(candidateLine)) continue;
+
+      for (const w of candidateLine) {
+        const key = ocrWordKey(w);
+        if (seen.has(key)) continue;
+        // Layer 1 (resolved-field words) and layer 3 (shape-based
+        // per-token exclusions: dates, phone/NPI-shaped digit runs).
+        if (sensitiveKeys.has(key) || isDateShapedToken(w.text) || isSensitiveDigitRun(w.text)) continue;
+        seen.add(key);
+        out.push(w.text);
+        if (out.length >= maxWords) return out;
+      }
+    }
+  }
+  return out;
+}
+
 function buildRefillsOcrRegionWords(
   lines: OcrWord[][],
   resolutionMeta: Partial<Record<LabelKey, { strategy: FieldDiagnostic['strategy']; words: OcrWord[] }>>,
@@ -1230,35 +1474,17 @@ function buildRefillsOcrRegionWords(
     }
   }
 
-  const isFillShaped = (text: string) => normalize(text).includes('fill');
+  const fillWords = collectRefillsRegionWords(
+    lines,
+    (line) => line.some((w) => isFillShaped(w.text)),
+    sensitiveKeys,
+    sensitiveLineIndices,
+    maxWords
+  );
+  if (fillWords.length > 0) return fillWords;
 
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li] ?? [];
-    if (!line.some((w) => isFillShaped(w.text))) continue;
-
-    for (const neighborIdx of [li - 1, li, li + 1]) {
-      const candidateLine = lines[neighborIdx];
-      if (!candidateLine) continue;
-      // Layer 2 (label rows) and layer 3 (unlabeled name-shaped rows) —
-      // both drop the ENTIRE row, never just individual tokens.
-      if (sensitiveLineIndices.has(neighborIdx)) continue;
-      if (rowLooksNameLike(candidateLine)) continue;
-
-      for (const w of candidateLine) {
-        const key = ocrWordKey(w);
-        if (seen.has(key)) continue;
-        // Layer 1 (resolved-field words) and layer 3 (shape-based
-        // per-token exclusions: dates, phone/NPI-shaped digit runs).
-        if (sensitiveKeys.has(key) || isDateShapedToken(w.text) || isSensitiveDigitRun(w.text)) continue;
-        seen.add(key);
-        out.push(w.text);
-        if (out.length >= maxWords) return out;
-      }
-    }
-  }
-  return out;
+  // Fallback anchor — see this function's doc, "FALLBACK" paragraph.
+  return collectRefillsRegionWords(lines, isApprovalRenewalRowShaped, sensitiveKeys, sensitiveLineIndices, maxWords);
 }
 
 /**
@@ -1522,9 +1748,22 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
   const diagnostics: FieldDiagnostic[] = [];
 
   try {
-    if (!ocr || ocr.length === 0) return record;
+    // Field report 2026-09-16, 3rd AUTO-DIAGNOSTIC: an unresolved refills
+    // field with NO refillsMissReason at all gave an automatic error
+    // report nothing to go on ("missReason=none"). Every exit from this
+    // function that leaves refills undefined now sets one — these two
+    // earliest exits (no OCR input at all) get their own distinct
+    // 'ocr-empty' reason, since it's a meaningfully different situation
+    // from "OCR ran but found nothing refills-shaped".
+    if (!ocr || ocr.length === 0) {
+      record.refillsMissReason = 'ocr-empty';
+      return record;
+    }
     const words = ocr.filter((w) => w && typeof w.text === 'string' && w.text.trim().length > 0);
-    if (words.length === 0) return record;
+    if (words.length === 0) {
+      record.refillsMissReason = 'ocr-empty';
+      return record;
+    }
 
     let lines = groupLines(words);
 
@@ -1532,7 +1771,12 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // label (chrome always renders above the data pane — see branch
     // brief "OBSERVED LAYOUT").
     const firstLabelIdx = lines.findIndex((line) => findLabelAtLineStart(line) !== null);
-    if (firstLabelIdx === -1) return record; // nothing recognizable at all
+    if (firstLabelIdx === -1) {
+      // Nothing recognizable as ANY field label anywhere on the page —
+      // certainly nothing refills-shaped either.
+      record.refillsMissReason = 'no-refills-text-found';
+      return record;
+    }
     lines = lines.slice(firstLabelIdx);
 
     // Defensive secondary chrome filter, in case a chrome-ish line
@@ -2153,16 +2397,29 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
 
     // ---- Pattern anchor: refills via "N (including this fill)" tail,
     // independent of any label (Bug 3) ----
-    // Only a FALLBACK — an explicit "Refills"/"Refills Authorized"/
-    // "Refills Remaining"/"Total fills" label match from Pass A/B above
-    // always wins (raw.refills already set); this only fires when the
-    // label itself was dropped by OCR entirely and nothing above found
-    // anything at all. See findTotalFillsPhraseValue. Scans
-    // linesBeforeChromeFilter (round 5 fix 1), not the post-filter
-    // `lines` — the defensive chrome filter above can drop the phrase's
-    // entire physical row (e.g. "Fills" fuzzy-matching the "Fill" chrome
-    // token) before this fallback would otherwise ever see it.
-    if (raw.refills === undefined) {
+    // A FALLBACK — an explicit "Refills"/"Refills Authorized"/"Refills
+    // Remaining"/"Total fills" label match from Pass A/B above always
+    // wins WHEN IT ACTUALLY PRODUCED A NUMBER. Retried (not just skipped)
+    // when raw.refills is set but doesn't parse as a number, not only
+    // when it's undefined outright — field report 2026-09-16: a jumbled
+    // OCR row can put an UNRELATED word ("Refill", from a "Refill /
+    // Replace" button) at the row's own start, which the row-start
+    // matcher (correctly) still treats as a 'refills' label match, and
+    // Pass A's boundary detection then bounds ITS "value" at the next
+    // EXACT label match on the row (e.g. "Medication:") — swallowing
+    // unrelated chrome text ("Replace SN:") as raw.refills long before
+    // reaching this row's REAL "TotalFi11s ... (including this fill)"
+    // text further along. A raw.refills that doesn't parse as a number is
+    // therefore never trusted as "this document has no Total-Fills
+    // information" on its own — this fallback (and the anchor below) gets
+    // a chance to find the real value; only if NEITHER can is it finally
+    // reported as validation-failed:not-numeric at the assembly site
+    // below. See findTotalFillsPhraseValue. Scans linesBeforeChromeFilter
+    // (round 5 fix 1), not the post-filter `lines` — the defensive chrome
+    // filter above can drop the phrase's entire physical row (e.g.
+    // "Fills" fuzzy-matching the "Fill" chrome token) before this
+    // fallback would otherwise ever see it.
+    if (raw.refills === undefined || parseRefills(raw.refills) === undefined) {
       const totalFillsPhrase = findTotalFillsPhraseValue(linesBeforeChromeFilter);
       if (totalFillsPhrase !== undefined) {
         raw.refills = totalFillsPhrase.value;
@@ -2209,7 +2466,10 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // (already the case whenever it simply finds nothing), never any
     // other field on the same document. See class doc's "Never throw"
     // policy — same posture, applied one level deeper.
-    if (raw.refills === undefined) {
+    //
+    // Same "retry, don't just skip, on a non-numeric raw.refills" gating
+    // as the phrase-anchor fallback just above — see its doc.
+    if (raw.refills === undefined || parseRefills(raw.refills) === undefined) {
       try {
         const anywhereMatch = findTotalFillsLabelAnywhere(linesBeforeChromeFilter);
         if (anywhereMatch !== undefined) {
