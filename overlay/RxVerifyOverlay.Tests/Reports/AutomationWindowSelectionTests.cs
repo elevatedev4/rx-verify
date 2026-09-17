@@ -178,4 +178,65 @@ public class AutomationWindowSelectionTests
             Assert.False(shouldFallBack);
         }
     }
+
+    /// <summary>Round 2: PioneerReportDriver.OpenRibbonScreen's post-strategy confirmation check.</summary>
+    public class RibbonScreenConfirmationTests
+    {
+        [Fact]
+        public void BuildConfirmationHintsIncludesTheScreenNameAndTheRunPrefixedForm()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.Equal(new[] { "Financial Reports", "Run Financial Reports" }, hints);
+        }
+
+        [Fact]
+        public void NameContainsAnyHint_TrueForExactMatch()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.True(RibbonScreenConfirmation.NameContainsAnyHint("Financial Reports", hints));
+        }
+
+        [Fact]
+        public void NameContainsAnyHint_TrueForTheRunPrefixedTitle()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.True(RibbonScreenConfirmation.NameContainsAnyHint("Run Financial Reports", hints));
+        }
+
+        [Fact]
+        public void NameContainsAnyHint_TrueForASubstringMatch()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.True(RibbonScreenConfirmation.NameContainsAnyHint("PioneerRx - Run Financial Reports (2026)", hints));
+        }
+
+        [Fact]
+        public void NameContainsAnyHint_IsCaseInsensitive()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.True(RibbonScreenConfirmation.NameContainsAnyHint("run financial reports", hints));
+        }
+
+        [Fact]
+        public void NameContainsAnyHint_FalseForAnUnrelatedTitle()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.False(RibbonScreenConfirmation.NameContainsAnyHint("Payments", hints));
+        }
+
+        [Fact]
+        public void NameContainsAnyHint_FalseForNullOrEmptyName()
+        {
+            var hints = RibbonScreenConfirmation.BuildConfirmationHints("Financial Reports");
+
+            Assert.False(RibbonScreenConfirmation.NameContainsAnyHint(null, hints));
+            Assert.False(RibbonScreenConfirmation.NameContainsAnyHint(string.Empty, hints));
+        }
+    }
 }

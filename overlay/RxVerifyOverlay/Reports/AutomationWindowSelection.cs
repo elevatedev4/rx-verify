@@ -80,3 +80,36 @@ public static class PreviewCloseDecision
         return foregroundHandle == previewHandle.Value;
     }
 }
+
+/// <summary>
+/// Round 2 fix (Will's first real run: "UIA navigation to 'Analysis' &gt;
+/// 'Financial Reports' failed"). Pure decision behind
+/// PioneerReportDriver.OpenRibbonScreen's post-strategy confirmation
+/// check: after each navigation attempt (UIA name match, keyboard
+/// KeyTips, keyboard Alt+letter accelerators), the driver polls for
+/// either a descendant of the main window matching one of these hints
+/// (exact name) OR a top-level Pioneer-owned window whose title CONTAINS
+/// one of them — this class is only the "does this title count" half,
+/// unit tested with plain strings, no FlaUI/UIA involved.
+/// </summary>
+public static class RibbonScreenConfirmation
+{
+    /// <summary>The screen name itself, plus PioneerRx's own "Run &lt;screen&gt;" convention observed in Will's video for the Financial Reports list — generalized here so it applies to any ribbon screen this driver opens (Financial Reports, Payments, ...), not just the one that happened to fail first.</summary>
+    public static IReadOnlyList<string> BuildConfirmationHints(string screenName) =>
+        new[] { screenName, $"Run {screenName}" };
+
+    public static bool NameContainsAnyHint(string? name, IReadOnlyList<string> hints)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+
+        foreach (var hint in hints)
+        {
+            if (!string.IsNullOrEmpty(hint) && name.Contains(hint, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
