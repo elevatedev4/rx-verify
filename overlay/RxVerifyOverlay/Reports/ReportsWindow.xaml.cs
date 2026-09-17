@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -44,9 +45,12 @@ public sealed partial class ReportsWindow : Window
         _rows = new ObservableCollection<ReportRowViewModel>();
         foreach (var entry in ReportCatalog.All)
         {
-            _rows.Add(new ReportRowViewModel(entry));
+            var row = new ReportRowViewModel(entry);
+            row.PropertyChanged += OnRowPropertyChanged;
+            _rows.Add(row);
         }
         ReportsList.ItemsSource = _rows;
+        UpdateSelectAllButtonLabel();
 
         _coordinator = new ReportsCoordinator(driver);
         _coordinator.ProgressChanged += OnCoordinatorProgressChanged;
@@ -57,6 +61,40 @@ public sealed partial class ReportsWindow : Window
         BeginDatePicker.SelectedDate = defaultBegin;
         EndDatePicker.SelectedDate = defaultEnd;
         OutputFolderTextBox.Text = ReportRunPlan.DefaultOutputFolder(defaultEnd);
+    }
+
+    /// <summary>
+    /// GOAL brief round 2, step 4: "Select all"/"Unselect all" toggle next
+    /// to the report list — ticks/unticks every ENABLED (non-greyed)
+    /// report; the POS-daily placeholder row is never touched. See
+    /// SelectAllToggle for the pure toggle-state logic (unit tested).
+    /// </summary>
+    private void OnSelectAllClick(object sender, RoutedEventArgs e)
+    {
+        var rowStates = _rows.Select(r => (r.IsEnabled, r.IsSelected)).ToList();
+        var nextSelected = SelectAllToggle.NextSelectedState(rowStates);
+
+        foreach (var row in _rows)
+        {
+            if (row.IsEnabled) row.IsSelected = nextSelected;
+        }
+
+        UpdateSelectAllButtonLabel();
+    }
+
+    /// <summary>Keeps the button's label in sync whenever a row's own checkbox is ticked/unticked directly, not just after OnSelectAllClick.</summary>
+    private void OnRowPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ReportRowViewModel.IsSelected))
+        {
+            UpdateSelectAllButtonLabel();
+        }
+    }
+
+    private void UpdateSelectAllButtonLabel()
+    {
+        var rowStates = _rows.Select(r => (r.IsEnabled, r.IsSelected)).ToList();
+        SelectAllButton.Content = SelectAllToggle.LabelFor(rowStates);
     }
 
     private void OnBrowseClick(object sender, RoutedEventArgs e)

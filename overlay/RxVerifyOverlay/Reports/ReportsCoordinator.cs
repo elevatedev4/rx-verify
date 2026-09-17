@@ -107,9 +107,19 @@ public sealed class ReportsCoordinator
             ReportRunResult result;
             try
             {
+                // Round 2 fix ("make the next run self-diagnosing"): the
+                // driver's own step-by-step log() calls (ribbon navigation
+                // attempts, diagnostic dumps on a lookup failure, etc.)
+                // used to go ONLY to the UI log box (the raw `log`
+                // parameter) - never into ReportsLog.Append or this run's
+                // run-<timestamp>.log file, so they were lost the moment
+                // the window closed. Passing WriteLine instead fans every
+                // one of those lines out to all three destinations, same
+                // as this method's own "Running .../saved.../failed..."
+                // lines already did.
                 result = item.Entry.ParameterKind == ReportParameterKind.PaymentsSearch
-                    ? await _driver.RunPaymentsExport(item, log, ct).ConfigureAwait(false)
-                    : await _driver.RunFinancialReport(item, log, ct).ConfigureAwait(false);
+                    ? await _driver.RunPaymentsExport(item, WriteLine, ct).ConfigureAwait(false)
+                    : await _driver.RunFinancialReport(item, WriteLine, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

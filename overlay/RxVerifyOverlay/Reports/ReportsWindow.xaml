@@ -47,28 +47,38 @@
         </StackPanel>
 
         <!-- Report picker / status list -->
-        <Border Grid.Row="2" BorderBrush="#FFD5D5D5" BorderThickness="1" CornerRadius="3" Margin="0,0,0,10">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <ItemsControl x:Name="ReportsList">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Border BorderBrush="#FFEDEDED" BorderThickness="0,0,0,1" Padding="8,6">
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}" IsEnabled="{Binding IsEnabled}" VerticalAlignment="Center" Margin="0,0,10,0" />
-                                    <TextBlock Grid.Column="1" Text="{Binding DisplayName}" VerticalAlignment="Center" IsEnabled="{Binding IsEnabled}" />
-                                    <TextBlock Grid.Column="2" Text="{Binding StatusText}" VerticalAlignment="Center" Foreground="#FF555555" TextWrapping="Wrap" MaxWidth="220" />
-                                </Grid>
-                            </Border>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </ScrollViewer>
-        </Border>
+        <Grid Grid.Row="2" Margin="0,0,0,10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Button Grid.Row="0" x:Name="SelectAllButton" Content="Select all" HorizontalAlignment="Right"
+                    Padding="8,2" Margin="0,0,0,4" Click="OnSelectAllClick" />
+
+            <Border Grid.Row="1" BorderBrush="#FFD5D5D5" BorderThickness="1" CornerRadius="3">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="ReportsList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderBrush="#FFEDEDED" BorderThickness="0,0,0,1" Padding="8,6">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}" IsEnabled="{Binding IsEnabled}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" VerticalAlignment="Center" IsEnabled="{Binding IsEnabled}" />
+                                        <TextBlock Grid.Column="2" Text="{Binding StatusText}" VerticalAlignment="Center" Foreground="#FF555555" TextWrapping="Wrap" MaxWidth="220" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
+        </Grid>
 
         <!-- Run / Stop -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,10">
