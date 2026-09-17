@@ -121,6 +121,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT point);
+
+    /// <summary>Plain Win32 POINT (screen coordinates) for WindowFromPoint - review fix (blocker 2), see TryActivateRibbonElement/IsPointOwnedByPioneer.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
     private UIA3Automation GetOrCreateAutomation() => _automation ??= new UIA3Automation();
 
     public bool FindMainWindow()
@@ -483,14 +494,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
 
         log($"Ribbon navigation strategy 2/3 (keyboard KeyTips: Alt, then '{tabName}'/'{buttonName}' first letters)...");
-        if (TryKeyboardKeyTipsNavigate(tabName, buttonName, log)
+        if (TryKeyboardKeyTipsNavigate(tabName, buttonName, log, ct)
             && await WaitForScreenConfirmation(confirmationHints, ct).ConfigureAwait(false))
         {
             return true;
         }
 
         log($"Ribbon navigation strategy 3/3 (keyboard Alt+letter accelerators for '{tabName}'/'{buttonName}')...");
-        if (TryKeyboardAcceleratorNavigate(tabName, buttonName, log)
+        if (TryKeyboardAcceleratorNavigate(tabName, buttonName, log, ct)
             && await WaitForScreenConfirmation(confirmationHints, ct).ConfigureAwait(false))
         {
             return true;
@@ -537,8 +548,25 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return null;
     }
 
-    /// <summary>GOAL brief step 2i's ordered activation attempts: SelectionItem, then Invoke, then ExpandCollapse, then a mouse click at the element's bounding-rectangle centre. Logs which one actually worked (or that none did).</summary>
-    private static bool TryActivateRibbonElement(AutomationElement element, Action<string> log)
+    /// <summary>
+    /// GOAL brief step 2i's ordered activation attempts: SelectionItem,
+    /// then Invoke, then ExpandCollapse, then a mouse click at the
+    /// element's bounding-rectangle centre. Logs which one actually
+    /// worked (or that none did).
+    ///
+    /// Review fix (blocker 2): the mouse click is the one activation path
+    /// that lands on WHATEVER window is physically at that screen point
+    /// the instant the click fires, regardless of which AutomationElement
+    /// this method was asked to click - a focus change between the UIA
+    /// lookup and this call could put a completely different window
+    /// there. Immediately before the click: re-run EnsurePioneerForeground
+    /// (existing guard), then independently confirm via WindowFromPoint
+    /// that the window ACTUALLY AT the click point belongs to Pioneer's
+    /// own process id (IsPointOwnedByPioneer) - skip the click and log why
+    /// rather than guess if either check fails. Instance method (not
+    /// static) so it can call those instance guards.
+    /// </summary>
+    private bool TryActivateRibbonElement(AutomationElement element, Action<string> log)
     {
         try
         {
@@ -579,6 +607,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             if (rect.Width > 0 && rect.Height > 0)
             {
                 var center = new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+
+                if (!EnsurePioneerForeground(log))
+                {
+                    log("    skipping mouse click - Pioneer lost focus");
+                    return false;
+                }
+
+                if (!IsPointOwnedByPioneer(center))
+                {
+                    log("    skipping mouse click - the window at the click point is not Pioneer's");
+                    return false;
+                }
+
                 Mouse.LeftClick(center);
                 log("    activated via mouse click at bounding-rectangle centre");
                 return true;
@@ -590,11 +631,30 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return false;
     }
 
-    /// <summary>Strategy 2: the original keyboard fallback shape (tap Alt for key-tips, then each name's first letter) with 1.5s settle waits and a per-keystroke foreground re-check.</summary>
-    private bool TryKeyboardKeyTipsNavigate(string tabName, string buttonName, Action<string> log)
+    /// <summary>Review fix (blocker 2): confirms the window physically AT <paramref name="point"/> right now belongs to Pioneer's own process, via WindowFromPoint + GetWindowThreadProcessId - an independent, stronger check than EnsurePioneerForeground's OS-foreground-window check, since "the foreground window" and "whatever is under this exact pixel" aren't always the same window.</summary>
+    private bool IsPointOwnedByPioneer(Point point)
     {
         try
         {
+            var hwnd = WindowFromPoint(new POINT { X = point.X, Y = point.Y });
+            if (hwnd == IntPtr.Zero) return false;
+
+            GetWindowThreadProcessId(hwnd, out var pid);
+            return _pioneerProcessId != 0 && pid == (uint)_pioneerProcessId;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Strategy 2: the original keyboard fallback shape (tap Alt for key-tips, then each name's first letter) with 1.5s settle waits and a per-keystroke foreground re-check. Non-blocking review fix: checks <paramref name="ct"/> at the top and between keystrokes so Stop responds promptly instead of waiting out the full ~4.5s of settle sleeps first - cancellation propagates as OperationCanceledException, same contract as the rest of this class.</summary>
+    private bool TryKeyboardKeyTipsNavigate(string tabName, string buttonName, Action<string> log, CancellationToken ct)
+    {
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+
             // Re-check foreground before EACH keystroke, not just once
             // before the whole sequence - three separate sends is enough
             // time for focus to move between them.
@@ -603,15 +663,21 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             Keyboard.Release(VirtualKeyShort.ALT);
             Thread.Sleep(KeyboardStepWait);
 
+            ct.ThrowIfCancellationRequested();
             if (!EnsurePioneerForeground(log)) return false;
             Keyboard.Type(tabName.Substring(0, 1));
             Thread.Sleep(KeyboardStepWait);
 
+            ct.ThrowIfCancellationRequested();
             if (!EnsurePioneerForeground(log)) return false;
             Keyboard.Type(buttonName.Substring(0, 1));
             Thread.Sleep(KeyboardStepWait);
 
             return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {
@@ -619,20 +685,26 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
     }
 
-    /// <summary>Strategy 3: classic held-Alt accelerator combos (Alt+letter for the tab, Alt+letter for the button) - Will's Macro Express macros use this style, distinct from strategy 2's tap-then-type key-tips sequence.</summary>
-    private bool TryKeyboardAcceleratorNavigate(string tabName, string buttonName, Action<string> log)
+    /// <summary>Strategy 3: classic held-Alt accelerator combos (Alt+letter for the tab, Alt+letter for the button) - Will's Macro Express macros use this style, distinct from strategy 2's tap-then-type key-tips sequence. Same non-blocking cancellation-responsiveness fix as TryKeyboardKeyTipsNavigate.</summary>
+    private bool TryKeyboardAcceleratorNavigate(string tabName, string buttonName, Action<string> log, CancellationToken ct)
     {
         try
         {
+            ct.ThrowIfCancellationRequested();
             if (!EnsurePioneerForeground(log)) return false;
             if (!SendAltLetterCombo(tabName)) return false;
             Thread.Sleep(KeyboardStepWait);
 
+            ct.ThrowIfCancellationRequested();
             if (!EnsurePioneerForeground(log)) return false;
             if (!SendAltLetterCombo(buttonName)) return false;
             Thread.Sleep(KeyboardStepWait);
 
             return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {

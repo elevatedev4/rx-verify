@@ -87,6 +87,121 @@ public class UiaDiagnosticsTests
 
             Assert.Empty(lines);
         }
+
+        /// <summary>Review fix (blocker 1, PHI): value-bearing control types must never write their real Name to the dump - see UiaNameRedaction's class doc (WinForms DataGridView cells expose the cell VALUE as Name).</summary>
+        [Theory]
+        [InlineData("Edit")]
+        [InlineData("DataItem")]
+        [InlineData("Text")]
+        [InlineData("Document")]
+        [InlineData("DataGrid")]
+        [InlineData("ListItem")]
+        [InlineData("TreeItem")]
+        [InlineData("Custom")]
+        [InlineData("ComboBox")]
+        [InlineData("Spinner")]
+        [InlineData("Hyperlink")]
+        [InlineData("SomeFutureControlTypeThisClassHasNeverSeen")]
+        public void RedactsNameForValueBearingOrUnlistedControlTypes(string controlType)
+        {
+            var elements = new List<UiaElementSnapshot> { new(controlType, "123-45-6789 Jane Doe", "uxField", "class1", 1) };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150);
+
+            Assert.Single(lines);
+            Assert.Contains("[redacted]", lines[0]);
+            Assert.DoesNotContain("123-45-6789", lines[0]);
+            Assert.DoesNotContain("Jane Doe", lines[0]);
+        }
+
+        [Fact]
+        public void DoesNotRedactNameForAButton()
+        {
+            var elements = new List<UiaElementSnapshot> { new("Button", "Run Financial Reports", "uxRun", "class1", 1) };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150);
+
+            Assert.Single(lines);
+            Assert.Contains("Run Financial Reports", lines[0]);
+            Assert.DoesNotContain("[redacted]", lines[0]);
+        }
+
+        [Theory]
+        [InlineData("TabItem")]
+        [InlineData("MenuItem")]
+        [InlineData("Window")]
+        [InlineData("CheckBox")]
+        public void DoesNotRedactNameForOtherKnownSafeChromeControlTypes(string controlType)
+        {
+            var elements = new List<UiaElementSnapshot> { new(controlType, "Financial Reports", "", "", 1) };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150);
+
+            Assert.Contains("Financial Reports", lines[0]);
+        }
+
+        [Fact]
+        public void TruncatesASafeNameLongerThanFortyCharacters()
+        {
+            var longName = new string('A', 100);
+            var elements = new List<UiaElementSnapshot> { new("Button", longName, "", "", 1) };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150);
+
+            Assert.Contains(new string('A', 40), lines[0]);
+            Assert.DoesNotContain(new string('A', 41), lines[0]);
+        }
+    }
+
+    /// <summary>Direct tests of UiaNameRedaction itself, independent of FormatElementDump's line assembly.</summary>
+    public class UiaNameRedactionTests
+    {
+        [Fact]
+        public void IsNameSafeToLog_TrueForButton()
+        {
+            Assert.True(UiaNameRedaction.IsNameSafeToLog("Button"));
+        }
+
+        [Fact]
+        public void IsNameSafeToLog_IsCaseInsensitive()
+        {
+            Assert.True(UiaNameRedaction.IsNameSafeToLog("button"));
+        }
+
+        [Fact]
+        public void IsNameSafeToLog_FalseForEdit()
+        {
+            Assert.False(UiaNameRedaction.IsNameSafeToLog("Edit"));
+        }
+
+        [Fact]
+        public void IsNameSafeToLog_FalseForNullOrEmpty()
+        {
+            Assert.False(UiaNameRedaction.IsNameSafeToLog(null));
+            Assert.False(UiaNameRedaction.IsNameSafeToLog(""));
+        }
+
+        [Fact]
+        public void RedactIfNeeded_ReturnsThePlaceholderForEdit()
+        {
+            Assert.Equal(UiaNameRedaction.RedactedName, UiaNameRedaction.RedactIfNeeded("Edit", "some entered value"));
+        }
+
+        [Fact]
+        public void RedactIfNeeded_ReturnsTheRealNameForButton()
+        {
+            Assert.Equal("Run", UiaNameRedaction.RedactIfNeeded("Button", "Run"));
+        }
+
+        [Fact]
+        public void RedactIfNeeded_TruncatesALongSafeNameToFortyChars()
+        {
+            var longName = new string('B', 60);
+
+            var result = UiaNameRedaction.RedactIfNeeded("Button", longName);
+
+            Assert.Equal(40, result.Length);
+        }
     }
 
     public class FormatTopLevelWindowListTests
