@@ -7,11 +7,14 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
+using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Ocr;
 using RxVerifyOverlay.Uia;
 
 namespace RxVerifyOverlay.Reports;
@@ -78,12 +81,75 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 2 (GOAL brief step 1): "descendants to depth 3" - how many levels below the main window the diagnostic dump walks.</summary>
     private const int MaxDiagnosticDumpDepth = 3;
 
+    /// <summary>Round 3 (GOAL brief fix 1): FindMainWindow keeps re-enumerating the desktop for up to this long before giving up, rather than a single snapshot attempt - Pioneer's real shell window may not have appeared yet the instant this is called.</summary>
+    private static readonly TimeSpan MainWindowFindTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>Round 3 (GOAL brief fix 2): "success = a new top-level window ... whose title contains 'Report Parameters' ... within 5 s" - the outer confirmation every row-selection strategy is checked against.</summary>
+    private static readonly TimeSpan ReportParametersConfirmationTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>Round 3 (GOAL brief fix 2b): grid keyboard strategy's own inner wait after Enter, before falling back to a direct double-click.</summary>
+    private static readonly TimeSpan GridKeyboardEnterConfirmationTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>Round 3 (GOAL brief fix 2a): "cap node count ~5,000" for the unlimited-depth RawViewWalker search inside FinancialReportsWorkArea.</summary>
+    private const int MaxRowSearchNodes = 5000;
+
+    /// <summary>Round 3 (GOAL brief fix 2b): "step Down one row at a time (max 60)".</summary>
+    private const int MaxGridKeyboardSteps = 60;
+
+    /// <summary>Round 3 (GOAL brief fix 2, diagnostic dump extension): "walk the RAW view under FinancialReportsWorkArea to depth 8".</summary>
+    private const int MaxRowDiagnosticDumpDepth = 8;
+
+    /// <summary>Same spirit as MaxDiagnosticDumpLines*2 elsewhere in this file - caps the raw-view walk itself well above what will actually be printed, so a huge grid can't make this best-effort walk slow.</summary>
+    private const int MaxRowDiagnosticDumpNodes = 3000;
+
+    /// <summary>
+    /// Round 3 (GOAL brief fix 2b): "click once inside the grid (work-area
+    /// pane rect, ~40% across, first data row)". Owner's screenshot: the
+    /// grid starts roughly 130px below the WINDOW top at 100% scaling
+    /// with ~12px rows - approximated here relative to the work-area
+    /// pane's own top (not the window's) since the pane's bounding
+    /// rectangle already excludes whatever header/toolbar sits above it;
+    /// a small fixed offset into the first visible row is the standard
+    /// "click somewhere safely inside row 1" heuristic FlaUI grids don't
+    /// otherwise expose a row-0 element for without already having found
+    /// it (the very thing this click is trying to bootstrap).
+    /// </summary>
+    private const int FirstDataRowOffsetFromWorkAreaTop = 20;
+
+    private const string FinancialReportsWorkAreaAutomationId = "FinancialReportsWorkArea";
+
+    private static readonly HashSet<ControlType> RowSearchControlTypes = new()
+    {
+        ControlType.DataItem, ControlType.ListItem, ControlType.Custom, ControlType.Edit, ControlType.Text
+    };
+
     private const uint WM_CLOSE = 0x0010;
     private const int SW_RESTORE = 9;
 
     private UIA3Automation? _automation;
     private AutomationElement? _mainWindow;
     private int _pioneerProcessId;
+
+    /// <summary>
+    /// Round 3 (GOAL brief fix 2c): the same IOcrEngine/WindowsMediaOcrEngine
+    /// already used by the Verify-mode OCR path (Ocr/WindowsMediaOcrEngine.cs)
+    /// - no new OCR dependency. Injectable (see the internal constructor
+    /// below) purely so a future test could supply a fake IOcrEngine;
+    /// PioneerReportDriver itself still can't be unit tested end-to-end
+    /// off Windows (FlaUI/UIA throughout), so today's tests exercise the
+    /// pure matching logic this engine's output feeds (ReportGridOcrMatcher)
+    /// instead - see Reports/ReportGridOcr.cs.
+    /// </summary>
+    private readonly IOcrEngine _ocrEngine;
+
+    public PioneerReportDriver() : this(new WindowsMediaOcrEngine())
+    {
+    }
+
+    internal PioneerReportDriver(IOcrEngine ocrEngine)
+    {
+        _ocrEngine = ocrEngine;
+    }
 
     /// <summary>
     /// The report-preview window's own AutomationElement/native handle,
@@ -134,54 +200,134 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     private UIA3Automation GetOrCreateAutomation() => _automation ??= new UIA3Automation();
 
-    public bool FindMainWindow()
+    /// <summary>
+    /// Round 3 rewrite (owner's first real run: this resolved to pid
+    /// 24828, handle=0x0, name='&lt;untitled&gt;' - a Pioneer helper process
+    /// with no visible UI at all - while the real shell was pid 20664;
+    /// the old loop returned the FIRST desktop-enumeration match with no
+    /// ranking whatsoever). Enumerates ALL top-level desktop windows every
+    /// attempt, ranks them via the pure MainWindowSelector (prefers the
+    /// largest visible WindowsForms10.* window with a non-zero handle and
+    /// non-empty title), and retries for up to MainWindowFindTimeout
+    /// before giving up. Logs every candidate on the first attempt and
+    /// (if it never succeeds) the last attempt, plus a one-line "still
+    /// looking" note on attempts in between - full candidate dumps on
+    /// every ~250ms poll tick would flood the run log for no benefit.
+    /// </summary>
+    public bool FindMainWindow(Action<string> log)
     {
+        var deadline = DateTime.UtcNow + MainWindowFindTimeout;
+        var attempt = 0;
+        IReadOnlyList<MainWindowCandidate> lastCandidates = Array.Empty<MainWindowCandidate>();
+
+        while (true)
+        {
+            attempt++;
+            var (element, chosen, candidates) = TryFindMainWindowOnce();
+            lastCandidates = candidates;
+
+            if (attempt == 1)
+            {
+                log($"FindMainWindow attempt {attempt}: {candidates.Count} candidate window(s) on the desktop.");
+                foreach (var candidate in candidates)
+                {
+                    log(MainWindowCandidateLog.Format(candidate));
+                }
+            }
+
+            if (element is not null && chosen is { } chosenCandidate)
+            {
+                log($"FindMainWindow: selected pid={chosenCandidate.ProcessId} handle=0x{chosenCandidate.Handle.ToInt64():X} class='{chosenCandidate.ClassName}'.");
+                _mainWindow = element;
+                _pioneerProcessId = chosenCandidate.ProcessId;
+                BringToForeground(element);
+                return true;
+            }
+
+            if (DateTime.UtcNow >= deadline) break;
+
+            log($"FindMainWindow attempt {attempt}: no eligible candidate yet - retrying...");
+            Thread.Sleep(PollInterval);
+        }
+
+        log($"FindMainWindow: no eligible PioneerRx main window found within {MainWindowFindTimeout.TotalSeconds:0}s. Last seen:");
+        foreach (var candidate in lastCandidates)
+        {
+            log(MainWindowCandidateLog.Format(candidate));
+        }
+
+        _mainWindow = null;
+        return false;
+    }
+
+    /// <summary>One enumeration + ranking pass — the impure half (real AutomationElements/Process lookups) feeding MainWindowSelector's pure ranking decision. Returns the chosen AutomationElement (looked back up by handle, since MainWindowCandidate itself carries no FlaUI reference) alongside the full candidate list, for logging.</summary>
+    private (AutomationElement? Element, MainWindowCandidate? Chosen, List<MainWindowCandidate> All) TryFindMainWindowOnce()
+    {
+        var candidates = new List<MainWindowCandidate>();
+        var elementsByHandle = new Dictionary<IntPtr, AutomationElement>();
+
         try
         {
             var automation = GetOrCreateAutomation();
             var desktop = automation.GetDesktop();
-            var topLevel = desktop.FindAllChildren();
 
-            foreach (var window in topLevel)
+            foreach (var window in desktop.FindAllChildren())
             {
                 string? name;
-                try { name = window.Name; } catch { continue; }
-                if (string.IsNullOrEmpty(name)) continue;
-
-                // Never the Pre-Check/Edit/New-Rx window this app's own
-                // Verify/Order modes attach to (Uia/PioneerRxWindow.cs) —
-                // the ribbon this driver needs lives on Pioneer's separate
-                // main shell window.
-                var isPreCheckFamily = false;
-                foreach (var prefix in FieldMap.TargetWindowTitlePrefixes)
-                {
-                    if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    {
-                        isPreCheckFamily = true;
-                        break;
-                    }
-                }
-                if (isPreCheckFamily) continue;
+                try { name = window.Name; } catch { name = null; }
 
                 var processId = SafeProcessId(window);
+                var handle = SafeNativeHandle(window);
+                var className = SafeClassName(window);
+                var (width, height) = SafeSize(window);
                 var isPioneerProcess = processId != 0 && IsPioneerProcess(processId);
+                var isPrecheckFamily = IsPrecheckFamilyTitle(name);
 
-                if (isPioneerProcess || name.Contains("Pioneer", StringComparison.OrdinalIgnoreCase))
+                candidates.Add(new MainWindowCandidate(name ?? string.Empty, processId, handle, className, width, height, isPioneerProcess, isPrecheckFamily));
+
+                if (handle != IntPtr.Zero && !elementsByHandle.ContainsKey(handle))
                 {
-                    _mainWindow = window;
-                    _pioneerProcessId = processId;
-                    BringToForeground(window);
-                    return true;
+                    elementsByHandle[handle] = window;
                 }
             }
-
-            _mainWindow = null;
-            return false;
         }
         catch
         {
-            _mainWindow = null;
-            return false;
+            // Best-effort - an empty/partial candidate list this attempt
+            // just means FindMainWindow's own retry loop tries again.
+        }
+
+        var chosen = MainWindowSelector.Choose(candidates);
+        if (chosen is null) return (null, null, candidates);
+
+        return elementsByHandle.TryGetValue(chosen.Value.Handle, out var element)
+            ? (element, chosen, candidates)
+            : (null, null, candidates);
+    }
+
+    /// <summary>Never the Pre-Check/Edit/New-Rx window family this app's own Verify/Order modes attach to (Uia/PioneerRxWindow.cs) — the ribbon this driver needs lives on Pioneer's separate main shell window.</summary>
+    private static bool IsPrecheckFamilyTitle(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+
+        foreach (var prefix in FieldMap.TargetWindowTitlePrefixes)
+        {
+            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
+
+    private static (int Width, int Height) SafeSize(AutomationElement element)
+    {
+        try
+        {
+            var rect = element.BoundingRectangle;
+            return ((int)rect.Width, (int)rect.Height);
+        }
+        catch
+        {
+            return (0, 0);
         }
     }
 
@@ -192,7 +338,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             ct.ThrowIfCancellationRequested();
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
             if (_mainWindow is null) return ReportRunResult.Failed("PioneerRx main window not found", stopwatch.Elapsed);
 
             log("Opening Analysis > Financial Reports...");
@@ -200,20 +346,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 return ReportRunResult.Failed("Could not open Analysis > Financial Reports", stopwatch.Elapsed);
 
             log($"Selecting report row '{item.Entry.PioneerRowText}'...");
-            var row = FindDescendantByName(_mainWindow!, item.Entry.PioneerRowText);
-            if (row is null)
+            var rowOpened = TrySelectAndOpenReportRow(item.Entry, log, ct);
+            if (!rowOpened)
             {
-                WriteUiaDiagnosticDump($"report row '{item.Entry.PioneerRowText}'", log);
+                WriteRowSelectionDiagnosticDump(item.Entry.PioneerRowText, log);
                 return ReportRunResult.Failed($"Report row '{item.Entry.PioneerRowText}' not found", stopwatch.Elapsed);
             }
-            if (!SelectOrInvoke(row)) return ReportRunResult.Failed("Could not select the report row", stopwatch.Elapsed);
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Setting report parameters...");
             if (!SetReportParameters(item, log)) return ReportRunResult.Failed("Could not set report date parameters", stopwatch.Elapsed);
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Running report (View - F12)...");
             if (!InvokeViewOrF12(log))
@@ -226,7 +371,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             var previewReady = await WaitUntilAsync(() => IsPreviewReady(), DefaultReportTimeout, ct).ConfigureAwait(false);
             if (!previewReady) return ReportRunResult.Failed("Timed out waiting for the report preview", stopwatch.Elapsed);
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Exporting to PDF...");
             if (_previewWindowElement is null) return ReportRunResult.Failed("Report preview window was not found", stopwatch.Elapsed);
@@ -258,7 +403,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             ct.ThrowIfCancellationRequested();
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
             if (_mainWindow is null) return ReportRunResult.Failed("PioneerRx main window not found", stopwatch.Elapsed);
 
             log("Opening Third Party > Payments...");
@@ -269,12 +414,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             var searchTab = FindDescendantByName(_mainWindow!, "Search", ControlType.TabItem);
             if (searchTab is not null) SelectOrInvoke(searchTab);
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Setting 'Payment Confirmed Between' range...");
             if (!SetPaymentsDateRange(item, log)) return ReportRunResult.Failed("Could not set the payment date range", stopwatch.Elapsed);
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Searching (Search - F12)...");
             if (!InvokeSearchOrF12(log))
@@ -287,7 +432,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             var resultsReady = await WaitUntilAsync(() => IsResultsTabReady(), DefaultReportTimeout, ct).ConfigureAwait(false);
             if (!resultsReady) return ReportRunResult.Failed("Timed out waiting for search results", stopwatch.Elapsed);
 
-            if (!EnsurePioneerForeground(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
+            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
             log("Exporting results to Excel...");
             if (!InvokeExportButton(_mainWindow!, "Export search results to Excel", "Excel", log))
@@ -338,6 +483,32 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         if (WaitUntilSync(IsForegroundOwnedByPioneer, ForegroundSettleTimeout, PollInterval)) return true;
 
         log("Pioneer lost focus - aborting this report.");
+        return false;
+    }
+
+    /// <summary>
+    /// Round 3 fix (GOAL brief fix 1: "make 'Pioneer lost focus'
+    /// recoverable once ... re-activate the main window ... and retry the
+    /// step one time before aborting"). Wraps EnsurePioneerForeground
+    /// (which already tries BringToForeground once, then polls up to
+    /// ForegroundSettleTimeout before giving up) with exactly ONE more
+    /// full recovery attempt before the caller truly aborts the report -
+    /// used only at RunFinancialReport/RunPaymentsExport's own top-level
+    /// step guards, not the finer-grained per-keystroke checks already
+    /// inside the ribbon-navigation strategies (those already get
+    /// resilience from trying three independent strategies in turn).
+    /// </summary>
+    private bool EnsurePioneerForegroundWithRecovery(Action<string> log)
+    {
+        if (EnsurePioneerForeground(log)) return true;
+        if (_mainWindow is null) return false;
+
+        log("Retrying once - re-activating the PioneerRx main window...");
+        BringToForeground(_mainWindow);
+
+        if (WaitUntilSync(IsForegroundOwnedByPioneer, ForegroundSettleTimeout, PollInterval)) return true;
+
+        log("Pioneer lost focus - recovery attempt failed, aborting this report.");
         return false;
     }
 
@@ -762,6 +933,647 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
 
         return false;
+    }
+
+    // ------------------------------------------------------------------
+    // ROW SELECTION (Round 3 - GOAL brief fix 2: "each of those reports
+    // has to be double clicked on to get them to open the next window")
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Tries each row-text candidate (PioneerRowText, then
+    /// PioneerRowTextAlias if the catalog entry has one — see
+    /// ReportCatalog's round-3 fix) and, for each, the three layered
+    /// strategies in order (UIA deep search, grid keyboard, OCR) via the
+    /// pure ReportRowSelectionSequencer — stopping at the first strategy
+    /// whose own attempt AND the outer "Report Parameters" window
+    /// confirmation both succeed. Synchronous by design (the sequencer's
+    /// delegates are sync; TryOcrRowSelect's own async OCR call is
+    /// blocked on internally, same "this file already mixes Thread.Sleep
+    /// with async Task methods" idiom used throughout, e.g.
+    /// TryKeyboardKeyTipsNavigate's KeyboardStepWait sleeps) so
+    /// RunFinancialReport can call this like every other bool-returning
+    /// step guard.
+    /// </summary>
+    private bool TrySelectAndOpenReportRow(ReportCatalogEntry entry, Action<string> log, CancellationToken ct)
+    {
+        var rowTextCandidates = ReportRowSelectionSequencer.BuildRowTextCandidates(entry);
+
+        bool UiaDeepSearchStrategy(string rowText) =>
+            TryDeepUiaRowSelect(rowText, log) && WaitForReportParametersWindowSync(ct);
+
+        bool GridKeyboardStrategy(string rowText) =>
+            TryGridKeyboardRowSelect(rowText, log, ct) && WaitForReportParametersWindowSync(ct);
+
+        bool OcrStrategy(string rowText) =>
+            TryOcrRowSelectSync(rowText, log, ct) && WaitForReportParametersWindowSync(ct);
+
+        var strategies = new List<Func<string, bool>> { UiaDeepSearchStrategy, GridKeyboardStrategy, OcrStrategy };
+
+        return ReportRowSelectionSequencer.TrySelect(rowTextCandidates, strategies, (rowText, strategyNumber) =>
+            log($"  Row selection strategy {strategyNumber}/3 for '{rowText}'..."));
+    }
+
+    /// <summary>GOAL brief fix 2's closing rule, shared by all three strategies: "success = a new top-level window owned by the Pioneer pid whose title contains 'Report Parameters' ... within 5 s". Synchronous wrapper (WaitUntilAsync needs an await) so the sequencer's plain bool delegates can call it directly.</summary>
+    private bool WaitForReportParametersWindowSync(CancellationToken ct) =>
+        WaitUntilAsync(IsReportParametersWindowOpen, ReportParametersConfirmationTimeout, ct).GetAwaiter().GetResult();
+
+    private bool IsReportParametersWindowOpen()
+    {
+        foreach (var (_, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+        {
+            if (!string.IsNullOrEmpty(candidate.Title) && candidate.Title.Contains("Report Parameters", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // --- Strategy 2a: UIA deep search inside FinancialReportsWorkArea ---
+
+    /// <summary>
+    /// GOAL brief fix 2a: unlimited-depth RawViewWalker search scoped to
+    /// the FinancialReportsWorkArea pane (capped at MaxRowSearchNodes),
+    /// matching DataItem/ListItem/Custom/Edit/Text descendants by Name OR
+    /// ValuePattern value OR LegacyIAccessible name/value — exact match
+    /// only (ReportRowTextMatcher), never a prefix, so a row like
+    /// "Inventory Valuation" can never match "Inventory Valuation (With
+    /// Last Supplier)". On a match: ScrollIntoView if supported, then
+    /// double-click its bounding-rectangle centre.
+    /// </summary>
+    private bool TryDeepUiaRowSelect(string rowText, Action<string> log)
+    {
+        log($"    strategy 1/3 (UIA deep search in '{FinancialReportsWorkAreaAutomationId}') for '{rowText}'...");
+
+        var workArea = FindDescendantByAutomationId(_mainWindow!, FinancialReportsWorkAreaAutomationId);
+        if (workArea is null)
+        {
+            log($"    '{FinancialReportsWorkAreaAutomationId}' pane not found.");
+            return false;
+        }
+
+        var match = DeepFindRowElement(workArea, rowText);
+        if (match is null)
+        {
+            log("    no matching row element found in the deep UIA search.");
+            return false;
+        }
+
+        try
+        {
+            if (match.Patterns.ScrollItem.IsSupported)
+            {
+                match.Patterns.ScrollItem.Pattern.ScrollIntoView();
+            }
+        }
+        catch
+        {
+            // Best-effort - a row already fully on-screen doesn't need this.
+        }
+
+        return TryDoubleClickElement(match, log, "UIA deep search");
+    }
+
+    private static AutomationElement? FindDescendantByAutomationId(AutomationElement root, string automationId)
+    {
+        try
+        {
+            return root.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>DFS via RawViewWalker (unbounded control-view depth — WinForms/third-party grids commonly hide rows from the CONTROL view), capped at MaxRowSearchNodes so a huge/broken tree can't hang the row-selection step.</summary>
+    private AutomationElement? DeepFindRowElement(AutomationElement root, string rowText)
+    {
+        if (string.IsNullOrWhiteSpace(rowText)) return null;
+
+        ITreeWalker walker;
+        try
+        {
+            walker = GetOrCreateAutomation().TreeWalkerFactory.GetRawViewWalker();
+        }
+        catch
+        {
+            return null;
+        }
+
+        var visited = 0;
+        var stack = new Stack<AutomationElement>();
+        stack.Push(root);
+
+        while (stack.Count > 0 && visited < MaxRowSearchNodes)
+        {
+            var current = stack.Pop();
+            visited++;
+
+            if (!ReferenceEquals(current, root) && IsRowTextMatch(current, rowText))
+            {
+                return current;
+            }
+
+            try
+            {
+                var child = walker.GetFirstChild(current);
+                while (child is not null && visited < MaxRowSearchNodes)
+                {
+                    stack.Push(child);
+                    child = walker.GetNextSibling(child);
+                }
+            }
+            catch
+            {
+                // Best-effort - a subtree that can't be walked is simply skipped.
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsRowTextMatch(AutomationElement element, string rowText)
+    {
+        ControlType controlType;
+        try { controlType = element.ControlType; } catch { return false; }
+        if (!RowSearchControlTypes.Contains(controlType)) return false;
+
+        if (TryGetName(element, out var name) && ReportRowTextMatcher.IsExactMatch(name, rowText)) return true;
+        if (TryGetValuePatternValue(element, out var value) && ReportRowTextMatcher.IsExactMatch(value, rowText)) return true;
+        if (TryGetLegacyIAccessibleNameOrValue(element, out var legacyText) && ReportRowTextMatcher.IsExactMatch(legacyText, rowText)) return true;
+
+        return false;
+    }
+
+    private static bool TryGetName(AutomationElement element, out string? name)
+    {
+        try
+        {
+            name = element.Name;
+            return !string.IsNullOrEmpty(name);
+        }
+        catch
+        {
+            name = null;
+            return false;
+        }
+    }
+
+    private static bool TryGetValuePatternValue(AutomationElement element, out string? value)
+    {
+        try
+        {
+            if (element.Patterns.Value.IsSupported)
+            {
+                value = element.Patterns.Value.Pattern.Value.ValueOrDefault;
+                return !string.IsNullOrEmpty(value);
+            }
+        }
+        catch
+        {
+            // fall through
+        }
+
+        value = null;
+        return false;
+    }
+
+    /// <summary>
+    /// UNVERIFIED assumption (same risk posture as this file's own header
+    /// doc): FlaUI's ILegacyIAccessiblePattern exposes Name/Value as
+    /// AutomationProperty&lt;string&gt; (read via .ValueOrDefault, the same
+    /// pattern this file already uses for SelectionItem.IsSelected) —
+    /// confirmed present as pattern members in the referenced FlaUI.Core
+    /// 4.0.0 package's own metadata, but not build/run-verified on this
+    /// Mac (no dotnet/Windows here). If the exact property shape differs,
+    /// this degrades to "always returns false" (caught below), which
+    /// falls through to the next row-selection strategy rather than
+    /// crashing the report.
+    /// </summary>
+    private static bool TryGetLegacyIAccessibleNameOrValue(AutomationElement element, out string? text)
+    {
+        try
+        {
+            if (element.Patterns.LegacyIAccessible.IsSupported)
+            {
+                var pattern = element.Patterns.LegacyIAccessible.Pattern;
+
+                var name = SafeLegacyIAccessibleValue(() => pattern.Name.ValueOrDefault);
+                if (!string.IsNullOrEmpty(name))
+                {
+                    text = name;
+                    return true;
+                }
+
+                var value = SafeLegacyIAccessibleValue(() => pattern.Value.ValueOrDefault);
+                if (!string.IsNullOrEmpty(value))
+                {
+                    text = value;
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // fall through
+        }
+
+        text = null;
+        return false;
+    }
+
+    private static string? SafeLegacyIAccessibleValue(Func<string?> read)
+    {
+        try { return read(); }
+        catch { return null; }
+    }
+
+    // --- Strategy 2b: grid keyboard navigation ---
+
+    /// <summary>
+    /// GOAL brief fix 2b: click once inside the grid to focus it, Ctrl+Home,
+    /// type the target's first few characters for incremental search,
+    /// verify via SelectionPattern/focused-element Name/LegacyIAccessible
+    /// value; else step Down one row at a time (max MaxGridKeyboardSteps)
+    /// until the selected/focused row's text exactly matches; then Enter —
+    /// falling back to a direct double-click on the believed-selected row
+    /// if no "Report Parameters" window appears within
+    /// GridKeyboardEnterConfirmationTimeout.
+    /// </summary>
+    private bool TryGridKeyboardRowSelect(string rowText, Action<string> log, CancellationToken ct)
+    {
+        log($"    strategy 2/3 (grid keyboard navigation) for '{rowText}'...");
+
+        var workArea = FindDescendantByAutomationId(_mainWindow!, FinancialReportsWorkAreaAutomationId);
+        if (workArea is null)
+        {
+            log($"    '{FinancialReportsWorkAreaAutomationId}' pane not found.");
+            return false;
+        }
+
+        Rectangle workAreaRect;
+        try { workAreaRect = workArea.BoundingRectangle; }
+        catch { log("    could not read the work area's bounding rectangle."); return false; }
+
+        if (workAreaRect.Width <= 0 || workAreaRect.Height <= 0)
+        {
+            log("    work area has no usable bounding rectangle.");
+            return false;
+        }
+
+        var focusPoint = new Point(
+            workAreaRect.X + (int)(workAreaRect.Width * 0.4),
+            workAreaRect.Y + FirstDataRowOffsetFromWorkAreaTop);
+
+        if (!TryClickPoint(focusPoint, log, "grid keyboard")) return false;
+
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!EnsurePioneerForeground(log)) return false;
+            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.HOME);
+            Thread.Sleep(PollInterval);
+
+            ct.ThrowIfCancellationRequested();
+            if (!EnsurePioneerForeground(log)) return false;
+            Keyboard.Type(rowText.Length > 3 ? rowText.Substring(0, 3) : rowText);
+            Thread.Sleep(PollInterval);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // fall through to the step-down loop below - incremental
+            // search isn't supported by every grid.
+        }
+
+        var currentText = TryGetSelectedOrFocusedRowText(workArea);
+        var steps = 0;
+        while (!ReportRowTextMatcher.IsExactMatch(currentText, rowText) && steps < MaxGridKeyboardSteps)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!EnsurePioneerForeground(log)) return false;
+
+            try { Keyboard.Type(VirtualKeyShort.DOWN); }
+            catch { break; }
+
+            Thread.Sleep(PollInterval);
+            currentText = TryGetSelectedOrFocusedRowText(workArea);
+            steps++;
+        }
+
+        if (!ReportRowTextMatcher.IsExactMatch(currentText, rowText))
+        {
+            log($"    grid keyboard strategy could not locate row '{rowText}' after {steps} step(s).");
+            return false;
+        }
+
+        if (!EnsurePioneerForeground(log)) return false;
+        try { Keyboard.Type(VirtualKeyShort.RETURN); }
+        catch { return false; }
+
+        if (WaitUntilSync(IsReportParametersWindowOpen, GridKeyboardEnterConfirmationTimeout, PollInterval))
+        {
+            return true;
+        }
+
+        log("    'Report Parameters' did not appear after Enter - falling back to a direct double-click on the selected row.");
+
+        var focusedElement = SafeFocusedElement();
+        return focusedElement is not null && TryDoubleClickElement(focusedElement, log, "grid keyboard fallback");
+    }
+
+    /// <summary>Selected-item Name (via SelectionPattern) if the work area/grid supports it, else the focused element's Name, else its LegacyIAccessible Name/Value — whichever is readable first.</summary>
+    private string? TryGetSelectedOrFocusedRowText(AutomationElement workArea)
+    {
+        try
+        {
+            if (workArea.Patterns.Selection.IsSupported)
+            {
+                var selection = workArea.Patterns.Selection.Pattern.Selection.ValueOrDefault;
+                if (selection is { Length: > 0 })
+                {
+                    var name = SafeName(selection[0]);
+                    if (!string.IsNullOrEmpty(name)) return name;
+                }
+            }
+        }
+        catch
+        {
+            // fall through to the focused-element checks below
+        }
+
+        var focused = SafeFocusedElement();
+        if (focused is null) return null;
+
+        if (TryGetName(focused, out var focusedName)) return focusedName;
+        return TryGetLegacyIAccessibleNameOrValue(focused, out var legacyText) ? legacyText : null;
+    }
+
+    private AutomationElement? SafeFocusedElement()
+    {
+        try { return GetOrCreateAutomation().FocusedElement(); }
+        catch { return null; }
+    }
+
+    // --- Strategy 2c: OCR ---
+
+    /// <summary>
+    /// GOAL brief fix 2c: captures the FinancialReportsWorkArea pane via
+    /// the SAME OCR engine the Verify-mode capture path already uses
+    /// (Ocr/EscriptImageCapture.CaptureRegion + IOcrEngine — no new OCR
+    /// dependency), then hands the recognized Words to the pure
+    /// ReportGridOcrMatcher (Reports/ReportGridOcr.cs) to find the exact
+    /// "Report Name" column line, and double-clicks its centre (screen
+    /// coordinates = the work area's own top-left + the matched line's
+    /// region-relative centre).
+    /// </summary>
+    private async Task<bool> TryOcrRowSelect(string rowText, Action<string> log, CancellationToken ct)
+    {
+        log($"    strategy 3/3 (OCR) for '{rowText}'...");
+
+        var workArea = FindDescendantByAutomationId(_mainWindow!, FinancialReportsWorkAreaAutomationId);
+        if (workArea is null)
+        {
+            log($"    '{FinancialReportsWorkAreaAutomationId}' pane not found.");
+            return false;
+        }
+
+        Rectangle workAreaRect;
+        try { workAreaRect = workArea.BoundingRectangle; }
+        catch { log("    could not read the work area's bounding rectangle for OCR capture."); return false; }
+
+        if (workAreaRect.Width <= 0 || workAreaRect.Height <= 0)
+        {
+            log("    work area has no usable bounding rectangle for OCR capture.");
+            return false;
+        }
+
+        OcrTextResult ocrResult;
+        try
+        {
+            using var bitmap = EscriptImageCapture.CaptureRegion(workAreaRect);
+            ocrResult = await _ocrEngine.RecognizeAsync(bitmap, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            log($"    OCR capture/recognition failed: {ex.Message}");
+            return false;
+        }
+
+        var match = ReportGridOcrMatcher.FindReportNameLine(ocrResult.Words, rowText);
+        if (match is null)
+        {
+            log($"    OCR did not find an exact 'Report Name' column match for '{rowText}'.");
+            return false;
+        }
+
+        var screenCenter = new Point(
+            workAreaRect.X + (int)match.Value.CenterX,
+            workAreaRect.Y + (int)match.Value.CenterY);
+
+        return TryDoubleClickPoint(screenCenter, log, "OCR");
+    }
+
+    /// <summary>Synchronous wrapper for ReportRowSelectionSequencer's Func&lt;string, bool&gt; strategy slot - same "this file already blocks on async work from a sync helper" idiom as WaitForReportParametersWindowSync above.</summary>
+    private bool TryOcrRowSelectSync(string rowText, Action<string> log, CancellationToken ct) =>
+        TryOcrRowSelect(rowText, log, ct).GetAwaiter().GetResult();
+
+    // --- Shared click helpers ---
+
+    /// <summary>Double-clicks an element's bounding-rectangle centre — same foreground/click-point safety guards as TryActivateRibbonElement's single click (review fix precedent: re-check EnsurePioneerForeground AND independently confirm the window physically at the click point is Pioneer's, immediately before the click).</summary>
+    private bool TryDoubleClickElement(AutomationElement element, Action<string> log, string strategyLabel)
+    {
+        Rectangle rect;
+        try { rect = element.BoundingRectangle; }
+        catch { log($"    [{strategyLabel}] could not read the element's bounding rectangle."); return false; }
+
+        if (rect.Width <= 0 || rect.Height <= 0)
+        {
+            log($"    [{strategyLabel}] element has no usable bounding rectangle.");
+            return false;
+        }
+
+        var center = new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+        return TryDoubleClickPoint(center, log, strategyLabel);
+    }
+
+    /// <summary>Never double-clicks if the foreground window isn't Pioneer's, or if the window physically at the click point isn't Pioneer's (GOAL brief fix 2: "Never double-click if the foreground window is not Pioneer's").</summary>
+    private bool TryDoubleClickPoint(Point point, Action<string> log, string strategyLabel)
+    {
+        if (!EnsurePioneerForeground(log))
+        {
+            log($"    [{strategyLabel}] skipping double-click - Pioneer lost focus");
+            return false;
+        }
+
+        if (!IsPointOwnedByPioneer(point))
+        {
+            log($"    [{strategyLabel}] skipping double-click - the window at the click point is not Pioneer's");
+            return false;
+        }
+
+        try
+        {
+            Mouse.LeftDoubleClick(point);
+            log($"    [{strategyLabel}] double-clicked at ({point.X}, {point.Y})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log($"    [{strategyLabel}] double-click failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Single click, same foreground/click-point safety guards as TryDoubleClickPoint - used only to focus the grid before keyboard navigation (strategy 2b), never to activate a row by itself.</summary>
+    private bool TryClickPoint(Point point, Action<string> log, string strategyLabel)
+    {
+        if (!EnsurePioneerForeground(log))
+        {
+            log($"    [{strategyLabel}] skipping click - Pioneer lost focus");
+            return false;
+        }
+
+        if (!IsPointOwnedByPioneer(point))
+        {
+            log($"    [{strategyLabel}] skipping click - the window at the click point is not Pioneer's");
+            return false;
+        }
+
+        try
+        {
+            Mouse.LeftClick(point);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log($"    [{strategyLabel}] click failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    // --- Row-selection diagnostic dump (GOAL brief fix 2: RAW view, depth 8) ---
+
+    /// <summary>
+    /// Extends the diagnostic-dump idea from WriteUiaDiagnosticDump to
+    /// this step specifically: walks the RAW UIA view (not the depth-3
+    /// CONTROL view the general dump uses) under FinancialReportsWorkArea
+    /// to depth MaxRowDiagnosticDumpDepth, so a row-selection failure's
+    /// log shows the grid's real structure — control types, class names,
+    /// and which patterns each element actually supports. Names are
+    /// redacted per ReportRowNameRedaction (catalog row name / column
+    /// header allowlist), NOT UiaNameRedaction's control-type allowlist —
+    /// see that class's own doc for why this dump needs a different rule.
+    /// </summary>
+    private void WriteRowSelectionDiagnosticDump(string rowText, Action<string> log)
+    {
+        try
+        {
+            log($"--- UIA diagnostic dump (report row '{rowText}') ---");
+
+            if (_mainWindow is null)
+            {
+                log("Diagnostics: no main window reference to dump.");
+                log("--- end diagnostic dump ---");
+                return;
+            }
+
+            var workArea = FindDescendantByAutomationId(_mainWindow, FinancialReportsWorkAreaAutomationId);
+            if (workArea is null)
+            {
+                log($"Diagnostics: '{FinancialReportsWorkAreaAutomationId}' pane not found - falling back to the general navigation dump.");
+                WriteUiaDiagnosticDump($"report row '{rowText}'", log);
+                return;
+            }
+
+            var snapshots = CaptureRawViewSnapshots(workArea, MaxRowDiagnosticDumpDepth);
+            foreach (var line in UiaDumpFormatter.FormatElementDump(snapshots, MaxDiagnosticDumpLines, e => ReportRowNameRedaction.RedactIfNeeded(e.Name)))
+            {
+                log(line);
+            }
+
+            log("--- end diagnostic dump ---");
+        }
+        catch (Exception ex)
+        {
+            log($"Diagnostics: row selection dump failed - {ex.Message}");
+        }
+    }
+
+    private List<UiaElementSnapshot> CaptureRawViewSnapshots(AutomationElement root, int maxDepth)
+    {
+        var result = new List<UiaElementSnapshot>();
+
+        ITreeWalker walker;
+        try { walker = GetOrCreateAutomation().TreeWalkerFactory.GetRawViewWalker(); }
+        catch { return result; }
+
+        CaptureRawViewRecursive(walker, root, 1, maxDepth, result);
+        return result;
+    }
+
+    private static void CaptureRawViewRecursive(ITreeWalker walker, AutomationElement element, int depth, int maxDepth, List<UiaElementSnapshot> result)
+    {
+        if (depth > maxDepth) return;
+        if (result.Count >= MaxRowDiagnosticDumpNodes) return;
+
+        AutomationElement? child;
+        try { child = walker.GetFirstChild(element); }
+        catch { return; }
+
+        while (child is not null)
+        {
+            if (result.Count >= MaxRowDiagnosticDumpNodes) return;
+
+            var name = SafeName(child);
+            if (!string.IsNullOrEmpty(name))
+            {
+                string controlType;
+                try { controlType = child.ControlType.ToString(); } catch { controlType = "<unknown>"; }
+
+                string automationId;
+                try { automationId = child.AutomationId ?? string.Empty; } catch { automationId = string.Empty; }
+
+                var className = SafeClassName(child);
+                var patterns = SafeSupportedPatternsSummary(child);
+
+                result.Add(new UiaElementSnapshot(controlType, name, automationId, className, depth, patterns));
+            }
+
+            CaptureRawViewRecursive(walker, child, depth + 1, maxDepth, result);
+
+            try { child = walker.GetNextSibling(child); }
+            catch { child = null; }
+        }
+    }
+
+    private static string SafeSupportedPatternsSummary(AutomationElement element)
+    {
+        var supported = new List<string>();
+        TryAddSupportedPattern(() => element.Patterns.Invoke.IsSupported, "Invoke", supported);
+        TryAddSupportedPattern(() => element.Patterns.SelectionItem.IsSupported, "SelectionItem", supported);
+        TryAddSupportedPattern(() => element.Patterns.Selection.IsSupported, "Selection", supported);
+        TryAddSupportedPattern(() => element.Patterns.ScrollItem.IsSupported, "ScrollItem", supported);
+        TryAddSupportedPattern(() => element.Patterns.Value.IsSupported, "Value", supported);
+        TryAddSupportedPattern(() => element.Patterns.LegacyIAccessible.IsSupported, "LegacyIAccessible", supported);
+        TryAddSupportedPattern(() => element.Patterns.ExpandCollapse.IsSupported, "ExpandCollapse", supported);
+        return string.Join(",", supported);
+    }
+
+    private static void TryAddSupportedPattern(Func<bool> check, string name, List<string> supported)
+    {
+        try { if (check()) supported.Add(name); }
+        catch { /* pattern probe best-effort */ }
     }
 
     // ------------------------------------------------------------------

@@ -48,6 +48,32 @@ public class ReportCatalogTests
         Assert.Equal(ReportParameterKind.AsOfDate, entry!.ParameterKind);
     }
 
+    /// <summary>
+    /// Round 3 fix: the owner's real "Run Financial Reports" grid screenshot
+    /// has no row literally named "Third Party Aged Trial Balance As of
+    /// Date" — the closest verbatim row is "Third Party Reconciliation
+    /// Account Aged Trial Balance". PioneerRowText is updated to the real
+    /// name; the old guessed name is kept as a secondary alias.
+    /// </summary>
+    [Fact]
+    public void ThirdPartyAgedTrialBalanceUsesTheRealRowNameWithTheOldNameAsAnAlias()
+    {
+        var entry = ReportCatalog.FindByKey(ReportCatalog.ThirdPartyAgedTrialBalanceKey);
+
+        Assert.NotNull(entry);
+        Assert.Equal("Third Party Reconciliation Account Aged Trial Balance", entry!.PioneerRowText);
+        Assert.Equal("Third Party Aged Trial Balance As of Date", entry.PioneerRowTextAlias);
+    }
+
+    [Fact]
+    public void NoOtherEntryHasARowTextAlias()
+    {
+        foreach (var entry in ReportCatalog.All.Where(e => e.Key != ReportCatalog.ThirdPartyAgedTrialBalanceKey))
+        {
+            Assert.Null(entry.PioneerRowTextAlias);
+        }
+    }
+
     [Theory]
     [InlineData(ReportCatalog.ArAgedTrialBalanceKey)]
     [InlineData(ReportCatalog.ThirdPartyControlBalanceKey)]

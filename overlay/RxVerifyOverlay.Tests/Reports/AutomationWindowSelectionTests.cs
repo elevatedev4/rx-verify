@@ -239,4 +239,188 @@ public class AutomationWindowSelectionTests
             Assert.False(RibbonScreenConfirmation.NameContainsAnyHint(string.Empty, hints));
         }
     }
+
+    /// <summary>
+    /// Round 3: PioneerReportDriver.FindMainWindow's pure ranking decision
+    /// — the fix for the owner's first real run resolving to pid 24828,
+    /// handle=0x0, name='&lt;untitled&gt;' (a Pioneer helper process with no
+    /// UI) instead of the real shell (pid 20664).
+    /// </summary>
+    public class MainWindowSelectorTests
+    {
+        private static MainWindowCandidate Candidate(
+            string title = "Run Financial Reports",
+            int processId = 20664,
+            long handle = 0xA025E,
+            string className = "WindowsForms10.Window.8.app.0.37e3228_r7_ad1",
+            int width = 1200,
+            int height = 800,
+            bool isPioneerProcess = true,
+            bool isPrecheckFamily = false) =>
+            new(title, processId, new IntPtr(handle), className, width, height, isPioneerProcess, isPrecheckFamily);
+
+        [Fact]
+        public void ReturnsNullWhenThereAreNoCandidates()
+        {
+            Assert.Null(MainWindowSelector.Choose(new List<MainWindowCandidate>()));
+        }
+
+        [Fact]
+        public void RejectsAHelperWindowWithAZeroHandle()
+        {
+            // The exact round-3 bug: pid 24828, handle=0x0, name='<untitled>'.
+            var helper = Candidate(title: "", processId: 24828, handle: 0, isPioneerProcess: true);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { helper });
+
+            Assert.Null(chosen);
+        }
+
+        [Fact]
+        public void RejectsACandidateWithAnEmptyTitleEvenWithANonZeroHandle()
+        {
+            var candidate = Candidate(title: "", handle: 0x1234);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { candidate });
+
+            Assert.Null(chosen);
+        }
+
+        [Fact]
+        public void RejectsThePrecheckFamilyWindow()
+        {
+            var precheck = Candidate(title: "Edit Rx - 123456", isPrecheckFamily: true);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { precheck });
+
+            Assert.Null(chosen);
+        }
+
+        [Fact]
+        public void RejectsANonPioneerWindowWhoseTitleDoesNotMentionPioneer()
+        {
+            var other = Candidate(title: "Notepad", isPioneerProcess: false);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { other });
+
+            Assert.Null(chosen);
+        }
+
+        [Fact]
+        public void AcceptsATitleContainingPioneerEvenWhenNotThePioneerProcess()
+        {
+            var candidate = Candidate(title: "PioneerRx - Some Screen", isPioneerProcess: false, className: "SomeOtherClass");
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { candidate });
+
+            Assert.NotNull(chosen);
+        }
+
+        [Fact]
+        public void PicksTheRealShellOverTheZeroHandleHelperProcess()
+        {
+            // The exact round-3 scenario: helper pid 24828 (handle 0x0,
+            // untitled) enumerated ALONGSIDE the real shell pid 20664.
+            var helper = Candidate(title: "", processId: 24828, handle: 0);
+            var realShell = Candidate(title: "Run Financial Reports", processId: 20664, handle: 0xA025E);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { helper, realShell });
+
+            Assert.NotNull(chosen);
+            Assert.Equal(20664, chosen!.Value.ProcessId);
+        }
+
+        [Fact]
+        public void PrefersTheLargestWindowsForms10WindowAmongEligibleCandidates()
+        {
+            var smaller = Candidate(handle: 0x1, width: 400, height: 300);
+            var larger = Candidate(handle: 0x2, width: 1200, height: 800);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { smaller, larger });
+
+            Assert.NotNull(chosen);
+            Assert.Equal(new IntPtr(0x2), chosen!.Value.Handle);
+        }
+
+        [Fact]
+        public void FallsBackToTheLargestEligibleCandidateWhenNoneIsWindowsForms10()
+        {
+            var a = Candidate(handle: 0x1, className: "SomeOtherToolkit.Window", width: 400, height: 300);
+            var b = Candidate(handle: 0x2, className: "SomeOtherToolkit.Window", width: 1200, height: 800);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { a, b });
+
+            Assert.NotNull(chosen);
+            Assert.Equal(new IntPtr(0x2), chosen!.Value.Handle);
+        }
+
+        [Fact]
+        public void PrefersAWindowsForms10CandidateOverALargerNonWindowsForms10Candidate()
+        {
+            var largeOtherToolkit = Candidate(handle: 0x1, className: "SomeOtherToolkit.Window", width: 5000, height: 5000);
+            var smallerWinForms = Candidate(handle: 0x2, className: "WindowsForms10.Window.8.app.0.37e3228_r7_ad1", width: 800, height: 600);
+
+            var chosen = MainWindowSelector.Choose(new List<MainWindowCandidate> { largeOtherToolkit, smallerWinForms });
+
+            Assert.NotNull(chosen);
+            Assert.Equal(new IntPtr(0x2), chosen!.Value.Handle);
+        }
+    }
+
+    public class MainWindowTitleRedactionTests
+    {
+        [Fact]
+        public void ReturnsUntitledPlaceholderForEmptyOrNullTitle()
+        {
+            Assert.Equal("<untitled>", MainWindowTitleRedaction.RedactIfNeeded(null));
+            Assert.Equal("<untitled>", MainWindowTitleRedaction.RedactIfNeeded(""));
+        }
+
+        [Theory]
+        [InlineData("Run Financial Reports")]
+        [InlineData("Financial Reports")]
+        [InlineData("Run Payments")]
+        [InlineData("Payments")]
+        public void DoesNotRedactAKnownScreenName(string screenName)
+        {
+            Assert.Equal(screenName, MainWindowTitleRedaction.RedactIfNeeded(screenName));
+        }
+
+        [Fact]
+        public void RedactsAnUnknownTitle()
+        {
+            var result = MainWindowTitleRedaction.RedactIfNeeded("Edit Rx - John Smith - 12345");
+
+            Assert.Equal(UiaNameRedaction.RedactedName, result);
+            Assert.DoesNotContain("John Smith", result);
+        }
+    }
+
+    public class MainWindowCandidateLogTests
+    {
+        [Fact]
+        public void IncludesPidHandleClassAndTitleLengthAlways()
+        {
+            var candidate = new MainWindowCandidate("Edit Rx - John Smith", 24828, new IntPtr(0), "SomeClass", 0, 0, true, false);
+
+            var line = MainWindowCandidateLog.Format(candidate);
+
+            Assert.Contains("pid=24828", line);
+            Assert.Contains("handle=0x0", line);
+            Assert.Contains("class='SomeClass'", line);
+            Assert.Contains($"title_len={candidate.Title.Length}", line);
+            Assert.DoesNotContain("John Smith", line);
+            Assert.Contains(UiaNameRedaction.RedactedName, line);
+        }
+
+        [Fact]
+        public void IncludesTheLiteralTitleWhenItIsAKnownScreenName()
+        {
+            var candidate = new MainWindowCandidate("Run Financial Reports", 20664, new IntPtr(0xA025E), "WindowsForms10.Window.8", 1200, 800, true, false);
+
+            var line = MainWindowCandidateLog.Format(candidate);
+
+            Assert.Contains("Run Financial Reports", line);
+        }
+    }
 }

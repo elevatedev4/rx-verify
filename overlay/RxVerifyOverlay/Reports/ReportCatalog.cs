@@ -37,6 +37,17 @@ public enum ReportOutputFormat
 /// Pioneer's UI; DisplayName is Will's own name for the report, shown in
 /// ReportsWindow's picker.
 /// </summary>
+/// <param name="PioneerRowTextAlias">
+/// Round 3 fix (owner's screenshot of the real "Run Financial Reports"
+/// grid has no row literally named "Third Party Aged Trial Balance As of
+/// Date" - the closest is "Third Party Reconciliation Account Aged Trial
+/// Balance"). Optional secondary row-name PioneerReportDriver's
+/// row-selection step tries SECOND, after PioneerRowText, before giving
+/// up on that report entirely — null for every entry except
+/// ThirdPartyAgedTrialBalanceKey. Kept as an alias (not just replaced
+/// outright) in case Will's install genuinely has an older/differently
+/// named row on some other workstation.
+/// </param>
 public sealed record ReportCatalogEntry(
     string Key,
     string DisplayName,
@@ -44,7 +55,8 @@ public sealed record ReportCatalogEntry(
     ReportParameterKind ParameterKind,
     ReportOutputFormat OutputFormat,
     string SaveName,
-    bool Enabled);
+    bool Enabled,
+    string? PioneerRowTextAlias = null);
 
 /// <summary>
 /// The fixed phase-1 report list (GOAL brief "WHAT PIONEER LOOKS LIKE"
@@ -80,11 +92,20 @@ public static class ReportCatalog
         new(
             Key: ThirdPartyAgedTrialBalanceKey,
             DisplayName: "Third Party Aged Trial Balance",
-            PioneerRowText: "Third Party Aged Trial Balance As of Date",
+            // Round 3 fix: the owner's real "Run Financial Reports" grid
+            // screenshot has no row named "Third Party Aged Trial Balance
+            // As of Date" — the closest verbatim row is "Third Party
+            // Reconciliation Account Aged Trial Balance" ("Balance of
+            // Third Party Reconciliation Accounts as of Custom Date").
+            // The old guessed name is kept as PioneerRowTextAlias, tried
+            // second by PioneerReportDriver's row-selection step, in case
+            // some other install genuinely has it under the old name.
+            PioneerRowText: "Third Party Reconciliation Account Aged Trial Balance",
             ParameterKind: ReportParameterKind.AsOfDate,
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Third Party Aged Trial Balance",
-            Enabled: true),
+            Enabled: true,
+            PioneerRowTextAlias: "Third Party Aged Trial Balance As of Date"),
 
         new(
             Key: ThirdPartyControlBalanceKey,
