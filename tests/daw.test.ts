@@ -8,10 +8,22 @@ describe('compareDaw', () => {
     expect(r.reasonCode).toBe('not_provided');
   });
 
-  it('is GREEN substitution_allowed when the source allows substitution, regardless of DAW state', () => {
-    expect(compareDaw(false, true).status).toBe('green');
-    expect(compareDaw(false, false).status).toBe('green');
-    expect(compareDaw(false, undefined).status).toBe('green');
+  it('is GREEN substitution_allowed when the source allows substitution and DAW is unchecked', () => {
+    const r = compareDaw(false, false);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('substitution_allowed');
+  });
+
+  it('is GREEN substitution_allowed when the source allows substitution and the entered DAW state was not read', () => {
+    const r = compareDaw(false, undefined);
+    expect(r.status).toBe('green');
+    expect(r.reasonCode).toBe('substitution_allowed');
+  });
+
+  it('is RED daw_checked_but_substitution_allowed when the source allows substitution but DAW is checked', () => {
+    const r = compareDaw(false, true);
+    expect(r.status).toBe('red');
+    expect(r.reasonCode).toBe('daw_checked_but_substitution_allowed');
   });
 
   it('is YELLOW not_provided when substitution is not allowed but the entered DAW state was not read', () => {
