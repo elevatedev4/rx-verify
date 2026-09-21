@@ -16,6 +16,51 @@ public readonly record struct OcrRowMatch(double X, double Y, double Width, doub
 }
 
 /// <summary>
+/// Review fix (PR #11 blocker): PioneerReportDriver.TryOcrRowSelect
+/// captures the work-area rect once, before the OCR await — if Pioneer's
+/// window moved/resized while RecognizeAsync was running, that rect is
+/// stale. Pure comparison of the "before" vs "after" rect (X/Y/Width/
+/// Height individually, not a single combined check, so a test can
+/// exercise each dimension) — the driver re-reads BoundingRectangle after
+/// the await and aborts/retries once whenever this reports true, rather
+/// than trusting the pre-await rect for the click.
+/// </summary>
+public static class WorkAreaStability
+{
+    public static bool HasMoved(
+        int originalX, int originalY, int originalWidth, int originalHeight,
+        int currentX, int currentY, int currentWidth, int currentHeight) =>
+        originalX != currentX || originalY != currentY || originalWidth != currentWidth || originalHeight != currentHeight;
+}
+
+/// <summary>
+/// Review fix (PR #11 blocker): OcrRowMatch's coordinates are in the
+/// CAPTURED BITMAP's own pixel space. Windows.Media.Ocr
+/// (WindowsMediaOcrEngine) already divides its own internal upscale back
+/// out before returning OcrTextResult.Words, so in the ordinary case the
+/// bitmap's pixel dimensions equal the AutomationElement rect passed to
+/// EscriptImageCapture.CaptureRegion 1:1 and this scale is 1.0/1.0 — this
+/// mapping exists for the rarer case where they DON'T match (a
+/// DPI-aware/scaled capture path returning a bitmap whose pixel size
+/// differs from the rect's own logical size), so a >1 mismatch there
+/// can't silently double-click a point offset from the matched row.
+/// </summary>
+public static class OcrCaptureScale
+{
+    /// <summary>(regionWidth/bitmapWidth, regionHeight/bitmapHeight) — 1.0/1.0 when they already match; falls back to 1.0 for either axis if the bitmap dimension is zero (can't divide, and a zero-size bitmap means OCR already found nothing).</summary>
+    public static (double ScaleX, double ScaleY) ComputeScale(int regionWidth, int regionHeight, int bitmapWidth, int bitmapHeight)
+    {
+        var scaleX = bitmapWidth > 0 ? (double)regionWidth / bitmapWidth : 1.0;
+        var scaleY = bitmapHeight > 0 ? (double)regionHeight / bitmapHeight : 1.0;
+        return (scaleX, scaleY);
+    }
+
+    /// <summary>Maps an OCR-relative point (bitmap pixel space, as OcrRowMatch.CenterX/CenterY already are) to a screen point: scale into the capture region's own coordinate space, then add the region's screen-space origin.</summary>
+    public static (double X, double Y) ToScreenPoint(double ocrX, double ocrY, double scaleX, double scaleY, int regionLeft, int regionTop) =>
+        (regionLeft + ocrX * scaleX, regionTop + ocrY * scaleY);
+}
+
+/// <summary>
 /// GOAL brief step 2c (OCR row-selection strategy): pure matching over
 /// the OCR engine's already-recognized Words — no OCR engine, no Bitmap,
 /// no capture involved here at all, so every shape (line grouping, header

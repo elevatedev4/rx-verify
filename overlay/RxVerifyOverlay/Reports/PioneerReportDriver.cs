@@ -213,8 +213,16 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// (if it never succeeds) the last attempt, plus a one-line "still
     /// looking" note on attempts in between - full candidate dumps on
     /// every ~250ms poll tick would flood the run log for no benefit.
+    ///
+    /// Review fix (PR #11, non-blocking): <paramref name="ct"/> is
+    /// checked at the top of every attempt (poll granularity, same
+    /// PollInterval idiom as WaitUntilAsync elsewhere) so Stop interrupts
+    /// the retry loop instead of always running the full ~5s - stays
+    /// false/does-not-throw per this method's own contract, it just
+    /// returns sooner with a "stopped" log line rather than surfacing
+    /// OperationCanceledException.
     /// </summary>
-    public bool FindMainWindow(Action<string> log)
+    public bool FindMainWindow(Action<string> log, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + MainWindowFindTimeout;
         var attempt = 0;
@@ -222,6 +230,13 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
         while (true)
         {
+            if (ct.IsCancellationRequested)
+            {
+                log("FindMainWindow: stopped.");
+                _mainWindow = null;
+                return false;
+            }
+
             attempt++;
             var (element, chosen, candidates) = TryFindMainWindowOnce();
             lastCandidates = candidates;
@@ -954,24 +969,65 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// TryKeyboardKeyTipsNavigate's KeyboardStepWait sleeps) so
     /// RunFinancialReport can call this like every other bool-returning
     /// step guard.
+    ///
+    /// Review fix (PR #11, non-blocking): after each strategy's click/
+    /// Enter, if a NEW Pioneer-owned top-level window appears that is NOT
+    /// "Report Parameters" (an unexpected error/confirmation dialog, say)
+    /// the WHOLE row-selection sequence stops right there — every later
+    /// strategy/row-text candidate short-circuits to failure — rather
+    /// than blindly trying the next strategy against a screen that isn't
+    /// the report list any more. hardStop is a closure-local flag (not
+    /// instance state — one call of this method handles exactly one
+    /// report) so the three strategy delegates below stay simple
+    /// Func&lt;string, bool&gt; the pure sequencer already expects.
     /// </summary>
     private bool TrySelectAndOpenReportRow(ReportCatalogEntry entry, Action<string> log, CancellationToken ct)
     {
         var rowTextCandidates = ReportRowSelectionSequencer.BuildRowTextCandidates(entry);
+        var knownWindowHandles = new HashSet<IntPtr>(EnumeratePioneerOwnedTopLevelWindows().Select(w => w.Candidate.Handle));
+        var hardStop = false;
 
-        bool UiaDeepSearchStrategy(string rowText) =>
-            TryDeepUiaRowSelect(rowText, log) && WaitForReportParametersWindowSync(ct);
+        bool RunStrategy(Func<string, bool> clickAttempt, string rowText)
+        {
+            if (hardStop) return false;
 
-        bool GridKeyboardStrategy(string rowText) =>
-            TryGridKeyboardRowSelect(rowText, log, ct) && WaitForReportParametersWindowSync(ct);
+            var clicked = clickAttempt(rowText);
+            var confirmed = clicked && WaitForReportParametersWindowSync(ct);
 
-        bool OcrStrategy(string rowText) =>
-            TryOcrRowSelectSync(rowText, log, ct) && WaitForReportParametersWindowSync(ct);
+            if (!confirmed && TryFindUnexpectedNewPioneerWindow(knownWindowHandles, log))
+            {
+                hardStop = true;
+            }
+
+            return confirmed;
+        }
+
+        bool UiaDeepSearchStrategy(string rowText) => RunStrategy(rt => TryDeepUiaRowSelect(rt, log), rowText);
+        bool GridKeyboardStrategy(string rowText) => RunStrategy(rt => TryGridKeyboardRowSelect(rt, log, ct), rowText);
+        bool OcrStrategy(string rowText) => RunStrategy(rt => TryOcrRowSelectSync(rt, log, ct), rowText);
 
         var strategies = new List<Func<string, bool>> { UiaDeepSearchStrategy, GridKeyboardStrategy, OcrStrategy };
 
         return ReportRowSelectionSequencer.TrySelect(rowTextCandidates, strategies, (rowText, strategyNumber) =>
             log($"  Row selection strategy {strategyNumber}/3 for '{rowText}'..."));
+    }
+
+    /// <summary>Non-blocking review fix: true (and logs) the first time a Pioneer-owned top-level window not already in <paramref name="knownHandles"/> appears whose title does NOT contain "Report Parameters" — an unexpected dialog/screen change mid row-selection. Adds the window to <paramref name="knownHandles"/> so it is reported only once. Logs class + title LENGTH only, per this file's established PHI-safety convention (see MainWindowCandidateLog) — never the title text itself, which could echo field content from an error dialog.</summary>
+    private bool TryFindUnexpectedNewPioneerWindow(HashSet<IntPtr> knownHandles, Action<string> log)
+    {
+        foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+        {
+            if (candidate.Handle == IntPtr.Zero || knownHandles.Contains(candidate.Handle)) continue;
+            if (!string.IsNullOrEmpty(candidate.Title) && candidate.Title.Contains("Report Parameters", StringComparison.OrdinalIgnoreCase)) continue;
+
+            knownHandles.Add(candidate.Handle);
+            var className = SafeClassName(window);
+            var titleLength = candidate.Title.Length;
+            log($"    unexpected new Pioneer window appeared - stopping the row selection sequence for this report. class='{className}' title_len={titleLength}");
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>GOAL brief fix 2's closing rule, shared by all three strategies: "success = a new top-level window owned by the Pioneer pid whose title contains 'Report Parameters' ... within 5 s". Synchronous wrapper (WaitUntilAsync needs an await) so the sequencer's plain bool delegates can call it directly.</summary>
@@ -1329,9 +1385,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// (Ocr/EscriptImageCapture.CaptureRegion + IOcrEngine — no new OCR
     /// dependency), then hands the recognized Words to the pure
     /// ReportGridOcrMatcher (Reports/ReportGridOcr.cs) to find the exact
-    /// "Report Name" column line, and double-clicks its centre (screen
-    /// coordinates = the work area's own top-left + the matched line's
-    /// region-relative centre).
+    /// "Report Name" column line, and double-clicks its centre.
+    ///
+    /// Review fix (PR #11 blocker): the work-area rect is re-read AFTER
+    /// RecognizeAsync's await returns and compared (WorkAreaStability) to
+    /// the rect captured before it — if Pioneer's window moved/resized
+    /// meanwhile, the pre-await rect is stale (still Pioneer-owned, so
+    /// IsPointOwnedByPioneer alone wouldn't catch it, but a different
+    /// row/pane could be under that offset now). One retry (fresh
+    /// capture+OCR) is allowed; a second mismatch aborts the strategy
+    /// rather than clicking on a guess. The matched OCR point is also
+    /// scaled from the captured BITMAP's pixel space into the CURRENT
+    /// rect's coordinate space (OcrCaptureScale — a no-op 1.0/1.0 scale
+    /// in the ordinary case, see that class's doc) and verified to fall
+    /// inside the current rect before the click.
     /// </summary>
     private async Task<bool> TryOcrRowSelect(string rowText, Action<string> log, CancellationToken ct)
     {
@@ -1344,44 +1411,77 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             return false;
         }
 
-        Rectangle workAreaRect;
-        try { workAreaRect = workArea.BoundingRectangle; }
-        catch { log("    could not read the work area's bounding rectangle for OCR capture."); return false; }
-
-        if (workAreaRect.Width <= 0 || workAreaRect.Height <= 0)
+        for (var attempt = 1; attempt <= 2; attempt++)
         {
-            log("    work area has no usable bounding rectangle for OCR capture.");
-            return false;
+            Rectangle captureRect;
+            try { captureRect = workArea.BoundingRectangle; }
+            catch { log("    could not read the work area's bounding rectangle for OCR capture."); return false; }
+
+            if (captureRect.Width <= 0 || captureRect.Height <= 0)
+            {
+                log("    work area has no usable bounding rectangle for OCR capture.");
+                return false;
+            }
+
+            OcrTextResult ocrResult;
+            int bitmapWidth;
+            int bitmapHeight;
+            try
+            {
+                using var bitmap = EscriptImageCapture.CaptureRegion(captureRect);
+                bitmapWidth = bitmap.Width;
+                bitmapHeight = bitmap.Height;
+                ocrResult = await _ocrEngine.RecognizeAsync(bitmap, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                log($"    OCR capture/recognition failed: {ex.Message}");
+                return false;
+            }
+
+            Rectangle currentRect;
+            try { currentRect = workArea.BoundingRectangle; }
+            catch { log("    could not re-read the work area's bounding rectangle after OCR."); return false; }
+
+            if (WorkAreaStability.HasMoved(
+                    captureRect.X, captureRect.Y, captureRect.Width, captureRect.Height,
+                    currentRect.X, currentRect.Y, currentRect.Width, currentRect.Height))
+            {
+                if (attempt == 1)
+                {
+                    log("    work area moved during OCR - retrying once.");
+                    continue;
+                }
+
+                log("    work area moved during OCR again on the retry - aborting the OCR strategy rather than clicking a stale offset.");
+                return false;
+            }
+
+            var match = ReportGridOcrMatcher.FindReportNameLine(ocrResult.Words, rowText);
+            if (match is null)
+            {
+                log($"    OCR did not find an exact 'Report Name' column match for '{rowText}'.");
+                return false;
+            }
+
+            var (scaleX, scaleY) = OcrCaptureScale.ComputeScale(currentRect.Width, currentRect.Height, bitmapWidth, bitmapHeight);
+            var (screenX, screenY) = OcrCaptureScale.ToScreenPoint(match.Value.CenterX, match.Value.CenterY, scaleX, scaleY, currentRect.X, currentRect.Y);
+            var screenCenter = new Point((int)Math.Round(screenX), (int)Math.Round(screenY));
+
+            if (!currentRect.Contains(screenCenter))
+            {
+                log("    matched OCR point fell outside the current work area rectangle - aborting rather than risk a wrong click.");
+                return false;
+            }
+
+            return TryDoubleClickPoint(screenCenter, log, "OCR");
         }
 
-        OcrTextResult ocrResult;
-        try
-        {
-            using var bitmap = EscriptImageCapture.CaptureRegion(workAreaRect);
-            ocrResult = await _ocrEngine.RecognizeAsync(bitmap, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            log($"    OCR capture/recognition failed: {ex.Message}");
-            return false;
-        }
-
-        var match = ReportGridOcrMatcher.FindReportNameLine(ocrResult.Words, rowText);
-        if (match is null)
-        {
-            log($"    OCR did not find an exact 'Report Name' column match for '{rowText}'.");
-            return false;
-        }
-
-        var screenCenter = new Point(
-            workAreaRect.X + (int)match.Value.CenterX,
-            workAreaRect.Y + (int)match.Value.CenterY);
-
-        return TryDoubleClickPoint(screenCenter, log, "OCR");
+        return false;
     }
 
     /// <summary>Synchronous wrapper for ReportRowSelectionSequencer's Func&lt;string, bool&gt; strategy slot - same "this file already blocks on async work from a sync helper" idiom as WaitForReportParametersWindowSync above.</summary>

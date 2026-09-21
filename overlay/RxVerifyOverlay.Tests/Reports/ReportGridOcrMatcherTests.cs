@@ -240,4 +240,94 @@ public class ReportGridOcrMatcherTests
             Assert.InRange(match.Value.CenterY, 142, 154);
         }
     }
+
+    /// <summary>PR #11 blocker fix: the "did Pioneer's window move during the OCR await" decision behind PioneerReportDriver.TryOcrRowSelect's abort/retry-once path.</summary>
+    public class WorkAreaStabilityTests
+    {
+        [Fact]
+        public void FalseWhenNothingChanged()
+        {
+            Assert.False(WorkAreaStability.HasMoved(10, 20, 300, 400, 10, 20, 300, 400));
+        }
+
+        [Fact]
+        public void TrueWhenXMoved()
+        {
+            Assert.True(WorkAreaStability.HasMoved(10, 20, 300, 400, 11, 20, 300, 400));
+        }
+
+        [Fact]
+        public void TrueWhenYMoved()
+        {
+            Assert.True(WorkAreaStability.HasMoved(10, 20, 300, 400, 10, 21, 300, 400));
+        }
+
+        [Fact]
+        public void TrueWhenWidthChanged()
+        {
+            Assert.True(WorkAreaStability.HasMoved(10, 20, 300, 400, 10, 20, 301, 400));
+        }
+
+        [Fact]
+        public void TrueWhenHeightChanged()
+        {
+            Assert.True(WorkAreaStability.HasMoved(10, 20, 300, 400, 10, 20, 300, 401));
+        }
+
+        [Fact]
+        public void TrueWhenEverythingChanged()
+        {
+            Assert.True(WorkAreaStability.HasMoved(10, 20, 300, 400, 500, 600, 700, 800));
+        }
+    }
+
+    /// <summary>PR #11 blocker fix: mapping an OCR match's coordinates (captured-BITMAP pixel space) to a screen point, accounting for a bitmap-vs-rect size mismatch.</summary>
+    public class OcrCaptureScaleTests
+    {
+        [Fact]
+        public void ComputeScaleIsOneToOneWhenBitmapMatchesTheRegion()
+        {
+            var (scaleX, scaleY) = OcrCaptureScale.ComputeScale(regionWidth: 800, regionHeight: 600, bitmapWidth: 800, bitmapHeight: 600);
+
+            Assert.Equal(1.0, scaleX);
+            Assert.Equal(1.0, scaleY);
+        }
+
+        [Fact]
+        public void ComputeScaleHalvesWhenTheBitmapIsDoubleSize()
+        {
+            // e.g. a 2x DPI/upscale capture path returning a bitmap twice the rect's logical size.
+            var (scaleX, scaleY) = OcrCaptureScale.ComputeScale(regionWidth: 800, regionHeight: 600, bitmapWidth: 1600, bitmapHeight: 1200);
+
+            Assert.Equal(0.5, scaleX);
+            Assert.Equal(0.5, scaleY);
+        }
+
+        [Fact]
+        public void ComputeScaleFallsBackToOneWhenABitmapDimensionIsZero()
+        {
+            var (scaleX, scaleY) = OcrCaptureScale.ComputeScale(regionWidth: 800, regionHeight: 600, bitmapWidth: 0, bitmapHeight: 0);
+
+            Assert.Equal(1.0, scaleX);
+            Assert.Equal(1.0, scaleY);
+        }
+
+        [Fact]
+        public void ToScreenPointScalesThenAddsTheRegionOrigin()
+        {
+            var (x, y) = OcrCaptureScale.ToScreenPoint(ocrX: 100, ocrY: 50, scaleX: 2.0, scaleY: 2.0, regionLeft: 300, regionTop: 400);
+
+            Assert.Equal(500, x); // 300 + 100*2
+            Assert.Equal(500, y); // 400 + 50*2
+        }
+
+        [Fact]
+        public void ToScreenPointIsAPureIdentityOffsetAtOneToOneScale()
+        {
+            var (x, y) = OcrCaptureScale.ToScreenPoint(ocrX: 40, ocrY: 12, scaleX: 1.0, scaleY: 1.0, regionLeft: 100, regionTop: 130);
+
+            Assert.Equal(140, x);
+            Assert.Equal(142, y);
+        }
+    }
 }

@@ -25,7 +25,7 @@ public sealed class FakeReportDriver : IPioneerReportDriver
     /// <summary>Report key(s) that should throw a plain Exception instead of returning a result.</summary>
     public Dictionary<string, Exception> ThrowFor { get; } = new();
 
-    public bool FindMainWindow(Action<string> log)
+    public bool FindMainWindow(Action<string> log, CancellationToken ct)
     {
         Calls.Add("FindMainWindow");
         return MainWindowFound;

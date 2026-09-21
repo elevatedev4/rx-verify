@@ -60,8 +60,14 @@ public interface IPioneerReportDriver
     /// (pid, handle=0x0) with no way to diagnose it after the fact. See
     /// Reports/AutomationWindowSelection.cs MainWindowSelector/
     /// MainWindowCandidateLog for the pure ranking/formatting behind it.
+    ///
+    /// Review fix (PR #11, non-blocking): <paramref name="ct"/> added so
+    /// the ~5s retry loop can be interrupted by Stop instead of always
+    /// running to completion — same "returns false, does not throw"
+    /// contract as before (a cancelled token makes this return false
+    /// promptly, it does not surface as OperationCanceledException).
     /// </summary>
-    bool FindMainWindow(Action<string> log);
+    bool FindMainWindow(Action<string> log, CancellationToken ct);
 
     /// <summary>
     /// Runs one "Analysis &gt; Financial Reports &gt; Run Financial Reports"
