@@ -6,11 +6,21 @@
  * codes; code 1 = "Substitution Not Allowed by Prescriber", every other
  * observed code permits substitution). PioneerRx's entered side carries a
  * DAW ("Dispense As Written") checkbox (AutomationId uxDawCode — see
- * overlay Uia/FieldMap.cs). The two must agree in one direction only: if
- * the prescriber disallows substitution, DAW must be checked. There is no
- * requirement in the other direction — a pharmacist may still choose DAW
- * even when substitution is technically allowed (patient request, etc.),
- * so that combination is never flagged.
+ * overlay Uia/FieldMap.cs) — this engine only ever sees that boolean, not
+ * a numeric DAW code (0/1/2/...), so there is no way to distinguish
+ * "pharmacist checked DAW because the patient requested brand" from any
+ * other checked case; see compareDaw's own doc below for how a future
+ * numeric-code input would need to change this.
+ *
+ * The two sides are an EQUIVALENCE, not a one-way requirement (owner
+ * correction, in-app report on build 5bd8d96, verbatim: "DAW checked
+ * means substitutions not allowed. DAW unchecked matches substitutions
+ * allowed."):
+ *   - substitution allowed + DAW unchecked   -> green (consistent)
+ *   - substitution allowed + DAW checked     -> red (mismatch — pharmacy
+ *     entered "dispense as written" but the prescriber allows substitution)
+ *   - substitution NOT allowed + DAW checked -> green (consistent)
+ *   - substitution NOT allowed + DAW unchecked -> red (daw_required)
  *
  * Missing data on EITHER side is yellow not_provided, same philosophy as
  * every other comparison in this engine — never a hard mismatch just
@@ -38,10 +48,18 @@ export function compareDaw(
   }
 
   if (!sourceSubstitutionsNotAllowed) {
+    if (enteredDaw) {
+      return {
+        status: 'red',
+        reasonCode: 'daw_checked_but_substitution_allowed',
+        explanation: 'E-prescription allows substitution, but DAW is checked — uncheck DAW (or confirm the prescriber/patient requires brand).'
+      };
+    }
+
     return {
       status: 'green',
       reasonCode: 'substitution_allowed',
-      explanation: 'Source e-prescription allows substitution — the DAW checkbox is not required to be checked.'
+      explanation: 'Source e-prescription allows substitution and the DAW checkbox is not checked — consistent.'
     };
   }
 
