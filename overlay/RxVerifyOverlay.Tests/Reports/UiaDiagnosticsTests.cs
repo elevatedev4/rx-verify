@@ -151,6 +151,58 @@ public class UiaDiagnosticsTests
             Assert.Contains(new string('A', 40), lines[0]);
             Assert.DoesNotContain(new string('A', 41), lines[0]);
         }
+
+        /// <summary>Round 3: the SupportedPatterns field added for the row-selection raw-view dump.</summary>
+        [Fact]
+        public void AppendsSupportedPatternsWhenSet()
+        {
+            var elements = new List<UiaElementSnapshot> { new("DataItem", "A/R Control Balance by Date Range", "", "", 1, "Invoke,SelectionItem") };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150, e => e.Name);
+
+            Assert.Contains("patterns='Invoke,SelectionItem'", lines[0]);
+        }
+
+        [Fact]
+        public void OmitsPatternsSuffixWhenNotSet()
+        {
+            var elements = new List<UiaElementSnapshot> { new("Button", "Run", "", "", 1) };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150);
+
+            Assert.DoesNotContain("patterns=", lines[0]);
+        }
+    }
+
+    /// <summary>Round 3: the redactor-overload used by PioneerReportDriver's row-selection raw-view dump (a DIFFERENT allowlist than UiaNameRedaction's control-type one — see ReportRowNameRedaction).</summary>
+    public class FormatElementDumpWithCustomRedactorTests
+    {
+        [Fact]
+        public void UsesTheSuppliedRedactorInsteadOfUiaNameRedaction()
+        {
+            // An Edit control would normally be redacted by UiaNameRedaction
+            // (value-bearing) - the custom redactor here says otherwise.
+            var elements = new List<UiaElementSnapshot> { new("Edit", "Inventory Valuation", "", "", 1) };
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 150, e => e.Name);
+
+            Assert.Contains("Inventory Valuation", lines[0]);
+        }
+
+        [Fact]
+        public void StillRespectsTheLineCapAndOmittedCountLine()
+        {
+            var elements = new List<UiaElementSnapshot>();
+            for (var i = 0; i < 5; i++)
+            {
+                elements.Add(new UiaElementSnapshot("DataItem", $"Row{i}", "", "", 1));
+            }
+
+            var lines = UiaDumpFormatter.FormatElementDump(elements, maxLines: 3, e => "[redacted]");
+
+            Assert.Equal(4, lines.Count);
+            Assert.Contains("2 more", lines[^1]);
+        }
     }
 
     /// <summary>Direct tests of UiaNameRedaction itself, independent of FormatElementDump's line assembly.</summary>

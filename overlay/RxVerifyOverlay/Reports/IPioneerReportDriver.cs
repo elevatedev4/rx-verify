@@ -52,8 +52,22 @@ public interface IPioneerReportDriver
     /// no PioneerRx main window is currently open — ReportsCoordinator
     /// treats that as an immediate failure for every selected report
     /// rather than attempting any input.
+    ///
+    /// Round 3 fix: <paramref name="log"/> added (was parameterless) so
+    /// every candidate window this considers — and why it picked (or
+    /// didn't pick) one — reaches the run log; the previous silent
+    /// version picked a same-process helper window with no visible UI
+    /// (pid, handle=0x0) with no way to diagnose it after the fact. See
+    /// Reports/AutomationWindowSelection.cs MainWindowSelector/
+    /// MainWindowCandidateLog for the pure ranking/formatting behind it.
+    ///
+    /// Review fix (PR #11, non-blocking): <paramref name="ct"/> added so
+    /// the ~5s retry loop can be interrupted by Stop instead of always
+    /// running to completion — same "returns false, does not throw"
+    /// contract as before (a cancelled token makes this return false
+    /// promptly, it does not surface as OperationCanceledException).
     /// </summary>
-    bool FindMainWindow();
+    bool FindMainWindow(Action<string> log, CancellationToken ct);
 
     /// <summary>
     /// Runs one "Analysis &gt; Financial Reports &gt; Run Financial Reports"

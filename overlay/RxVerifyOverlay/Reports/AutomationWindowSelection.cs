@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace RxVerifyOverlay.Reports;
 
@@ -92,6 +93,99 @@ public static class PreviewCloseDecision
 /// one of them — this class is only the "does this title count" half,
 /// unit tested with plain strings, no FlaUI/UIA involved.
 /// </summary>
+/// <summary>
+/// Round 3 fix (owner's first real run: FindMainWindow resolved to pid
+/// 24828, handle 0x0, name='&lt;untitled&gt;' — a Pioneer HELPER process with
+/// no real window at all — while the actual UI was pid 20664; the old
+/// loop just took the FIRST desktop-enumeration match whose process name
+/// or window Name happened to look right, with no ranking). One
+/// enumerated top-level window's candidacy data — Title/ProcessId/Handle/
+/// ClassName/Width/Height plus the two impure facts the caller already
+/// had to compute anyway (IsPioneerProcess via Process.GetProcessById,
+/// IsPrecheckFamily via FieldMap.TargetWindowTitlePrefixes) — so the
+/// actual ranking decision below is pure and unit testable (see
+/// RxVerifyOverlay.Tests/Reports/AutomationWindowSelectionTests.cs
+/// MainWindowSelectorTests) without touching FlaUI/UIA/Windows at all.
+/// Built by PioneerReportDriver.TryFindMainWindowOnce from real
+/// AutomationElements at runtime.
+/// </summary>
+public readonly record struct MainWindowCandidate(
+    string Title, int ProcessId, IntPtr Handle, string ClassName, int Width, int Height,
+    bool IsPioneerProcess, bool IsPrecheckFamily);
+
+/// <summary>
+/// The pure ranking decision behind PioneerReportDriver.FindMainWindow:
+/// eligible candidates are Pioneer-owned (by process name OR a title
+/// containing "Pioneer"), not one of the Pre-Check/Edit/New-Rx family
+/// windows Uia/PioneerRxWindow.cs already owns, and have BOTH a non-zero
+/// native handle AND a non-empty title (excludes exactly the round-3 bug:
+/// a same-process helper window with handle=0x0/untitled). Among those,
+/// prefer the largest VISIBLE WindowsForms10.* window (Pioneer's real
+/// shell is a WinForms app) — falling back to the largest eligible
+/// candidate of any class if none matches that class prefix, rather than
+/// returning nothing just because a class name looked unexpected.
+/// </summary>
+public static class MainWindowSelector
+{
+    public static MainWindowCandidate? Choose(IReadOnlyList<MainWindowCandidate> candidates)
+    {
+        var eligible = candidates
+            .Where(c => !c.IsPrecheckFamily
+                        && c.Handle != IntPtr.Zero
+                        && !string.IsNullOrEmpty(c.Title)
+                        && (c.IsPioneerProcess || c.Title.Contains("Pioneer", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (eligible.Count == 0) return null;
+
+        var winFormsCandidates = eligible
+            .Where(c => c.ClassName.StartsWith("WindowsForms10.", StringComparison.Ordinal))
+            .ToList();
+
+        var pool = winFormsCandidates.Count > 0 ? winFormsCandidates : eligible;
+
+        return pool.OrderByDescending(c => (long)Math.Max(0, c.Width) * Math.Max(0, c.Height)).First();
+    }
+}
+
+/// <summary>
+/// Round 3 fix (GOAL brief step 1: "log every candidate ... the
+/// main-window title is a screen name, log it only when it matches a
+/// known screen-name allow-list ... else '[redacted]'"). Deliberately
+/// separate allow-list from UiaNameRedaction/ReportRowNameRedaction
+/// (control-type based / catalog-row-name based respectively) — a
+/// PioneerRx main window's TITLE is the current SCREEN name, which could
+/// in principle carry something patient-specific on a screen this app
+/// doesn't otherwise expect (the whole reason FindMainWindow logs pid/
+/// handle/class/title-LENGTH unconditionally but the title text only
+/// when it's a screen name this app already knows about).
+/// </summary>
+public static class MainWindowTitleRedaction
+{
+    private static readonly HashSet<string> KnownScreenNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Run Financial Reports", "Financial Reports",
+        "Run Payments", "Payments",
+    };
+
+    public static string RedactIfNeeded(string? title)
+    {
+        if (string.IsNullOrEmpty(title)) return "<untitled>";
+        return KnownScreenNames.Contains(title) ? title : UiaNameRedaction.RedactedName;
+    }
+}
+
+/// <summary>One formatted candidate log line — pid/handle/class/title-length always, title text only per MainWindowTitleRedaction. Kept as its own pure class (rather than inline string interpolation in PioneerReportDriver) purely so the exact format is unit tested.</summary>
+public static class MainWindowCandidateLog
+{
+    public static string Format(MainWindowCandidate candidate)
+    {
+        var titleLength = candidate.Title.Length;
+        var titleForLog = MainWindowTitleRedaction.RedactIfNeeded(candidate.Title);
+        return $"  candidate pid={candidate.ProcessId} handle=0x{candidate.Handle.ToInt64():X} class='{candidate.ClassName}' title_len={titleLength} title='{titleForLog}'";
+    }
+}
+
 public static class RibbonScreenConfirmation
 {
     /// <summary>The screen name itself, plus PioneerRx's own "Run &lt;screen&gt;" convention observed in Will's video for the Financial Reports list — generalized here so it applies to any ribbon screen this driver opens (Financial Reports, Payments, ...), not just the one that happened to fail first.</summary>

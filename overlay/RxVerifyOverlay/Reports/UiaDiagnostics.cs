@@ -16,7 +16,17 @@ namespace RxVerifyOverlay.Reports;
 /// line derived from it is ever written to a log file (see that class's
 /// and UiaNameRedaction's own docs for why).
 /// </summary>
-public readonly record struct UiaElementSnapshot(string ControlType, string Name, string AutomationId, string ClassName, int Depth);
+/// <param name="SupportedPatterns">
+/// Round 3 addition (GOAL brief step 2: the row-selection raw-view dump
+/// should show "control types, class names, patterns supported") — a
+/// comma-joined summary (e.g. "Invoke,SelectionItem,ScrollItem") of which
+/// UIA patterns PioneerReportDriver's raw-view walk found supported on
+/// this element. Defaults to "" so every existing 5-arg call site (the
+/// depth-3 ribbon/navigation dump, which never set this) keeps compiling
+/// and behaving exactly as before — only the new depth-8 row-selection
+/// dump populates it.
+/// </param>
+public readonly record struct UiaElementSnapshot(string ControlType, string Name, string AutomationId, string ClassName, int Depth, string SupportedPatterns = "");
 
 /// <summary>One top-level window owned by Pioneer's process, for the diagnostic dump's window list — same (Title, ClassName)-only shape as UiaElementSnapshot, for the same reason.</summary>
 public readonly record struct TopLevelWindowSnapshot(string Title, string ClassName);
@@ -103,7 +113,21 @@ public static class UiaDumpFormatter
     /// Name actually written is UiaNameRedaction.RedactIfNeeded's result,
     /// never the raw element.Name directly (see class doc / blocker 1).
     /// </summary>
-    public static IReadOnlyList<string> FormatElementDump(IReadOnlyList<UiaElementSnapshot> elements, int maxLines)
+    public static IReadOnlyList<string> FormatElementDump(IReadOnlyList<UiaElementSnapshot> elements, int maxLines) =>
+        FormatElementDump(elements, maxLines, e => UiaNameRedaction.RedactIfNeeded(e.ControlType, e.Name));
+
+    /// <summary>
+    /// Round 3 addition: same capping/indentation/line shape as the
+    /// 2-arg overload above, but with the redaction rule supplied by the
+    /// caller instead of hardcoded to UiaNameRedaction — used by
+    /// PioneerReportDriver's row-selection raw-view dump, which needs
+    /// ReportRowNameRedaction's different (catalog-row-name /
+    /// column-header) allow-list instead (see that class's doc for why
+    /// a control-type-based rule alone isn't right inside a report-row
+    /// grid). Also appends each element's SupportedPatterns, when set, as
+    /// a trailing " patterns='...'" segment.
+    /// </summary>
+    public static IReadOnlyList<string> FormatElementDump(IReadOnlyList<UiaElementSnapshot> elements, int maxLines, Func<UiaElementSnapshot, string> redactName)
     {
         var eligible = elements.Where(e => !string.IsNullOrEmpty(e.Name)).ToList();
         var take = Math.Min(eligible.Count, Math.Max(0, maxLines));
@@ -116,8 +140,9 @@ public static class UiaDumpFormatter
             var controlType = string.IsNullOrEmpty(element.ControlType) ? "<unknown>" : element.ControlType;
             var automationId = string.IsNullOrEmpty(element.AutomationId) ? "" : element.AutomationId;
             var className = string.IsNullOrEmpty(element.ClassName) ? "" : element.ClassName;
-            var safeName = UiaNameRedaction.RedactIfNeeded(element.ControlType, element.Name);
-            lines.Add($"{indent}{controlType} name='{safeName}' id='{automationId}' class='{className}'");
+            var safeName = redactName(element);
+            var patternsSuffix = string.IsNullOrEmpty(element.SupportedPatterns) ? "" : $" patterns='{element.SupportedPatterns}'";
+            lines.Add($"{indent}{controlType} name='{safeName}' id='{automationId}' class='{className}'{patternsSuffix}");
         }
 
         if (eligible.Count > take)

@@ -81,7 +81,7 @@ public sealed class ReportsCoordinator
             _runLog(runLogFolder, runLogFileName, text);
         }
 
-        if (!_driver.FindMainWindow())
+        if (!_driver.FindMainWindow(WriteLine, ct))
         {
             WriteLine("Could not find the main PioneerRx window - is Pioneer open?");
             for (var i = 0; i < items.Count; i++)
