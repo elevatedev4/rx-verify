@@ -411,8 +411,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             else
             {
                 log($"Report preview not detected within {previewTimeout.TotalSeconds:0}s - checking for a fallback preview window...");
-                var fallbackPreview = TryFindFallbackPreviewWindow(reportParametersWindow, knownHandlesBeforeParameterEntry, log);
-                if (fallbackPreview is not null)
+                var (fallbackOutcome, fallbackPreview) = TryFindFallbackPreviewWindow(reportParametersWindow, knownHandlesBeforeParameterEntry, log);
+
+                // BLOCKING review fix: an unexpected (non-preview) window is
+                // its own distinct failure - never fall through to "Timed
+                // out waiting for the report preview" (misleading) and
+                // never treat it as the preview (InvokeExportButton would
+                // run against a dialog, and the real preview - if it shows
+                // up later - would be left open to confuse the next report).
+                if (fallbackOutcome == FallbackPreviewOutcome.UnexpectedWindow)
+                {
+                    return ReportRunResult.Failed("Unexpected window after F12", stopwatch.Elapsed);
+                }
+
+                if (fallbackOutcome == FallbackPreviewOutcome.Preview && fallbackPreview is not null)
                 {
                     _previewWindowElement = fallbackPreview;
                     _previewWindowHandle = SafeNativeHandle(fallbackPreview);
@@ -1135,19 +1147,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// </summary>
     private AutomationElement? WaitForReportParametersWindow(Action<string> log, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + ReportParametersWindowLocateTimeout;
+        AutomationElement? match = null;
 
-        while (true)
+        // Non-blocking review fix: reuses WaitUntilSync (same poll/timeout
+        // idiom as EnsurePioneerForeground etc.) instead of a hand-rolled
+        // deadline loop - the condition delegate both checks cancellation
+        // (returning true to stop polling early, same as WaitUntilSync's
+        // own "stop as soon as the condition is met" contract) and stashes
+        // whatever FindReportParametersWindowElement found into the
+        // captured `match` local.
+        WaitUntilSync(() =>
         {
-            if (ct.IsCancellationRequested) return null;
+            if (ct.IsCancellationRequested) return true;
+            match = FindReportParametersWindowElement();
+            return match is not null;
+        }, ReportParametersWindowLocateTimeout, PollInterval);
 
-            var match = FindReportParametersWindowElement();
-            if (match is not null) return match;
-
-            if (DateTime.UtcNow >= deadline) return null;
-
-            Thread.Sleep(PollInterval);
-        }
+        return ct.IsCancellationRequested ? null : match;
     }
 
     private AutomationElement? FindReportParametersWindowElement()
@@ -1161,6 +1177,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
 
         return null;
+    }
+
+    /// <summary>What TryFindFallbackPreviewWindow found, for RunFinancialReport to react to — see that method's own doc for why "found a new window" and "found a new window that's actually a preview" have to be distinguished (W-T92 review fix, BLOCKING).</summary>
+    private enum FallbackPreviewOutcome
+    {
+        /// <summary>No new Pioneer-owned window since the parameters window was located (or it's still open) - caller falls through to the ordinary "Timed out waiting for the report preview" failure.</summary>
+        NotFound,
+
+        /// <summary>A new window appeared and it exposes the same preview affordances FindPreviewWindow itself requires (LooksLikePreviewWindow) - safe to treat as the preview.</summary>
+        Preview,
+
+        /// <summary>A new window appeared but does NOT look like a preview (no Print Immediately/Export to PDF affordance) - an unexpected dialog, already logged (class + title length only) and best-effort dismissed via TryCloseWindowSafely. Caller must fail this report with a distinct reason rather than risk treating a random dialog as the preview.</summary>
+        UnexpectedWindow
     }
 
     /// <summary>
@@ -1177,8 +1206,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// still open - a window that appeared for some OTHER reason (an
     /// error dialog, say) while the parameters popup is still up is not
     /// the preview.
+    ///
+    /// BLOCKING review fix: the original version accepted ANY new window
+    /// unconditionally and handed it straight to InvokeExportButton — an
+    /// error/confirmation dialog would get mislabelled "the preview" and
+    /// left open, breaking every report after it in the batch. Now every
+    /// new window is checked against LooksLikePreviewWindow (the SAME
+    /// affordance check FindPreviewWindow itself requires) before it's
+    /// accepted; if MULTIPLE new windows appeared, the one WITH preview
+    /// affordances wins. If none of them look like a preview, this logs
+    /// the first one (class + title length only - never title text),
+    /// best-effort dismisses it (TryCloseWindowSafely - WM_CLOSE first,
+    /// Alt+F4 only if it's confirmed foreground), and returns
+    /// UnexpectedWindow so RunFinancialReport can fail this one report
+    /// cleanly instead of corrupting the rest of the batch.
     /// </summary>
-    private AutomationElement? TryFindFallbackPreviewWindow(AutomationElement reportParametersWindow, HashSet<IntPtr> knownHandlesBeforeParameterEntry, Action<string> log)
+    private (FallbackPreviewOutcome Outcome, AutomationElement? Window) TryFindFallbackPreviewWindow(
+        AutomationElement reportParametersWindow, HashSet<IntPtr> knownHandlesBeforeParameterEntry, Action<string> log)
     {
         var parametersHandle = SafeNativeHandle(reportParametersWindow);
         var current = EnumeratePioneerOwnedTopLevelWindows();
@@ -1186,21 +1230,34 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         if (current.Any(w => w.Candidate.Handle == parametersHandle))
         {
             log("    fallback check: 'Report Parameters' window is still open - not treating any window as the preview.");
-            return null;
+            return (FallbackPreviewOutcome.NotFound, null);
         }
 
-        foreach (var (window, candidate) in current)
+        var newWindows = current
+            .Where(w => w.Candidate.Handle != IntPtr.Zero
+                        && w.Candidate.Handle != parametersHandle
+                        && !knownHandlesBeforeParameterEntry.Contains(w.Candidate.Handle))
+            .ToList();
+
+        if (newWindows.Count == 0)
         {
-            if (candidate.Handle == IntPtr.Zero) continue;
-            if (candidate.Handle == parametersHandle) continue;
-            if (knownHandlesBeforeParameterEntry.Contains(candidate.Handle)) continue;
-
-            log($"    fallback check: 'Report Parameters' window closed and a new Pioneer window appeared - treating it as the preview (path=fallback-new-window). class='{SafeClassName(window)}' title_len={candidate.Title.Length}");
-            return window;
+            log("    fallback check: 'Report Parameters' window closed but no new Pioneer window was found.");
+            return (FallbackPreviewOutcome.NotFound, null);
         }
 
-        log("    fallback check: 'Report Parameters' window closed but no new Pioneer window was found.");
-        return null;
+        foreach (var (window, candidate) in newWindows)
+        {
+            if (!LooksLikePreviewWindow(window)) continue;
+
+            log($"    fallback check: 'Report Parameters' window closed and a new Pioneer window with preview affordances appeared - treating it as the preview (path=fallback-new-window). class='{SafeClassName(window)}' title_len={candidate.Title.Length}");
+            return (FallbackPreviewOutcome.Preview, window);
+        }
+
+        var (unexpectedWindow, unexpectedCandidate) = newWindows[0];
+        log($"    fallback check: 'Report Parameters' window closed but the new Pioneer window has no preview affordances - treating it as unexpected, not the preview. class='{SafeClassName(unexpectedWindow)}' title_len={unexpectedCandidate.Title.Length}");
+        TryCloseWindowSafely(unexpectedCandidate.Handle, log, "the unexpected window");
+
+        return (FallbackPreviewOutcome.UnexpectedWindow, null);
     }
 
     // --- Strategy 2a: UIA deep search inside FinancialReportsWorkArea ---
@@ -2286,15 +2343,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             if (candidate.Handle != IntPtr.Zero && candidate.Handle == mainHandle) continue;
 
-            if (FindDescendantByName(window, "Print Immediately") is not null
-                || FindDescendantByName(window, "Export to PDF") is not null)
-            {
-                return window;
-            }
+            if (LooksLikePreviewWindow(window)) return window;
         }
 
         return null;
     }
+
+    /// <summary>
+    /// W-T92 review fix: the one place FindPreviewWindow and
+    /// TryFindFallbackPreviewWindow both decide whether a window is
+    /// actually the report preview - see PreviewWindowAffordances
+    /// (Reports/AutomationWindowSelection.cs) for why this exists and why
+    /// it's the SAME two toolbar-icon names for both callers.
+    /// </summary>
+    private bool LooksLikePreviewWindow(AutomationElement window) =>
+        PreviewWindowAffordances.HasAffordance(
+            FindDescendantByName(window, PreviewWindowAffordances.PrintImmediately) is not null,
+            FindDescendantByName(window, PreviewWindowAffordances.ExportToPdf) is not null);
 
     private bool IsResultsTabReady()
     {
@@ -2450,54 +2515,64 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     }
 
     /// <summary>
-    /// Review fix (safety blocker 2): closes the SPECIFIC preview window
-    /// captured by IsPreviewReady (_previewWindowHandle/_previewWindowElement)
-    /// - never blindly Alt+F4s "whatever is currently focused". Primary
-    /// path is a WM_CLOSE posted straight to that window's own HWND
+    /// Review fix (safety blocker 2), generalized (W-T92 date-entry review
+    /// fix - non-blocking item): the shared WM_CLOSE-primary/Alt+F4-fallback
+    /// close logic, originally inline in ClosePreview only. Never blindly
+    /// Alt+F4s "whatever is currently focused" - primary path is a
+    /// WM_CLOSE posted straight to <paramref name="handle"/>'s own HWND
     /// (targeted, works regardless of focus); Alt+F4 is only ever used as
     /// a last-resort fallback, and only when PreviewCloseDecision confirms
-    /// the OS foreground window IS that exact preview handle right now -
-    /// if focus has reverted to Pioneer's main window (or anywhere else)
-    /// after Save As closed, Alt+F4 is never sent.
+    /// the OS foreground window IS that exact handle right now. Now also
+    /// used by TryFindFallbackPreviewWindow to safely dismiss an unexpected
+    /// (non-preview) window that appeared after F12, without risking
+    /// Alt+F4 landing on whatever else is focused.
     /// </summary>
-    private void ClosePreview(Action<string> log)
+    private void TryCloseWindowSafely(IntPtr handle, Action<string> log, string windowLabel)
     {
-        var previewHandle = _previewWindowHandle;
-        var primaryCloseSucceeded = false;
+        if (handle == IntPtr.Zero) return;
 
-        if (previewHandle != IntPtr.Zero)
+        var primaryCloseSucceeded = false;
+        try
+        {
+            primaryCloseSucceeded = PostMessage(handle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch
+        {
+            primaryCloseSucceeded = false;
+        }
+
+        if (primaryCloseSucceeded) return;
+
+        var foreground = GetForegroundWindow();
+        if (PreviewCloseDecision.ShouldFallBackToAltF4(primaryCloseSucceeded, handle, foreground))
         {
             try
             {
-                primaryCloseSucceeded = PostMessage(previewHandle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.F4);
             }
             catch
             {
-                primaryCloseSucceeded = false;
+                // Best-effort only - see each caller's own doc for why a
+                // window left open here isn't itself a failed report.
             }
         }
-
-        if (!primaryCloseSucceeded)
+        else
         {
-            var foreground = GetForegroundWindow();
-            if (PreviewCloseDecision.ShouldFallBackToAltF4(primaryCloseSucceeded, previewHandle, foreground))
-            {
-                try
-                {
-                    Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.F4);
-                }
-                catch
-                {
-                    // Best-effort only - a preview left open is a nuisance,
-                    // not a failed report (the file was already verified
-                    // saved before this is called).
-                }
-            }
-            else
-            {
-                log("Could not confirm the report preview window to close it safely - leaving it open rather than risk closing the wrong window.");
-            }
+            log($"Could not confirm {windowLabel} to close it safely - leaving it open rather than risk closing the wrong window.");
         }
+    }
+
+    /// <summary>
+    /// Review fix (safety blocker 2): closes the SPECIFIC preview window
+    /// captured by IsPreviewReady (_previewWindowHandle/_previewWindowElement)
+    /// - never blindly Alt+F4s "whatever is currently focused". See
+    /// TryCloseWindowSafely for the shared close logic itself - if focus
+    /// has reverted to Pioneer's main window (or anywhere else) after Save
+    /// As closed, Alt+F4 is never sent.
+    /// </summary>
+    private void ClosePreview(Action<string> log)
+    {
+        TryCloseWindowSafely(_previewWindowHandle, log, "the report preview window");
 
         _previewWindowElement = null;
         _previewWindowHandle = IntPtr.Zero;
