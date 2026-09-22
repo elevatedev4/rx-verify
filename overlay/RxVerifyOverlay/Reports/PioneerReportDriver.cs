@@ -90,7 +90,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 1): "wait (&lt;=10 s) for a NEW Pioneer-owned top-level window whose title contains 'Report Parameters'" - the explicit locate step RunFinancialReport runs right after row selection, before any date keystroke goes out. Deliberately longer than ReportParametersConfirmationTimeout (that one is polled three times, once per row-selection strategy - this one only needs to run once, after row selection has already succeeded).</summary>
     private static readonly TimeSpan ReportParametersWindowLocateTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-keystroke pause ReplayReportParameterKeyPlan uses after every SelectAll/TypeText/Tab/F12 step.</summary>
+    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-keystroke pause ReplayReportParameterKeyPlan uses after every SelectAll/PasteText/Tab/F12 step.</summary>
     private static readonly TimeSpan KeyEntrySettleDelay = TimeSpan.FromMilliseconds(100);
 
     /// <summary>Round 3 (GOAL brief fix 2b): grid keyboard strategy's own inner wait after Enter, before falling back to a direct double-click.</summary>
@@ -195,6 +195,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     [DllImport("user32.dll")]
     private static extern IntPtr WindowFromPoint(POINT point);
+
+    /// <summary>Round 5 (W-T92 follow-up, belt-and-braces item): reads a key's toggle state (bit 0 of the return value) - used only to LOG whether NumLock is off before the first Report Parameters keystroke goes out, per the owner's numpad/scan-code theory. Never used to toggle NumLock - see ReplayReportParameterKeyPlan's doc for why.</summary>
+    [DllImport("user32.dll")]
+    private static extern short GetKeyState(int nVirtKey);
+
+    private const int VK_NUMLOCK = 0x90;
 
     /// <summary>Plain Win32 POINT (screen coordinates) for WindowFromPoint - review fix (blocker 2), see TryActivateRibbonElement/IsPointOwnedByPioneer.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -2095,12 +2101,31 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// re-verify foreground == THIS SPECIFIC window (EnsureWindowForeground,
     /// not just "owned by Pioneer's process") immediately before every key,
     /// aborting rather than risk a keystroke landing on the wrong window. A
-    /// small settle (KeyEntrySettleDelay) follows every key. Digits only —
-    /// never letters (ReportDateKeys.Format already guarantees that) —
-    /// Pioneer's mask rejects letters outright.
+    /// small settle (KeyEntrySettleDelay) follows every key.
+    ///
+    /// Round 5 fix (W-T92 follow-up — the owner's next round of testing:
+    /// "It seems that the down arrow is being pushed repeatedly, which
+    /// lowers the month on the first item. Instead, you should copy/paste
+    /// as I mentioned before and use tab to navigate."). Round 4's plain
+    /// Keyboard.Type of digit characters was apparently landing as
+    /// numpad/scan-code input in Pioneer's masked date field rather than
+    /// real top-row digits (numpad 2 == Down when NumLock is off) — so
+    /// PasteText steps set the Windows clipboard (ClipboardHelper.TrySetText
+    /// — retrying, STA-marshaled; see that class's doc) and send Ctrl+V
+    /// instead of typing the digits one at a time. Belt-and-braces: before
+    /// the very first key of the plan, this just LOGS whether NumLock is
+    /// off (GetKeyState(VK_NUMLOCK)) so the next screenshot round can
+    /// confirm the theory — never toggled, since silently flipping a
+    /// pharmacist's NumLock state would be its own surprise.
     /// </summary>
     private bool ReplayReportParameterKeyPlan(IReadOnlyList<ReportParameterKeyAction> plan, AutomationElement parametersWindow, Action<string> log)
     {
+        if (plan.Count > 0)
+        {
+            var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+            log($"  NumLock is {(numLockOn ? "ON" : "OFF")} before date entry.");
+        }
+
         for (var i = 0; i < plan.Count; i++)
         {
             var action = plan[i];
@@ -2127,9 +2152,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                         Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
                         break;
 
-                    case ReportParameterKeyActionKind.TypeText:
-                        Keyboard.Type(action.Text ?? string.Empty);
-                        log($"  typed date ({action.Text?.Length ?? 0} digits)");
+                    case ReportParameterKeyActionKind.PasteText:
+                        if (!ClipboardHelper.TrySetText(action.Text ?? string.Empty))
+                        {
+                            log("  could not set the clipboard for date paste - aborting.");
+                            return false;
+                        }
+                        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
+                        log($"  pasted date ({action.Text?.Length ?? 0} digits)");
                         break;
 
                     case ReportParameterKeyActionKind.Tab:

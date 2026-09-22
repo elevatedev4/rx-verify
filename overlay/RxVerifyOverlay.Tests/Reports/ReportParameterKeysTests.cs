@@ -51,11 +51,11 @@ public class ReportParameterKeysTests
         var expected = new[]
         {
             ReportParameterKeyAction.SelectAll(),
-            ReportParameterKeyAction.TypeText("08012026"),
+            ReportParameterKeyAction.PasteText("08012026"),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.SelectAll(),
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.PasteText("08312026"),
             ReportParameterKeyAction.F12(),
         };
 
@@ -75,10 +75,10 @@ public class ReportParameterKeysTests
         var expected = new[]
         {
             ReportParameterKeyAction.SelectAll(),
-            ReportParameterKeyAction.TypeText("08012026"),
+            ReportParameterKeyAction.PasteText("08012026"),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.SelectAll(),
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.PasteText("08312026"),
             ReportParameterKeyAction.F12(),
         };
 
@@ -97,7 +97,7 @@ public class ReportParameterKeysTests
         var expected = new[]
         {
             ReportParameterKeyAction.SelectAll(),
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.PasteText("08312026"),
             ReportParameterKeyAction.F12(),
         };
 
@@ -120,19 +120,54 @@ public class ReportParameterKeysTests
     }
 
     [Fact]
-    public void EveryTypeTextActionCarriesEightDigitsOnly()
+    public void EveryPasteTextActionCarriesEightDigitsOnly()
     {
         foreach (var entry in ReportCatalog.All.Where(e => e.ParameterKind != ReportParameterKind.PaymentsSearch))
         {
             var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 5), new DateTime(2026, 12, 31));
 
-            foreach (var action in plan.Where(a => a.Kind == ReportParameterKeyActionKind.TypeText))
+            foreach (var action in plan.Where(a => a.Kind == ReportParameterKeyActionKind.PasteText))
             {
                 Assert.NotNull(action.Text);
                 Assert.Equal(8, action.Text!.Length);
                 Assert.All(action.Text, ch => Assert.True(char.IsDigit(ch)));
             }
         }
+    }
+
+    // --- Round 5 (W-T92 follow-up): TypeText is gone, PasteText replaces it ---
+
+    [Fact]
+    public void PlanActionsOnlyEverUseTheCurrentActionKinds()
+    {
+        // Guards the plan itself, not just the enum: every action any
+        // catalog entry can ever produce must be one of the four kinds
+        // ReplayReportParameterKeyPlan actually knows how to send.
+        var allowedKinds = new[]
+        {
+            ReportParameterKeyActionKind.SelectAll,
+            ReportParameterKeyActionKind.PasteText,
+            ReportParameterKeyActionKind.Tab,
+            ReportParameterKeyActionKind.F12,
+        };
+
+        foreach (var entry in ReportCatalog.All)
+        {
+            var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 1), new DateTime(2026, 1, 31));
+
+            Assert.All(plan, action => Assert.Contains(action.Kind, allowedKinds));
+        }
+    }
+
+    [Fact]
+    public void ReportParameterKeyActionKindNoLongerDefinesTypeText()
+    {
+        // The down-arrow bug (Round 4's Keyboard.Type of digit characters
+        // landing as numpad/scan-code keys in Pioneer's masked date field)
+        // means typing digits into this popup must never come back -
+        // pin the enum itself so a future edit can't silently reintroduce
+        // a TypeText member/action.
+        Assert.DoesNotContain("TypeText", Enum.GetNames(typeof(ReportParameterKeyActionKind)));
     }
 
     [Fact]
