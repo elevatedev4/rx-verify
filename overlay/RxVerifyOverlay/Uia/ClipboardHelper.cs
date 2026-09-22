@@ -30,6 +30,9 @@ namespace RxVerifyOverlay.Uia;
 /// </summary>
 public static class ClipboardHelper
 {
+    /// <summary>Round 5 review fix (blocking issue): the dedicated STA thread's Join below is bounded by this - a wedged Clipboard.SetText (e.g. another process holding the clipboard open indefinitely) must not hang the whole report run forever. TrySetTextCore's own 3-attempt retry loop is at most ~100ms of Thread.Sleep plus however long the underlying COM calls take, so 3s is generous headroom, not a tight race.</summary>
+    private static readonly TimeSpan StaJoinTimeout = TimeSpan.FromSeconds(3);
+
     public static bool TrySetText(string text)
     {
         if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
@@ -44,7 +47,19 @@ public static class ClipboardHelper
         };
         staThread.SetApartmentState(ApartmentState.STA);
         staThread.Start();
-        staThread.Join();
+
+        // Round 5 review fix: an unbounded Join here meant a wedged
+        // Clipboard.SetText could hang the entire report run with no
+        // bail-out. A timed-out join is treated as a TrySetText failure -
+        // ReplayReportParameterKeyPlan's PasteText case already aborts
+        // cleanly (never sends F12) when this returns false. IsBackground
+        // above means an actually-stuck thread can't keep the process
+        // alive either way.
+        if (!staThread.Join(StaJoinTimeout))
+        {
+            return false;
+        }
+
         return result;
     }
 
