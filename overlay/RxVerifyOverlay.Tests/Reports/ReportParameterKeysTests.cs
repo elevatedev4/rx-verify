@@ -1,0 +1,176 @@
+using System;
+using System.Linq;
+using RxVerifyOverlay.Reports;
+using Xunit;
+
+namespace RxVerifyOverlay.Tests.Reports;
+
+/// <summary>Unit tests for Reports/ReportParameterKeys.cs — pure date formatting, keystroke-plan building, and per-report timeout math. No UIA/FlaUI/WPF involved (PioneerReportDriver.ReplayReportParameterKeyPlan is the untestable-on-this-Mac shim that actually sends these).</summary>
+public class ReportParameterKeysTests
+{
+    // --- ReportDateKeys.Format ---
+
+    [Fact]
+    public void FormatUsesMMddyyyyWithNoSlashes()
+    {
+        var date = new DateTime(2026, 9, 21);
+
+        Assert.Equal("09212026", ReportDateKeys.Format(date));
+    }
+
+    [Fact]
+    public void FormatPadsSingleDigitMonthAndDayWithLeadingZeros()
+    {
+        var date = new DateTime(2026, 1, 5);
+
+        Assert.Equal("01052026", ReportDateKeys.Format(date));
+    }
+
+    [Fact]
+    public void FormatUsesTheFullFourDigitYear()
+    {
+        var date = new DateTime(2028, 12, 31);
+
+        Assert.Equal("12312028", ReportDateKeys.Format(date));
+    }
+
+    // --- ReportParameterKeyPlan.Build ---
+
+    [Fact]
+    public void DateRangeEntryDefaultsToTwoTabsBetweenBeginAndEnd()
+    {
+        // ArAgedTrialBalanceKey ("Customer A/R Control Balance") matches
+        // the owner's own description of the popup and Will's "A/R
+        // Control Balance" macro - two tabs between Begin and End.
+        var entry = ReportCatalog.FindByKey(ReportCatalog.ArAgedTrialBalanceKey)!;
+        var begin = new DateTime(2026, 8, 1);
+        var end = new DateTime(2026, 8, 31);
+
+        var plan = ReportParameterKeyPlan.Build(entry, begin, end);
+
+        var expected = new[]
+        {
+            ReportParameterKeyAction.SelectAll(),
+            ReportParameterKeyAction.TypeText("08012026"),
+            ReportParameterKeyAction.Tab(),
+            ReportParameterKeyAction.Tab(),
+            ReportParameterKeyAction.SelectAll(),
+            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.F12(),
+        };
+
+        Assert.Equal(expected, plan);
+    }
+
+    [Fact]
+    public void DateRangeEntryWithSingleTabVariantSendsOnlyOneTab()
+    {
+        // SalesSummaryKey's macro ("Accrual system"): %start_date_text%<TAB>%date_text%<F12> - one tab.
+        var entry = ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)!;
+        var begin = new DateTime(2026, 8, 1);
+        var end = new DateTime(2026, 8, 31);
+
+        var plan = ReportParameterKeyPlan.Build(entry, begin, end);
+
+        var expected = new[]
+        {
+            ReportParameterKeyAction.SelectAll(),
+            ReportParameterKeyAction.TypeText("08012026"),
+            ReportParameterKeyAction.Tab(),
+            ReportParameterKeyAction.SelectAll(),
+            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.F12(),
+        };
+
+        Assert.Equal(expected, plan);
+    }
+
+    [Fact]
+    public void AsOfDateEntryTypesOnlyTheEndDateThenF12()
+    {
+        var entry = ReportCatalog.FindByKey(ReportCatalog.ThirdPartyAgedTrialBalanceKey)!;
+        var begin = new DateTime(2026, 8, 1);
+        var end = new DateTime(2026, 8, 31);
+
+        var plan = ReportParameterKeyPlan.Build(entry, begin, end);
+
+        var expected = new[]
+        {
+            ReportParameterKeyAction.SelectAll(),
+            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.F12(),
+        };
+
+        Assert.Equal(expected, plan);
+    }
+
+    [Fact]
+    public void PaymentsSearchEntryProducesAnEmptyPlan()
+    {
+        // Payments never reaches the "Report Parameters" popup - it's
+        // driven by RunPaymentsExport/SetPaymentsDateRange directly on
+        // _mainWindow instead (see ReportCatalog's ParameterKind doc).
+        var entry = ReportCatalog.FindByKey(ReportCatalog.PaymentsKey)!;
+        var begin = new DateTime(2026, 8, 1);
+        var end = new DateTime(2026, 8, 31);
+
+        var plan = ReportParameterKeyPlan.Build(entry, begin, end);
+
+        Assert.Empty(plan);
+    }
+
+    [Fact]
+    public void EveryTypeTextActionCarriesEightDigitsOnly()
+    {
+        foreach (var entry in ReportCatalog.All.Where(e => e.ParameterKind != ReportParameterKind.PaymentsSearch))
+        {
+            var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 5), new DateTime(2026, 12, 31));
+
+            foreach (var action in plan.Where(a => a.Kind == ReportParameterKeyActionKind.TypeText))
+            {
+                Assert.NotNull(action.Text);
+                Assert.Equal(8, action.Text!.Length);
+                Assert.All(action.Text, ch => Assert.True(char.IsDigit(ch)));
+            }
+        }
+    }
+
+    [Fact]
+    public void EveryNonEmptyPlanStartsWithSelectAllAndEndsWithF12()
+    {
+        foreach (var entry in ReportCatalog.All.Where(e => e.ParameterKind != ReportParameterKind.PaymentsSearch))
+        {
+            var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 1), new DateTime(2026, 1, 31));
+
+            Assert.NotEmpty(plan);
+            Assert.Equal(ReportParameterKeyActionKind.SelectAll, plan[0].Kind);
+            Assert.Equal(ReportParameterKeyActionKind.F12, plan[^1].Kind);
+        }
+    }
+
+    // --- ReportTimeoutPlan.CalculateTimeout ---
+
+    [Fact]
+    public void CalculateTimeoutIsFourTimesTheMacroRunTimeWhenAboveTheFloor()
+    {
+        // Third Party / Inventory Control Balance's own macro run time (20s) x4 = 80s.
+        Assert.Equal(TimeSpan.FromSeconds(80), ReportTimeoutPlan.CalculateTimeout(TimeSpan.FromSeconds(20)));
+        // Inventory valuation's own macro run time (15s) x4 = 60s.
+        Assert.Equal(TimeSpan.FromSeconds(60), ReportTimeoutPlan.CalculateTimeout(TimeSpan.FromSeconds(15)));
+    }
+
+    [Fact]
+    public void CalculateTimeoutFloorsAtThirtySecondsForAFastMacroRunTime()
+    {
+        // 6s x4 = 24s, below the 30s floor.
+        Assert.Equal(TimeSpan.FromSeconds(30), ReportTimeoutPlan.CalculateTimeout(TimeSpan.FromSeconds(6)));
+        // 2.5s x4 = 10s, below the 30s floor.
+        Assert.Equal(TimeSpan.FromSeconds(30), ReportTimeoutPlan.CalculateTimeout(TimeSpan.FromSeconds(2.5)));
+    }
+
+    [Fact]
+    public void CalculateTimeoutFloorsAtThirtySecondsWhenMacroRunTimeIsUnset()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(30), ReportTimeoutPlan.CalculateTimeout(TimeSpan.Zero));
+    }
+}
