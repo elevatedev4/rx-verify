@@ -179,6 +179,43 @@ public class AutomationWindowSelectionTests
         }
     }
 
+    /// <summary>
+    /// W-T92 review fix (BLOCKING): the pure half of "does this window
+    /// look like the report preview" - shared by FindPreviewWindow and
+    /// TryFindFallbackPreviewWindow (PioneerReportDriver.cs) so a new
+    /// window that appears after F12 is never mislabelled "the preview"
+    /// just because it's new and Pioneer-owned; it has to actually expose
+    /// one of the two toolbar affordances.
+    /// </summary>
+    public class PreviewWindowAffordancesTests
+    {
+        [Fact]
+        public void HasAffordanceWhenOnlyPrintImmediatelyIsPresent()
+        {
+            Assert.True(PreviewWindowAffordances.HasAffordance(hasPrintImmediately: true, hasExportToPdf: false));
+        }
+
+        [Fact]
+        public void HasAffordanceWhenOnlyExportToPdfIsPresent()
+        {
+            Assert.True(PreviewWindowAffordances.HasAffordance(hasPrintImmediately: false, hasExportToPdf: true));
+        }
+
+        [Fact]
+        public void HasAffordanceWhenBothArePresent()
+        {
+            Assert.True(PreviewWindowAffordances.HasAffordance(hasPrintImmediately: true, hasExportToPdf: true));
+        }
+
+        [Fact]
+        public void NoAffordanceWhenNeitherIsPresent()
+        {
+            // The exact bug the blocker describes: an unrelated dialog is a
+            // new Pioneer-owned window too, but it has neither toolbar icon.
+            Assert.False(PreviewWindowAffordances.HasAffordance(hasPrintImmediately: false, hasExportToPdf: false));
+        }
+    }
+
     /// <summary>Round 2: PioneerReportDriver.OpenRibbonScreen's post-strategy confirmation check.</summary>
     public class RibbonScreenConfirmationTests
     {

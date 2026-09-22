@@ -83,6 +83,33 @@ public static class PreviewCloseDecision
 }
 
 /// <summary>
+/// W-T92 review fix (BLOCKING): PioneerReportDriver.TryFindFallbackPreviewWindow
+/// used to accept ANY new Pioneer-owned top-level window that appeared
+/// after the "Report Parameters" window closed and hand it straight to
+/// InvokeExportButton — an unrelated error/confirmation dialog would get
+/// mislabelled "the preview" and left open, breaking every report after
+/// it in the batch. The report preview is its OWN top-level window
+/// identified by its toolbar icons (GOAL brief: Home/Print Immediately/
+/// Export to PDF/etc.) — the SAME two names FindPreviewWindow already
+/// required. Names/HasAffordance are shared by both FindPreviewWindow
+/// (the primary "poll for the real preview" path) and
+/// TryFindFallbackPreviewWindow (this fix's "did a new window that
+/// APPEARED after F12 actually look like a preview" check), so there is
+/// exactly one place that decides what counts as a preview window.
+/// HasAffordance itself is pure/unit-tested — the two FindDescendantByName
+/// lookups that produce its bool inputs are the one impure (real UIA)
+/// half, done by the caller.
+/// </summary>
+public static class PreviewWindowAffordances
+{
+    public const string PrintImmediately = "Print Immediately";
+    public const string ExportToPdf = "Export to PDF";
+
+    public static bool HasAffordance(bool hasPrintImmediately, bool hasExportToPdf) =>
+        hasPrintImmediately || hasExportToPdf;
+}
+
+/// <summary>
 /// Round 2 fix (Will's first real run: "UIA navigation to 'Analysis' &gt;
 /// 'Financial Reports' failed"). Pure decision behind
 /// PioneerReportDriver.OpenRibbonScreen's post-strategy confirmation

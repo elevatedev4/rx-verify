@@ -87,6 +87,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 3 (GOAL brief fix 2): "success = a new top-level window ... whose title contains 'Report Parameters' ... within 5 s" - the outer confirmation every row-selection strategy is checked against.</summary>
     private static readonly TimeSpan ReportParametersConfirmationTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 1): "wait (&lt;=10 s) for a NEW Pioneer-owned top-level window whose title contains 'Report Parameters'" - the explicit locate step RunFinancialReport runs right after row selection, before any date keystroke goes out. Deliberately longer than ReportParametersConfirmationTimeout (that one is polled three times, once per row-selection strategy - this one only needs to run once, after row selection has already succeeded).</summary>
+    private static readonly TimeSpan ReportParametersWindowLocateTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-keystroke pause ReplayReportParameterKeyPlan uses after every SelectAll/TypeText/Tab/F12 step.</summary>
+    private static readonly TimeSpan KeyEntrySettleDelay = TimeSpan.FromMilliseconds(100);
+
     /// <summary>Round 3 (GOAL brief fix 2b): grid keyboard strategy's own inner wait after Enter, before falling back to a direct double-click.</summary>
     private static readonly TimeSpan GridKeyboardEnterConfirmationTimeout = TimeSpan.FromSeconds(2);
 
@@ -368,22 +374,68 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 return ReportRunResult.Failed($"Report row '{item.Entry.PioneerRowText}' not found", stopwatch.Elapsed);
             }
 
-            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
-
-            log("Setting report parameters...");
-            if (!SetReportParameters(item, log)) return ReportRunResult.Failed("Could not set report date parameters", stopwatch.Elapsed);
-
-            if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
-
-            log("Running report (View - F12)...");
-            if (!InvokeViewOrF12(log))
+            log("Locating the 'Report Parameters' window...");
+            var reportParametersWindow = WaitForReportParametersWindow(log, ct);
+            if (reportParametersWindow is null)
             {
-                WriteUiaDiagnosticDump("View / F12", log);
-                return ReportRunResult.Failed("Could not start the report (View - F12)", stopwatch.Elapsed);
+                log("'Report Parameters' window did not appear within the timeout.");
+                WriteUiaDiagnosticDump("Report Parameters window", log);
+                return ReportRunResult.Failed("'Report Parameters' window did not appear", stopwatch.Elapsed);
             }
 
+            log($"'Report Parameters' window found. class='{SafeClassName(reportParametersWindow)}' title_len={SafeName(reportParametersWindow).Length}");
+
+            if (!EnsureWindowForeground(reportParametersWindow, log, "Report Parameters window"))
+                return ReportRunResult.Failed("'Report Parameters' window lost focus", stopwatch.Elapsed);
+
+            // Round 4 (GOAL brief step 4's fallback path): snapshot every
+            // Pioneer-owned top-level window BEFORE any date keystroke goes
+            // out, so a later "did a new window appear" check has a clean
+            // baseline that doesn't already include this Report Parameters
+            // window itself.
+            var knownHandlesBeforeParameterEntry = new HashSet<IntPtr>(
+                EnumeratePioneerOwnedTopLevelWindows().Select(w => w.Candidate.Handle));
+
+            log("Entering report date parameters...");
+            if (!SetReportParameters(item, reportParametersWindow, log)) return ReportRunResult.Failed("Could not enter report date parameters", stopwatch.Elapsed);
+
             log("Waiting for the report to generate...");
-            var previewReady = await WaitUntilAsync(() => IsPreviewReady(), DefaultReportTimeout, ct).ConfigureAwait(false);
+            var previewTimeout = ReportTimeoutPlan.CalculateTimeout(item.Entry.MacroRunTime);
+            var waitStopwatch = Stopwatch.StartNew();
+            var previewReady = await WaitUntilAsync(() => IsPreviewReady(), previewTimeout, ct).ConfigureAwait(false);
+
+            if (previewReady)
+            {
+                log($"Report preview detected (path=primary, elapsed={waitStopwatch.Elapsed.TotalSeconds:0.0}s).");
+            }
+            else
+            {
+                log($"Report preview not detected within {previewTimeout.TotalSeconds:0}s - checking for a fallback preview window...");
+                var (fallbackOutcome, fallbackPreview) = TryFindFallbackPreviewWindow(reportParametersWindow, knownHandlesBeforeParameterEntry, log);
+
+                // BLOCKING review fix: an unexpected (non-preview) window is
+                // its own distinct failure - never fall through to "Timed
+                // out waiting for the report preview" (misleading) and
+                // never treat it as the preview (InvokeExportButton would
+                // run against a dialog, and the real preview - if it shows
+                // up later - would be left open to confuse the next report).
+                if (fallbackOutcome == FallbackPreviewOutcome.UnexpectedWindow)
+                {
+                    return ReportRunResult.Failed("Unexpected window after F12", stopwatch.Elapsed);
+                }
+
+                if (fallbackOutcome == FallbackPreviewOutcome.Preview && fallbackPreview is not null)
+                {
+                    _previewWindowElement = fallbackPreview;
+                    _previewWindowHandle = SafeNativeHandle(fallbackPreview);
+                    previewReady = _previewWindowHandle != IntPtr.Zero;
+                    if (previewReady)
+                    {
+                        log($"Report preview detected (path=fallback, elapsed={waitStopwatch.Elapsed.TotalSeconds:0.0}s).");
+                    }
+                }
+            }
+
             if (!previewReady) return ReportRunResult.Failed("Timed out waiting for the report preview", stopwatch.Elapsed);
 
             if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
@@ -524,6 +576,38 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         if (WaitUntilSync(IsForegroundOwnedByPioneer, ForegroundSettleTimeout, PollInterval)) return true;
 
         log("Pioneer lost focus - recovery attempt failed, aborting this report.");
+        return false;
+    }
+
+    /// <summary>
+    /// Round 4 (W-T92 follow-up, GOAL brief step 1: "Bring it to the
+    /// foreground and verify foreground == that window before any key
+    /// goes out"). Unlike EnsurePioneerForeground (which only checks the
+    /// OS foreground window's PROCESS id - true for ANY Pioneer-owned
+    /// window, main window included), this checks the SPECIFIC window
+    /// handle - used for the "Report Parameters" popup, a separate
+    /// top-level window from _mainWindow that every date/F12 keystroke
+    /// must land on exactly, never on whatever else happens to belong to
+    /// Pioneer's process. Same one-retry shape as EnsurePioneerForeground:
+    /// bring it forward once, poll up to ForegroundSettleTimeout, else
+    /// fail rather than guess.
+    /// </summary>
+    private bool EnsureWindowForeground(AutomationElement window, Action<string> log, string windowLabel)
+    {
+        var handle = SafeNativeHandle(window);
+        if (handle == IntPtr.Zero)
+        {
+            log($"{windowLabel}: no usable window handle.");
+            return false;
+        }
+
+        if (GetForegroundWindow() == handle) return true;
+
+        BringToForeground(window);
+
+        if (WaitUntilSync(() => GetForegroundWindow() == handle, ForegroundSettleTimeout, PollInterval)) return true;
+
+        log($"{windowLabel} lost focus - aborting.");
         return false;
     }
 
@@ -1045,6 +1129,135 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Round 4 (W-T92 follow-up, GOAL brief step 1: "after the row
+    /// double-click, wait (&lt;=10 s) for a NEW Pioneer-owned top-level
+    /// window whose title contains 'Report Parameters'"). Row selection
+    /// (TrySelectAndOpenReportRow) already confirms via
+    /// WaitForReportParametersWindowSync that this window exists before
+    /// it returns true, so this almost always resolves on the very first
+    /// poll here - this second wait exists so RunFinancialReport gets
+    /// back an actual AutomationElement (needed to bring it to the
+    /// foreground and target keystrokes at it specifically), not just a
+    /// bool, and so a window that closed again in the brief gap between
+    /// row selection returning and this call is re-confirmed rather than
+    /// assumed still open.
+    /// </summary>
+    private AutomationElement? WaitForReportParametersWindow(Action<string> log, CancellationToken ct)
+    {
+        AutomationElement? match = null;
+
+        // Non-blocking review fix: reuses WaitUntilSync (same poll/timeout
+        // idiom as EnsurePioneerForeground etc.) instead of a hand-rolled
+        // deadline loop - the condition delegate both checks cancellation
+        // (returning true to stop polling early, same as WaitUntilSync's
+        // own "stop as soon as the condition is met" contract) and stashes
+        // whatever FindReportParametersWindowElement found into the
+        // captured `match` local.
+        WaitUntilSync(() =>
+        {
+            if (ct.IsCancellationRequested) return true;
+            match = FindReportParametersWindowElement();
+            return match is not null;
+        }, ReportParametersWindowLocateTimeout, PollInterval);
+
+        return ct.IsCancellationRequested ? null : match;
+    }
+
+    private AutomationElement? FindReportParametersWindowElement()
+    {
+        foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+        {
+            if (!string.IsNullOrEmpty(candidate.Title) && candidate.Title.Contains("Report Parameters", StringComparison.OrdinalIgnoreCase))
+            {
+                return window;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>What TryFindFallbackPreviewWindow found, for RunFinancialReport to react to — see that method's own doc for why "found a new window" and "found a new window that's actually a preview" have to be distinguished (W-T92 review fix, BLOCKING).</summary>
+    private enum FallbackPreviewOutcome
+    {
+        /// <summary>No new Pioneer-owned window since the parameters window was located (or it's still open) - caller falls through to the ordinary "Timed out waiting for the report preview" failure.</summary>
+        NotFound,
+
+        /// <summary>A new window appeared and it exposes the same preview affordances FindPreviewWindow itself requires (LooksLikePreviewWindow) - safe to treat as the preview.</summary>
+        Preview,
+
+        /// <summary>A new window appeared but does NOT look like a preview (no Print Immediately/Export to PDF affordance) - an unexpected dialog, already logged (class + title length only) and best-effort dismissed via TryCloseWindowSafely. Caller must fail this report with a distinct reason rather than risk treating a random dialog as the preview.</summary>
+        UnexpectedWindow
+    }
+
+    /// <summary>
+    /// Round 4 (W-T92 follow-up, GOAL brief step 4: "If IsPreviewReady
+    /// never trips but the Report Parameters window has closed and a new
+    /// Pioneer-owned window appeared, treat that new window as the
+    /// preview"). Same "new since a known-handles snapshot" idiom as
+    /// TryFindUnexpectedNewPioneerWindow (row selection's own hard-stop
+    /// check) - <paramref name="knownHandlesBeforeParameterEntry"/> is
+    /// captured right after the Report Parameters window was located and
+    /// foregrounded, before any date keystroke went out, so anything not
+    /// in that set (and not the parameters window's own now-closed
+    /// handle) counts as new. Never fires while the parameters window is
+    /// still open - a window that appeared for some OTHER reason (an
+    /// error dialog, say) while the parameters popup is still up is not
+    /// the preview.
+    ///
+    /// BLOCKING review fix: the original version accepted ANY new window
+    /// unconditionally and handed it straight to InvokeExportButton — an
+    /// error/confirmation dialog would get mislabelled "the preview" and
+    /// left open, breaking every report after it in the batch. Now every
+    /// new window is checked against LooksLikePreviewWindow (the SAME
+    /// affordance check FindPreviewWindow itself requires) before it's
+    /// accepted; if MULTIPLE new windows appeared, the one WITH preview
+    /// affordances wins. If none of them look like a preview, this logs
+    /// the first one (class + title length only - never title text),
+    /// best-effort dismisses it (TryCloseWindowSafely - WM_CLOSE first,
+    /// Alt+F4 only if it's confirmed foreground), and returns
+    /// UnexpectedWindow so RunFinancialReport can fail this one report
+    /// cleanly instead of corrupting the rest of the batch.
+    /// </summary>
+    private (FallbackPreviewOutcome Outcome, AutomationElement? Window) TryFindFallbackPreviewWindow(
+        AutomationElement reportParametersWindow, HashSet<IntPtr> knownHandlesBeforeParameterEntry, Action<string> log)
+    {
+        var parametersHandle = SafeNativeHandle(reportParametersWindow);
+        var current = EnumeratePioneerOwnedTopLevelWindows();
+
+        if (current.Any(w => w.Candidate.Handle == parametersHandle))
+        {
+            log("    fallback check: 'Report Parameters' window is still open - not treating any window as the preview.");
+            return (FallbackPreviewOutcome.NotFound, null);
+        }
+
+        var newWindows = current
+            .Where(w => w.Candidate.Handle != IntPtr.Zero
+                        && w.Candidate.Handle != parametersHandle
+                        && !knownHandlesBeforeParameterEntry.Contains(w.Candidate.Handle))
+            .ToList();
+
+        if (newWindows.Count == 0)
+        {
+            log("    fallback check: 'Report Parameters' window closed but no new Pioneer window was found.");
+            return (FallbackPreviewOutcome.NotFound, null);
+        }
+
+        foreach (var (window, candidate) in newWindows)
+        {
+            if (!LooksLikePreviewWindow(window)) continue;
+
+            log($"    fallback check: 'Report Parameters' window closed and a new Pioneer window with preview affordances appeared - treating it as the preview (path=fallback-new-window). class='{SafeClassName(window)}' title_len={candidate.Title.Length}");
+            return (FallbackPreviewOutcome.Preview, window);
+        }
+
+        var (unexpectedWindow, unexpectedCandidate) = newWindows[0];
+        log($"    fallback check: 'Report Parameters' window closed but the new Pioneer window has no preview affordances - treating it as unexpected, not the preview. class='{SafeClassName(unexpectedWindow)}' title_len={unexpectedCandidate.Title.Length}");
+        TryCloseWindowSafely(unexpectedCandidate.Handle, log, "the unexpected window");
+
+        return (FallbackPreviewOutcome.UnexpectedWindow, null);
     }
 
     // --- Strategy 2a: UIA deep search inside FinancialReportsWorkArea ---
@@ -1783,23 +1996,6 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         catch { return string.Empty; }
     }
 
-    private bool InvokeViewOrF12(Action<string> log)
-    {
-        var viewButton = FindDescendantByName(_mainWindow!, "View");
-        if (viewButton is not null && SelectOrInvoke(viewButton)) return true;
-
-        log("View button not found by name - falling back to F12 key.");
-        try
-        {
-            Keyboard.Type(VirtualKeyShort.F12);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private bool InvokeSearchOrF12(Action<string> log)
     {
         var searchButton = FindDescendantByName(_mainWindow!, "Search");
@@ -1862,41 +2058,100 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     // DATE PARAMETERS
     // ------------------------------------------------------------------
 
-    private bool SetReportParameters(ReportRunItem item, Action<string> log)
+    /// <summary>
+    /// Round 4 rewrite (W-T92 follow-up — owner's real "Report Parameters"
+    /// popup test, verbatim: "the app was just cycling through dates in a
+    /// weird way. It needs to select all on each date field and paste the
+    /// proper date into it in the format MMDDYYYY, then F12 to run the
+    /// report"). The old version searched _mainWindow for Edit controls
+    /// and called ValuePattern.SetValue on Pioneer's masked date pickers —
+    /// that is exactly what was "cycling through dates". This is now
+    /// purely keyboard, macro-style, replayed against the SPECIFIC
+    /// "Report Parameters" window <paramref name="parametersWindow"/> —
+    /// see ReplayReportParameterKeyPlan and the pure
+    /// Reports/ReportParameterKeys.cs plan builder it replays.
+    /// </summary>
+    private bool SetReportParameters(ReportRunItem item, AutomationElement parametersWindow, Action<string> log)
     {
-        return item.Entry.ParameterKind switch
+        if (item.Entry.ParameterKind == ReportParameterKind.PaymentsSearch)
         {
-            ReportParameterKind.DateRange => SetDateRangeFields(item.Begin, item.End, log),
-            ReportParameterKind.AsOfDate => SetSingleDateField(item.End, log),
             // Payments never reaches here - RunFinancialReport is never
             // called for a PaymentsSearch entry (ReportsCoordinator routes
             // it to RunPaymentsExport instead).
-            _ => false
-        };
-    }
-
-    private bool SetDateRangeFields(DateTime begin, DateTime end, Action<string> log)
-    {
-        var editFields = _mainWindow!.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
-        if (editFields.Length < 2)
-        {
-            log("Could not find two date fields for the Begin/End range.");
             return false;
         }
 
-        return SetDateValue(editFields[0], begin) && SetDateValue(editFields[1], end);
+        var plan = ReportParameterKeyPlan.Build(item.Entry, item.Begin, item.End);
+        return ReplayReportParameterKeyPlan(plan, parametersWindow, log);
     }
 
-    private bool SetSingleDateField(DateTime asOf, Action<string> log)
+    /// <summary>
+    /// Sends one ReportParameterKeyPlan (Reports/ReportParameterKeys.cs)
+    /// keystroke-for-keystroke against <paramref name="parametersWindow"/>
+    /// — never a UIA field lookup, matching the owner's own description of
+    /// how this popup actually behaves (masked fields; the begin field is
+    /// already focused/highlighted the moment the popup opens). Same
+    /// per-key foreground-check convention as TryKeyboardKeyTipsNavigate:
+    /// re-verify foreground == THIS SPECIFIC window (EnsureWindowForeground,
+    /// not just "owned by Pioneer's process") immediately before every key,
+    /// aborting rather than risk a keystroke landing on the wrong window. A
+    /// small settle (KeyEntrySettleDelay) follows every key. Digits only —
+    /// never letters (ReportDateKeys.Format already guarantees that) —
+    /// Pioneer's mask rejects letters outright.
+    /// </summary>
+    private bool ReplayReportParameterKeyPlan(IReadOnlyList<ReportParameterKeyAction> plan, AutomationElement parametersWindow, Action<string> log)
     {
-        var editFields = _mainWindow!.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
-        if (editFields.Length < 1)
+        for (var i = 0; i < plan.Count; i++)
         {
-            log("Could not find the As Of date field.");
-            return false;
+            var action = plan[i];
+
+            if (!EnsureWindowForeground(parametersWindow, log, "Report Parameters window"))
+            {
+                log("  aborting date entry - 'Report Parameters' window lost focus.");
+                return false;
+            }
+
+            if (action.Kind == ReportParameterKeyActionKind.Tab
+                && (i == 0 || plan[i - 1].Kind != ReportParameterKeyActionKind.Tab))
+            {
+                var tabCount = 1;
+                while (i + tabCount < plan.Count && plan[i + tabCount].Kind == ReportParameterKeyActionKind.Tab) tabCount++;
+                log($"  Tab x{tabCount}");
+            }
+
+            try
+            {
+                switch (action.Kind)
+                {
+                    case ReportParameterKeyActionKind.SelectAll:
+                        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
+                        break;
+
+                    case ReportParameterKeyActionKind.TypeText:
+                        Keyboard.Type(action.Text ?? string.Empty);
+                        log($"  typed date ({action.Text?.Length ?? 0} digits)");
+                        break;
+
+                    case ReportParameterKeyActionKind.Tab:
+                        Keyboard.Type(VirtualKeyShort.TAB);
+                        break;
+
+                    case ReportParameterKeyActionKind.F12:
+                        Keyboard.Type(VirtualKeyShort.F12);
+                        log("  F12 sent");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                log($"  key action '{action.Kind}' failed: {ex.Message}");
+                return false;
+            }
+
+            Thread.Sleep(KeyEntrySettleDelay);
         }
 
-        return SetDateValue(editFields[0], asOf);
+        return true;
     }
 
     private bool SetPaymentsDateRange(ReportRunItem item, Action<string> log)
@@ -1911,7 +2166,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return SetDateValue(editFields[0], item.Begin) && SetDateValue(editFields[1], item.End);
     }
 
-    /// <summary>ValuePattern.SetValue first; keyboard fallback (click, Ctrl+A, type mm/dd/yyyy) per the GOAL brief.</summary>
+    /// <summary>ValuePattern.SetValue first; keyboard fallback (click, Ctrl+A, type mm/dd/yyyy) per the GOAL brief. Still used by SetPaymentsDateRange only — RunFinancialReport's own date entry goes through ReplayReportParameterKeyPlan instead (Round 4, W-T92 follow-up — see that method's doc for why a UIA field lookup + ValuePattern was the actual bug on the Report Parameters popup).</summary>
     private static bool SetDateValue(AutomationElement field, DateTime value)
     {
         var text = value.ToString("MM/dd/yyyy");
@@ -2088,15 +2343,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             if (candidate.Handle != IntPtr.Zero && candidate.Handle == mainHandle) continue;
 
-            if (FindDescendantByName(window, "Print Immediately") is not null
-                || FindDescendantByName(window, "Export to PDF") is not null)
-            {
-                return window;
-            }
+            if (LooksLikePreviewWindow(window)) return window;
         }
 
         return null;
     }
+
+    /// <summary>
+    /// W-T92 review fix: the one place FindPreviewWindow and
+    /// TryFindFallbackPreviewWindow both decide whether a window is
+    /// actually the report preview - see PreviewWindowAffordances
+    /// (Reports/AutomationWindowSelection.cs) for why this exists and why
+    /// it's the SAME two toolbar-icon names for both callers.
+    /// </summary>
+    private bool LooksLikePreviewWindow(AutomationElement window) =>
+        PreviewWindowAffordances.HasAffordance(
+            FindDescendantByName(window, PreviewWindowAffordances.PrintImmediately) is not null,
+            FindDescendantByName(window, PreviewWindowAffordances.ExportToPdf) is not null);
 
     private bool IsResultsTabReady()
     {
@@ -2252,54 +2515,64 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     }
 
     /// <summary>
-    /// Review fix (safety blocker 2): closes the SPECIFIC preview window
-    /// captured by IsPreviewReady (_previewWindowHandle/_previewWindowElement)
-    /// - never blindly Alt+F4s "whatever is currently focused". Primary
-    /// path is a WM_CLOSE posted straight to that window's own HWND
+    /// Review fix (safety blocker 2), generalized (W-T92 date-entry review
+    /// fix - non-blocking item): the shared WM_CLOSE-primary/Alt+F4-fallback
+    /// close logic, originally inline in ClosePreview only. Never blindly
+    /// Alt+F4s "whatever is currently focused" - primary path is a
+    /// WM_CLOSE posted straight to <paramref name="handle"/>'s own HWND
     /// (targeted, works regardless of focus); Alt+F4 is only ever used as
     /// a last-resort fallback, and only when PreviewCloseDecision confirms
-    /// the OS foreground window IS that exact preview handle right now -
-    /// if focus has reverted to Pioneer's main window (or anywhere else)
-    /// after Save As closed, Alt+F4 is never sent.
+    /// the OS foreground window IS that exact handle right now. Now also
+    /// used by TryFindFallbackPreviewWindow to safely dismiss an unexpected
+    /// (non-preview) window that appeared after F12, without risking
+    /// Alt+F4 landing on whatever else is focused.
     /// </summary>
-    private void ClosePreview(Action<string> log)
+    private void TryCloseWindowSafely(IntPtr handle, Action<string> log, string windowLabel)
     {
-        var previewHandle = _previewWindowHandle;
-        var primaryCloseSucceeded = false;
+        if (handle == IntPtr.Zero) return;
 
-        if (previewHandle != IntPtr.Zero)
+        var primaryCloseSucceeded = false;
+        try
+        {
+            primaryCloseSucceeded = PostMessage(handle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch
+        {
+            primaryCloseSucceeded = false;
+        }
+
+        if (primaryCloseSucceeded) return;
+
+        var foreground = GetForegroundWindow();
+        if (PreviewCloseDecision.ShouldFallBackToAltF4(primaryCloseSucceeded, handle, foreground))
         {
             try
             {
-                primaryCloseSucceeded = PostMessage(previewHandle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.F4);
             }
             catch
             {
-                primaryCloseSucceeded = false;
+                // Best-effort only - see each caller's own doc for why a
+                // window left open here isn't itself a failed report.
             }
         }
-
-        if (!primaryCloseSucceeded)
+        else
         {
-            var foreground = GetForegroundWindow();
-            if (PreviewCloseDecision.ShouldFallBackToAltF4(primaryCloseSucceeded, previewHandle, foreground))
-            {
-                try
-                {
-                    Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.F4);
-                }
-                catch
-                {
-                    // Best-effort only - a preview left open is a nuisance,
-                    // not a failed report (the file was already verified
-                    // saved before this is called).
-                }
-            }
-            else
-            {
-                log("Could not confirm the report preview window to close it safely - leaving it open rather than risk closing the wrong window.");
-            }
+            log($"Could not confirm {windowLabel} to close it safely - leaving it open rather than risk closing the wrong window.");
         }
+    }
+
+    /// <summary>
+    /// Review fix (safety blocker 2): closes the SPECIFIC preview window
+    /// captured by IsPreviewReady (_previewWindowHandle/_previewWindowElement)
+    /// - never blindly Alt+F4s "whatever is currently focused". See
+    /// TryCloseWindowSafely for the shared close logic itself - if focus
+    /// has reverted to Pioneer's main window (or anywhere else) after Save
+    /// As closed, Alt+F4 is never sent.
+    /// </summary>
+    private void ClosePreview(Action<string> log)
+    {
+        TryCloseWindowSafely(_previewWindowHandle, log, "the report preview window");
 
         _previewWindowElement = null;
         _previewWindowHandle = IntPtr.Zero;
