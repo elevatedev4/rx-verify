@@ -17,21 +17,36 @@ public static class ReportDateKeys
     public static string Format(DateTime date) => date.ToString("MMddyyyy");
 }
 
-/// <summary>Which literal keystroke group one step of a ReportParameterKeyPlan sends — see PioneerReportDriver.ReplayReportParameterKeyPlan, the only thing that actually sends these.</summary>
+/// <summary>
+/// Which literal keystroke group one step of a ReportParameterKeyPlan
+/// sends — see PioneerReportDriver.ReplayReportParameterKeyPlan, the only
+/// thing that actually sends these.
+///
+/// Round 5 fix (W-T92 follow-up — the owner's next round of testing after
+/// Round 4 shipped: "It seems that the down arrow is being pushed
+/// repeatedly, which lowers the month on the first item. Instead, you
+/// should copy/paste as I mentioned before and use tab to navigate.").
+/// FlaUI's Keyboard.Type of plain digit characters was apparently landing
+/// as numpad/scan-code input in Pioneer's masked date field rather than
+/// real top-row digits (numpad 2 == Down when NumLock is off), so typing
+/// is out entirely for the date text — TypeText is replaced by PasteText,
+/// which PioneerReportDriver now fulfills by setting the clipboard and
+/// sending Ctrl+V instead of sending individual character keystrokes.
+/// </summary>
 public enum ReportParameterKeyActionKind
 {
     SelectAll,
-    TypeText,
+    PasteText,
     Tab,
     F12
 }
 
-/// <summary>One step of a ReportParameterKeyPlan. Text is set only for TypeText — every other kind carries no data (Value.Text is null for those).</summary>
+/// <summary>One step of a ReportParameterKeyPlan. Text is set only for PasteText — every other kind carries no data (Value.Text is null for those).</summary>
 public readonly record struct ReportParameterKeyAction(ReportParameterKeyActionKind Kind, string? Text = null)
 {
     public static ReportParameterKeyAction SelectAll() => new(ReportParameterKeyActionKind.SelectAll);
 
-    public static ReportParameterKeyAction TypeText(string text) => new(ReportParameterKeyActionKind.TypeText, text);
+    public static ReportParameterKeyAction PasteText(string text) => new(ReportParameterKeyActionKind.PasteText, text);
 
     public static ReportParameterKeyAction Tab() => new(ReportParameterKeyActionKind.Tab);
 
@@ -67,19 +82,19 @@ public static class ReportParameterKeyPlan
         {
             case ReportParameterKind.AsOfDate:
                 actions.Add(ReportParameterKeyAction.SelectAll());
-                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(end)));
+                actions.Add(ReportParameterKeyAction.PasteText(ReportDateKeys.Format(end)));
                 actions.Add(ReportParameterKeyAction.F12());
                 break;
 
             case ReportParameterKind.DateRange:
                 actions.Add(ReportParameterKeyAction.SelectAll());
-                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(begin)));
+                actions.Add(ReportParameterKeyAction.PasteText(ReportDateKeys.Format(begin)));
                 for (var i = 0; i < entry.TabsBetweenDates; i++)
                 {
                     actions.Add(ReportParameterKeyAction.Tab());
                 }
                 actions.Add(ReportParameterKeyAction.SelectAll());
-                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(end)));
+                actions.Add(ReportParameterKeyAction.PasteText(ReportDateKeys.Format(end)));
                 actions.Add(ReportParameterKeyAction.F12());
                 break;
 

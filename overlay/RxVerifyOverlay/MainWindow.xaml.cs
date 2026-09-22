@@ -816,7 +816,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             return;
         }
 
-        if (!TrySetClipboardText(blob))
+        if (!ClipboardHelper.TrySetText(blob))
         {
             MessageBox.Show(this,
                 "Couldn't copy to the clipboard (it may be locked by another app — try again in a moment).",
@@ -825,35 +825,6 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         }
 
         await ButtonFeedback.FlashSuccessAsync(button);
-    }
-
-    /// <summary>
-    /// Clipboard.SetText occasionally throws COMException/"clipboard could
-    /// not be opened" when another process (clipboard manager, etc.) is
-    /// briefly holding it — a well-known WPF clipboard gotcha, not
-    /// specific to this app. A few short retries clears the vast majority
-    /// of those transient failures without the pharmacist ever noticing.
-    /// </summary>
-    private static bool TrySetClipboardText(string text)
-    {
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            try
-            {
-                Clipboard.SetText(text);
-                return true;
-            }
-            catch (Exception) when (attempt < 2)
-            {
-                System.Threading.Thread.Sleep(50);
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-        }
-
-        return false;
     }
 
     /// <summary>
