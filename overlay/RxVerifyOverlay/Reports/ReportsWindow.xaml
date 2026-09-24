@@ -82,6 +82,15 @@
 
         <!-- Run / Stop -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,10">
+            <!--
+                "Test date entry" (W-T92 round 3, GOAL brief step 3): runs
+                ONLY the date-entry steps (no F12) against a Report
+                Parameters window Will already has open in Pioneer, so he
+                can verify the paste/Tab/read-back behavior in ~5 seconds
+                without running/saving a report - see ReportsWindow.xaml.cs
+                OnTestDateEntryClick and PioneerReportDriver.TestDateEntry.
+            -->
+            <Button x:Name="TestDateEntryButton" Content="Test date entry" Padding="14,5" Margin="0,0,8,0" Click="OnTestDateEntryClick" />
             <Button x:Name="RunButton" Content="Run selected" Padding="14,5" Margin="0,0,8,0" Click="OnRunClick" IsDefault="True" />
             <Button x:Name="StopButton" Content="Stop" Padding="14,5" Click="OnStopClick" IsEnabled="False" />
         </StackPanel>

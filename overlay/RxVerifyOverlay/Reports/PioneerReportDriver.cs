@@ -202,6 +202,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     private const int VK_NUMLOCK = 0x90;
 
+    /// <summary>Round 7 (review fix, blocking): GetAncestor(hwnd, GA_ROOT) walks UP from a control's own HWND to its owning top-level window - the native-handle half of IsWithinWindow's descendant check, for WinForms controls (PioneerRx's own — see MainWindowSelector's "WindowsForms10.*" class check) that each carry a distinct HWND, unlike WPF's single-HWND-per-window model.</summary>
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    private const uint GA_ROOT = 2;
+
     /// <summary>Plain Win32 POINT (screen coordinates) for WindowFromPoint - review fix (blocker 2), see TryActivateRibbonElement/IsPointOwnedByPioneer.</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
@@ -524,6 +530,77 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             log($"Automation error: {ex.Message}");
             return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
+        }
+    }
+
+    /// <summary>
+    /// "Test date entry" button (W-T92 round 3, GOAL brief step 3):
+    /// exercises ONLY the date-entry portion of RunFinancialReport's
+    /// SetReportParameters/ReplayReportParameterKeyPlan against whatever
+    /// "Report Parameters" window is ALREADY open in Pioneer right now -
+    /// no ribbon navigation, no report-row selection, and (per the brief)
+    /// never F12 - so Will can verify the paste+Tab+read-back behavior in
+    /// about 5 seconds and paste the resulting log, without ever actually
+    /// running or saving a report. FindMainWindow still has to run first
+    /// (it's what sets _pioneerProcessId, which
+    /// EnumeratePioneerOwnedTopLevelWindows/WaitForReportParametersWindow
+    /// both depend on) — this does not open Analysis &gt; Financial Reports
+    /// itself; Will opens the popup by hand (or leaves one open from a
+    /// prior run) before clicking the button.
+    /// </summary>
+    public Task<ReportRunResult> TestDateEntry(ReportRunItem item, Action<string> log, CancellationToken ct)
+    {
+        // Synchronous by design (no FlaUI/UIA call this method makes ever
+        // awaits anything - FindMainWindow, WaitForReportParametersWindow,
+        // EnsureWindowForeground, ReplayReportParameterKeyPlan are all
+        // sync) - Task.FromResult rather than `async` so this doesn't
+        // carry a needless async state machine / CS1998 warning; a thrown
+        // OperationCanceledException still propagates to the caller
+        // exactly the way an awaited one would (ReportsCoordinator always
+        // calls this from inside its own try/await).
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!FindMainWindow(log, ct) || _mainWindow is null)
+                return Task.FromResult(ReportRunResult.Failed("PioneerRx main window not found", stopwatch.Elapsed));
+
+            log("Locating the currently open 'Report Parameters' window...");
+            var reportParametersWindow = WaitForReportParametersWindow(log, ct);
+            if (reportParametersWindow is null)
+            {
+                log("'Report Parameters' window not found - open it in Pioneer first (Analysis > Financial Reports, double-click a report), then click Test date entry again.");
+                return Task.FromResult(ReportRunResult.Failed("'Report Parameters' window not open", stopwatch.Elapsed));
+            }
+
+            log($"'Report Parameters' window found. class='{SafeClassName(reportParametersWindow)}' title_len={SafeName(reportParametersWindow).Length}");
+
+            if (!EnsureWindowForeground(reportParametersWindow, log, "Report Parameters window"))
+                return Task.FromResult(ReportRunResult.Failed("'Report Parameters' window lost focus", stopwatch.Elapsed));
+
+            if (item.Entry.ParameterKind == ReportParameterKind.PaymentsSearch)
+            {
+                log("Test date entry does not apply to the Payments report (it never uses this popup) - pick a different report.");
+                return Task.FromResult(ReportRunResult.Failed("Payments report has no Report Parameters popup", stopwatch.Elapsed));
+            }
+
+            var plan = ReportParameterKeyPlan.Build(item.Entry, item.Begin, item.End, includeF12: false);
+            var ok = ReplayReportParameterKeyPlan(plan, reportParametersWindow, log);
+
+            var result = ok
+                ? ReportRunResult.Saved("(test only - no F12 sent, nothing was run)", stopwatch.Elapsed)
+                : ReportRunResult.Failed("Date entry test failed - see the log lines above", stopwatch.Elapsed);
+            return Task.FromResult(result);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            log($"Automation error: {ex.Message}");
+            return Task.FromResult(ReportRunResult.Failed(ex.Message, stopwatch.Elapsed));
         }
     }
 
@@ -2120,10 +2197,59 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// </summary>
     private bool ReplayReportParameterKeyPlan(IReadOnlyList<ReportParameterKeyAction> plan, AutomationElement parametersWindow, Action<string> log)
     {
-        if (plan.Count > 0)
+        if (plan.Count == 0) return true;
+
+        var pasteCount = 0;
+        foreach (var a in plan)
         {
-            var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
-            log($"  NumLock is {(numLockOn ? "ON" : "OFF")} before date entry.");
+            if (a.Kind == ReportParameterKeyActionKind.PasteText) pasteCount++;
+        }
+        var pasteSeen = 0;
+        var firstFieldLabel = pasteCount <= 1 ? "Date field" : "Begin field";
+
+        var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+        log($"  NumLock is {(numLockOn ? "ON" : "OFF")} before date entry.");
+
+        // Round 7 (review fix, blocking): the original version clicked
+        // WHATEVER had OS focus unconditionally. On the "Test date entry"
+        // path Will may have already tabbed/clicked around the popup
+        // himself, so focus could just as easily sit on OK/Print/Run/
+        // Cancel or a checkbox - clicking THAT invokes it against live
+        // PioneerRx, exactly what "Test date entry" promises never to do.
+        // Now only clicks when the focused element is an Edit control AND
+        // actually lives inside THIS parametersWindow (never some other
+        // Pioneer window) - anything else (a button, checkbox, combo,
+        // menu item, or an Edit field that belongs to a different window
+        // entirely) is left alone and logged instead, falling through to
+        // the window's own default focus exactly like a lookup failure
+        // already did.
+        var initialFocused = SafeFocusedElement();
+        if (initialFocused is not null)
+        {
+            log($"  focused control before date entry: {DescribeControl(initialFocused)}");
+
+            ControlType? focusedControlType = null;
+            try { focusedControlType = initialFocused.ControlType; } catch { /* leave null - treated as "not Edit" below */ }
+
+            if (focusedControlType == ControlType.Edit && IsWithinWindow(initialFocused, parametersWindow))
+            {
+                if (TryClickElementCenter(initialFocused, log, firstFieldLabel))
+                {
+                    log($"  clicked to force focus - now: {DescribeControl(SafeFocusedElement())}");
+                }
+                else
+                {
+                    log($"  could not explicitly click the {firstFieldLabel} - relying on the window's own default focus.");
+                }
+            }
+            else
+            {
+                log($"  focused control is not an Edit field inside 'Report Parameters' (type={focusedControlType?.ToString() ?? "unknown"}) - skipping the click (never invoke a button/checkbox/combo by accident) and relying on the window's own default focus.");
+            }
+        }
+        else
+        {
+            log("  could not read the currently focused control - relying on the window's own default focus.");
         }
 
         for (var i = 0; i < plan.Count; i++)
@@ -2141,7 +2267,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             {
                 var tabCount = 1;
                 while (i + tabCount < plan.Count && plan[i + tabCount].Kind == ReportParameterKeyActionKind.Tab) tabCount++;
-                log($"  Tab x{tabCount}");
+                log($"  Tab x{tabCount} (focused before: {DescribeControl(SafeFocusedElement())})");
             }
 
             try
@@ -2153,14 +2279,62 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                         break;
 
                     case ReportParameterKeyActionKind.PasteText:
-                        if (!ClipboardHelper.TrySetText(action.Text ?? string.Empty))
+                    {
+                        // "Begin"/"End" for a two-date plan, "Date" for a
+                        // single-date (AsOfDate) plan - derived from
+                        // position, not stored on the action itself, so
+                        // ReportParameterKeyPlan's own record-equality
+                        // golden tests don't have to carry a label field.
+                        var fieldLabel = pasteCount <= 1 ? "Date" : (pasteSeen == 0 ? "Begin" : "End");
+                        pasteSeen++;
+
+                        var expected = action.Text ?? string.Empty;
+                        if (!ClipboardHelper.TrySetText(expected))
                         {
-                            log("  could not set the clipboard for date paste - aborting.");
+                            log($"  [{fieldLabel}] could not set the clipboard for date paste - aborting.");
                             return false;
                         }
                         Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
-                        log($"  pasted date ({action.Text?.Length ?? 0} digits)");
+                        Thread.Sleep(KeyEntrySettleDelay);
+
+                        var readBack = TryReadFocusedFieldValue();
+                        if (string.Equals(readBack, expected, StringComparison.Ordinal))
+                        {
+                            log($"  {fieldLabel} = {expected} ✓ (focused: {DescribeControl(SafeFocusedElement())})");
+                        }
+                        else
+                        {
+                            log($"  {fieldLabel} paste read back as '{readBack ?? "(unreadable)"}', expected '{expected}' - retrying once with typed digits (NumLock forced ON).");
+
+                            if (!EnsureWindowForeground(parametersWindow, log, "Report Parameters window"))
+                            {
+                                log("  aborting date entry - 'Report Parameters' window lost focus during retry.");
+                                return false;
+                            }
+
+                            TryForceNumLockOn(log);
+                            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
+                            Thread.Sleep(KeyEntrySettleDelay);
+
+                            if (!TryTypeDigits(expected, log))
+                            {
+                                log($"  {fieldLabel}: typed-digit retry failed - aborting.");
+                                return false;
+                            }
+
+                            var retryReadBack = TryReadFocusedFieldValue();
+                            if (string.Equals(retryReadBack, expected, StringComparison.Ordinal))
+                            {
+                                log($"  {fieldLabel} = {expected} ✓ (after typed-digit retry, focused: {DescribeControl(SafeFocusedElement())})");
+                            }
+                            else
+                            {
+                                log($"  {fieldLabel} still reads back as '{retryReadBack ?? "(unreadable)"}' after the retry - aborting rather than run the report against a wrong date.");
+                                return false;
+                            }
+                        }
                         break;
+                    }
 
                     case ReportParameterKeyActionKind.Tab:
                         Keyboard.Type(VirtualKeyShort.TAB);
@@ -2178,6 +2352,180 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 return false;
             }
 
+            Thread.Sleep(KeyEntrySettleDelay);
+        }
+
+        return true;
+    }
+
+    /// <summary>Name + AutomationId of an element, for the "focused control before/after" log lines the GOAL brief asks for (step 2: "Log every keystroke/paste with the focused control's name before and after"). Never throws, never returns an empty string - always something loggable.</summary>
+    private static string DescribeControl(AutomationElement? element)
+    {
+        if (element is null) return "(none)";
+
+        var name = TryGetName(element, out var n) ? n : null;
+        string automationId;
+        try { automationId = element.AutomationId; } catch { automationId = string.Empty; }
+
+        if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(automationId)) return "(unnamed)";
+        return $"name='{name}' id='{automationId}'";
+    }
+
+    /// <summary>Reads back whatever currently has keyboard focus via ValuePattern - the actual verification the GOAL brief asks for ("read it back through UI Automation ValuePattern"). Null (not empty string) means unreadable, distinct from a real empty value.</summary>
+    private string? TryReadFocusedFieldValue()
+    {
+        var focused = SafeFocusedElement();
+        if (focused is null) return null;
+        return TryGetValuePatternValue(focused, out var value) ? value : null;
+    }
+
+    /// <summary>
+    /// Round 7 (review fix, blocking): true only when <paramref name="element"/>
+    /// genuinely lives inside <paramref name="window"/> - the gate
+    /// ReplayReportParameterKeyPlan's initial click needs so it can never
+    /// invoke a button/checkbox/combo on Will's behalf. Two strategies,
+    /// tried in order:
+    ///   1. Native-handle: PioneerRx is WinForms (see MainWindowSelector's
+    ///      "WindowsForms10.*" class check), where most controls carry
+    ///      their OWN distinct HWND (unlike WPF's single-HWND-per-window
+    ///      model) - GetAncestor(elementHandle, GA_ROOT) walks up to the
+    ///      owning top-level window's handle and compares it to window's.
+    ///   2. UIA Parent-walk fallback: for an element with no native HWND
+    ///      of its own (a pure UIA child), walks AutomationElement.Parent
+    ///      up to MaxAncestorWalkDepth levels, comparing each ancestor's
+    ///      OWN native handle against window's - covers a control that
+    ///      never gets its own HWND at all, at the cost of only detecting
+    ///      the match once the walk reaches an HWND-backed ancestor.
+    /// Never throws; an unreadable property at any step is treated as "not
+    /// inside" rather than guessed.
+    /// </summary>
+    private const int MaxAncestorWalkDepth = 50;
+
+    private static bool IsWithinWindow(AutomationElement element, AutomationElement window)
+    {
+        var windowHandle = SafeNativeHandle(window);
+        if (windowHandle == IntPtr.Zero) return false;
+
+        var elementHandle = SafeNativeHandle(element);
+        if (elementHandle != IntPtr.Zero)
+        {
+            if (elementHandle == windowHandle) return true;
+
+            try
+            {
+                var root = GetAncestor(elementHandle, GA_ROOT);
+                if (root == windowHandle) return true;
+            }
+            catch
+            {
+                // fall through to the UIA parent-walk below
+            }
+        }
+
+        try
+        {
+            AutomationElement? current = element;
+            for (var depth = 0; depth < MaxAncestorWalkDepth && current is not null; depth++)
+            {
+                var currentHandle = SafeNativeHandle(current);
+                if (currentHandle != IntPtr.Zero && currentHandle == windowHandle) return true;
+
+                current = current.Parent;
+            }
+        }
+        catch
+        {
+            // Best-effort - an unwalkable tree just means "not confirmed inside".
+        }
+
+        return false;
+    }
+
+    /// <summary>Round 6 (GOAL brief step 2): explicitly clicks an element's own bounding-rectangle centre to force real OS focus onto it, before the very first keystroke of the plan - not just trusting whatever the window claims already has default focus. Same foreground/point-ownership safety checks as TryActivateRibbonElement's own mouse-click fallback (never clicks blind at whatever is physically under the cursor without confirming it's still Pioneer's). CALLER'S RESPONSIBILITY (review fix, blocking): only ever called after IsWithinWindow + a ControlType.Edit check - this method itself does not re-verify either, so it must never be called directly on an arbitrary focused element again.</summary>
+    private bool TryClickElementCenter(AutomationElement element, Action<string> log, string label)
+    {
+        try
+        {
+            var rect = element.BoundingRectangle;
+            if (rect.Width <= 0 || rect.Height <= 0)
+            {
+                log($"    {label}: no usable bounding rectangle to click.");
+                return false;
+            }
+
+            var center = new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+
+            if (!EnsurePioneerForeground(log))
+            {
+                log($"    {label}: skipping click - Pioneer lost focus.");
+                return false;
+            }
+
+            if (!IsPointOwnedByPioneer(center))
+            {
+                log($"    {label}: skipping click - the window at the click point is not Pioneer's.");
+                return false;
+            }
+
+            Mouse.LeftClick(center);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log($"    {label}: click failed - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Belt-and-braces retry step (GOAL brief step 2: "retry once with SendKeys typing digits with NumLock forced ON"). Only called from the PasteText read-back-mismatch branch above - the primary path is always Ctrl+V paste, never typing. Toggles NumLock via the real NUMLOCK key (never any other key) only when GetKeyState shows it's currently off; never toggled back off afterward - silently flipping it back would be its own surprise mid-shift.</summary>
+    private void TryForceNumLockOn(Action<string> log)
+    {
+        var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+        if (numLockOn)
+        {
+            log("  NumLock already ON.");
+            return;
+        }
+
+        try
+        {
+            Keyboard.Press(VirtualKeyShort.NUMLOCK);
+            Keyboard.Release(VirtualKeyShort.NUMLOCK);
+            Thread.Sleep(50);
+        }
+        catch
+        {
+            // Best-effort - the re-check below reports whatever actually happened.
+        }
+
+        numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+        log($"  NumLock forced {(numLockOn ? "ON" : "still OFF - toggle failed")}.");
+    }
+
+    /// <summary>Types <paramref name="digits"/> one real top-row digit key at a time (VirtualKeyShort.KEY_0..KEY_9 - the SAME numeric range as Win32's VK_0..VK_9/ASCII '0'-'9', never a NUMPADn key and never an arrow key) - the fallback path GOAL brief step 2 asks for when a paste's read-back doesn't match. Returns false without sending anything if <paramref name="digits"/> contains a non-digit character.</summary>
+    private static bool TryTypeDigits(string digits, Action<string> log)
+    {
+        foreach (var ch in digits)
+        {
+            if (ch < '0' || ch > '9')
+            {
+                log($"  typed-digit fallback: '{digits}' contains a non-digit character - aborting the fallback.");
+                return false;
+            }
+        }
+
+        foreach (var ch in digits)
+        {
+            var key = (VirtualKeyShort)((int)VirtualKeyShort.KEY_0 + (ch - '0'));
+            try
+            {
+                Keyboard.Type(key);
+            }
+            catch (Exception ex)
+            {
+                log($"  typed-digit fallback failed on '{ch}': {ex.Message}");
+                return false;
+            }
             Thread.Sleep(KeyEntrySettleDelay);
         }
 

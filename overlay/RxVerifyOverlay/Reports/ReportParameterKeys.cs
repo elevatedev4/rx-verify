@@ -74,7 +74,14 @@ public readonly record struct ReportParameterKeyAction(ReportParameterKeyActionK
 /// </summary>
 public static class ReportParameterKeyPlan
 {
-    public static IReadOnlyList<ReportParameterKeyAction> Build(ReportCatalogEntry entry, DateTime begin, DateTime end)
+    /// <param name="includeF12">
+    /// Default true (every real report run). False is used ONLY by the
+    /// "Test date entry" button (W-T92 round 3, GOAL brief step 3) —
+    /// same plan, minus the trailing F12, so Will can verify the paste/Tab
+    /// behavior against a Report Parameters window he already has open
+    /// without ever actually running/saving a report.
+    /// </param>
+    public static IReadOnlyList<ReportParameterKeyAction> Build(ReportCatalogEntry entry, DateTime begin, DateTime end, bool includeF12 = true)
     {
         var actions = new List<ReportParameterKeyAction>();
 
@@ -83,7 +90,7 @@ public static class ReportParameterKeyPlan
             case ReportParameterKind.AsOfDate:
                 actions.Add(ReportParameterKeyAction.SelectAll());
                 actions.Add(ReportParameterKeyAction.PasteText(ReportDateKeys.Format(end)));
-                actions.Add(ReportParameterKeyAction.F12());
+                if (includeF12) actions.Add(ReportParameterKeyAction.F12());
                 break;
 
             case ReportParameterKind.DateRange:
@@ -95,7 +102,7 @@ public static class ReportParameterKeyPlan
                 }
                 actions.Add(ReportParameterKeyAction.SelectAll());
                 actions.Add(ReportParameterKeyAction.PasteText(ReportDateKeys.Format(end)));
-                actions.Add(ReportParameterKeyAction.F12());
+                if (includeF12) actions.Add(ReportParameterKeyAction.F12());
                 break;
 
             case ReportParameterKind.PaymentsSearch:

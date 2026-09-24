@@ -1,5 +1,7 @@
 using System.Windows;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Reports;
+using RxVerifyOverlay.Update;
 
 namespace RxVerifyOverlay;
 
@@ -19,6 +21,14 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // W-T92 round 3 (GOAL brief step 1): log the build's own git sha +
+        // build time on every single startup, first line, so a support
+        // conversation with Will can start with "what does Startup:
+        // Rx Verify build ... say" instead of guessing whether he's on
+        // current code. See Update/BuildInfo.cs's own doc for why this
+        // exists.
+        ReportsLog.Append($"Startup: {BuildInfo.Summary}");
 
         var mainWindow = new MainWindow();
         MainWindow = mainWindow;

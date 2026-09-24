@@ -172,4 +172,75 @@ public class ReportsCoordinatorTests
 
         Assert.Contains(runLogLines, l => l.Contains("saved to"));
     }
+
+    [Fact]
+    public async Task RunAsyncLogsTheBuildStampAsTheFirstLine()
+    {
+        // W-T92 round 3 (GOAL brief step 1): every run log has to say
+        // which build produced it.
+        var driver = new FakeReportDriver();
+        var runLogLines = new List<string>();
+        var coordinator = MakeCoordinator(driver, runLogLines);
+        var items = new[] { MakeItem(ReportCatalog.SalesSummaryKey) };
+
+        await coordinator.RunAsync(items, _ => { }, CancellationToken.None);
+
+        Assert.StartsWith("Rx Verify build ", runLogLines[0]);
+    }
+
+    // --- ReportsCoordinator.TestDateEntryAsync (W-T92 round 3, "Test date entry" button) ---
+
+    [Fact]
+    public async Task TestDateEntryAsync_CallsFindMainWindowThenTestDateEntry()
+    {
+        var driver = new FakeReportDriver();
+        var coordinator = MakeCoordinator(driver);
+        var item = MakeItem(ReportCatalog.SalesSummaryKey);
+
+        var result = await coordinator.TestDateEntryAsync(item, _ => { }, CancellationToken.None);
+
+        Assert.Equal(new[] { "FindMainWindow", ReportCatalog.SalesSummaryKey }, driver.Calls);
+        Assert.Equal(ReportRunStatus.Saved, result.Status);
+    }
+
+    [Fact]
+    public async Task TestDateEntryAsync_MainWindowNotFound_NeverCallsTestDateEntry()
+    {
+        var driver = new FakeReportDriver { MainWindowFound = false };
+        var coordinator = MakeCoordinator(driver);
+        var item = MakeItem(ReportCatalog.SalesSummaryKey);
+
+        var result = await coordinator.TestDateEntryAsync(item, _ => { }, CancellationToken.None);
+
+        Assert.Equal(new[] { "FindMainWindow" }, driver.Calls);
+        Assert.Equal(ReportRunStatus.Failed, result.Status);
+        Assert.Equal("PioneerRx main window not found", result.FailureReason);
+    }
+
+    [Fact]
+    public async Task TestDateEntryAsync_PropagatesADriverFailure()
+    {
+        var driver = new FakeReportDriver();
+        driver.Results[ReportCatalog.SalesSummaryKey] = ReportRunResult.Failed("read-back mismatch", TimeSpan.Zero);
+        var coordinator = MakeCoordinator(driver);
+        var item = MakeItem(ReportCatalog.SalesSummaryKey);
+
+        var result = await coordinator.TestDateEntryAsync(item, _ => { }, CancellationToken.None);
+
+        Assert.Equal(ReportRunStatus.Failed, result.Status);
+        Assert.Equal("read-back mismatch", result.FailureReason);
+    }
+
+    [Fact]
+    public async Task TestDateEntryAsync_LogsTheBuildStamp()
+    {
+        var driver = new FakeReportDriver();
+        var runLogLines = new List<string>();
+        var coordinator = MakeCoordinator(driver, runLogLines);
+        var item = MakeItem(ReportCatalog.SalesSummaryKey);
+
+        await coordinator.TestDateEntryAsync(item, _ => { }, CancellationToken.None);
+
+        Assert.Contains(runLogLines, l => l.Contains("Rx Verify build "));
+    }
 }

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Windows;
+using RxVerifyOverlay.Update;
 
 namespace RxVerifyOverlay.Reports;
 
@@ -41,6 +42,13 @@ public sealed partial class ReportsWindow : Window
     public ReportsWindow(IPioneerReportDriver driver)
     {
         InitializeComponent();
+
+        // W-T92 round 3 (GOAL brief step 1): "show it in the Reports
+        // window title so he can see he is on the new build" - the
+        // XAML-declared Title is kept as the fallback (e.g. a designer
+        // preview that never runs this constructor); this always
+        // overwrites it with the real running build's sha/time.
+        Title = $"{Title} — {BuildInfo.Summary}";
 
         _rows = new ObservableCollection<ReportRowViewModel>();
         foreach (var entry in ReportCatalog.All)
@@ -174,6 +182,7 @@ public sealed partial class ReportsWindow : Window
         }
 
         RunButton.IsEnabled = false;
+        TestDateEntryButton.IsEnabled = false;
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
 
@@ -183,6 +192,71 @@ public sealed partial class ReportsWindow : Window
         }
         finally
         {
+            RunButton.IsEnabled = true;
+            TestDateEntryButton.IsEnabled = true;
+            StopButton.IsEnabled = false;
+            _runCts?.Dispose();
+            _runCts = null;
+        }
+    }
+
+    /// <summary>
+    /// "Test date entry" (W-T92 round 3, GOAL brief step 3): runs ONLY
+    /// PioneerReportDriver.TestDateEntry (date entry, no F12, no row
+    /// selection) against whichever single report is checked in the
+    /// picker, using this window's own Begin/End dates - Will opens the
+    /// Report Parameters popup by hand in Pioneer first, then clicks this
+    /// to verify the paste/Tab/read-back behavior in ~5 seconds. Same
+    /// shape as OnRunClick now, review fix: wired to the SAME _runCts/
+    /// StopButton (both Run and Test date entry disable each other so
+    /// only one can be in flight at a time, and Stop cancels whichever
+    /// one is running) - previously used its own local, never-wired
+    /// CancellationTokenSource, so Stop did nothing for a test run.
+    /// Deliberately does NOT touch the per-row status list
+    /// (ReportsCoordinator.TestDateEntryAsync never raises
+    /// ProgressChanged) - this is a log-only diagnostic, not a real run.
+    /// </summary>
+    private async void OnTestDateEntryClick(object sender, RoutedEventArgs e)
+    {
+        var begin = BeginDatePicker.SelectedDate;
+        var end = EndDatePicker.SelectedDate;
+        if (begin is null || end is null)
+        {
+            AppendLog("Pick a Begin and End date first.");
+            return;
+        }
+
+        var selectedRows = _rows.Where(r => r.IsEnabled && r.IsSelected).ToList();
+        if (selectedRows.Count == 0)
+        {
+            AppendLog("Check one report first (Test date entry uses that report's own tab-count/date-parameter plan).");
+            return;
+        }
+        if (selectedRows.Count > 1)
+        {
+            AppendLog($"More than one report is checked - using '{selectedRows[0].Entry.DisplayName}' for Test date entry.");
+        }
+
+        var outputFolder = OutputFolderTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(outputFolder))
+        {
+            outputFolder = ReportRunPlan.DefaultOutputFolder(end.Value);
+        }
+
+        var item = ReportRunPlan.Build(selectedRows[0].Entry, begin.Value, end.Value, outputFolder);
+
+        TestDateEntryButton.IsEnabled = false;
+        RunButton.IsEnabled = false;
+        StopButton.IsEnabled = true;
+        _runCts = new CancellationTokenSource();
+
+        try
+        {
+            await _coordinator.TestDateEntryAsync(item, AppendLog, _runCts.Token);
+        }
+        finally
+        {
+            TestDateEntryButton.IsEnabled = true;
             RunButton.IsEnabled = true;
             StopButton.IsEnabled = false;
             _runCts?.Dispose();
