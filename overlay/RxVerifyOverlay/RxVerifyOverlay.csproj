@@ -67,7 +67,11 @@
       always has something real to show.
     -->
     <RxVerifyBuildSha Condition="'$(RxVerifyBuildSha)' == ''">local</RxVerifyBuildSha>
-    <RxVerifyBuildTime Condition="'$(RxVerifyBuildTime)' == ''">$([System.DateTime]::UtcNow.ToString(`yyyy-MM-dd HH:mm`))</RxVerifyBuildTime>
+    <!-- Review fix (blocking, matching update-and-run.ps1's own fix):
+         space-free ("T" separator) so a value that reaches an MSBuild
+         -p: switch some other way (a dev's own manual `dotnet build`
+         invocation, say) can never look like two arguments either. -->
+    <RxVerifyBuildTime Condition="'$(RxVerifyBuildTime)' == ''">$([System.DateTime]::UtcNow.ToString(`yyyy-MM-ddTHH:mm`))</RxVerifyBuildTime>
     <!--
       This app reads the local screen (via UI Automation AND, on this
       branch, a screen-region OCR capture of the on-screen e-script image

@@ -157,6 +157,7 @@ UIA Tree..."** button:
 
 ## What's implemented
 
+- **Reports mode date entry** (`Reports/PioneerReportDriver.cs`): pastes each date via the clipboard and reads it back through UI Automation to verify it landed; a "Test date entry" button in the Reports window replays the same paste/verify against an already-open Report Parameters popup with no F12 sent. If a read-back retry is ever needed it forces NumLock ON to type the date as top-row digit keys — it is never toggled back off afterward, so NumLock may be left ON on the keyboard.
 - **Field reading** (`Uia/FieldReader.cs`): builds both engine inputs —
   `ReadEntered()` from the LEFT data-entry panel (what the tech typed:
   Patient, Written By/prescriber, Written date, Item/drug, Quantity,

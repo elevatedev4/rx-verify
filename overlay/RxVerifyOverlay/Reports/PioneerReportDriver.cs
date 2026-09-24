@@ -202,6 +202,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     private const int VK_NUMLOCK = 0x90;
 
+    /// <summary>Round 7 (review fix, blocking): GetAncestor(hwnd, GA_ROOT) walks UP from a control's own HWND to its owning top-level window - the native-handle half of IsWithinWindow's descendant check, for WinForms controls (PioneerRx's own — see MainWindowSelector's "WindowsForms10.*" class check) that each carry a distinct HWND, unlike WPF's single-HWND-per-window model.</summary>
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    private const uint GA_ROOT = 2;
+
     /// <summary>Plain Win32 POINT (screen coordinates) for WindowFromPoint - review fix (blocker 2), see TryActivateRibbonElement/IsPointOwnedByPioneer.</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
@@ -2193,41 +2199,58 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     {
         if (plan.Count == 0) return true;
 
-        var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
-        log($"  NumLock is {(numLockOn ? "ON" : "OFF")} before date entry.");
-
-        // Round 6 (W-T92 round 3, GOAL brief step 2): "focus the Begin
-        // field explicitly ... then Ctrl+A" - belt-and-braces on top of
-        // the owner's own observation that the Begin field is already
-        // highlighted the moment the popup opens. Whatever HAS default
-        // focus right now is clicked once, forcing real focus onto it,
-        // before the very first SelectAll goes out - never trusts ambient
-        // window-level foreground alone for the one keystroke everything
-        // else in the plan depends on landing in the right place.
-        var initialFocused = SafeFocusedElement();
-        if (initialFocused is not null)
-        {
-            log($"  focused control before date entry: {DescribeControl(initialFocused)}");
-            if (TryClickElementCenter(initialFocused, log, "Begin field"))
-            {
-                log($"  clicked to force focus - now: {DescribeControl(SafeFocusedElement())}");
-            }
-            else
-            {
-                log("  could not explicitly click the Begin field - relying on the window's own default focus.");
-            }
-        }
-        else
-        {
-            log("  could not read the currently focused control - relying on the window's own default focus.");
-        }
-
         var pasteCount = 0;
         foreach (var a in plan)
         {
             if (a.Kind == ReportParameterKeyActionKind.PasteText) pasteCount++;
         }
         var pasteSeen = 0;
+        var firstFieldLabel = pasteCount <= 1 ? "Date field" : "Begin field";
+
+        var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+        log($"  NumLock is {(numLockOn ? "ON" : "OFF")} before date entry.");
+
+        // Round 7 (review fix, blocking): the original version clicked
+        // WHATEVER had OS focus unconditionally. On the "Test date entry"
+        // path Will may have already tabbed/clicked around the popup
+        // himself, so focus could just as easily sit on OK/Print/Run/
+        // Cancel or a checkbox - clicking THAT invokes it against live
+        // PioneerRx, exactly what "Test date entry" promises never to do.
+        // Now only clicks when the focused element is an Edit control AND
+        // actually lives inside THIS parametersWindow (never some other
+        // Pioneer window) - anything else (a button, checkbox, combo,
+        // menu item, or an Edit field that belongs to a different window
+        // entirely) is left alone and logged instead, falling through to
+        // the window's own default focus exactly like a lookup failure
+        // already did.
+        var initialFocused = SafeFocusedElement();
+        if (initialFocused is not null)
+        {
+            log($"  focused control before date entry: {DescribeControl(initialFocused)}");
+
+            ControlType? focusedControlType = null;
+            try { focusedControlType = initialFocused.ControlType; } catch { /* leave null - treated as "not Edit" below */ }
+
+            if (focusedControlType == ControlType.Edit && IsWithinWindow(initialFocused, parametersWindow))
+            {
+                if (TryClickElementCenter(initialFocused, log, firstFieldLabel))
+                {
+                    log($"  clicked to force focus - now: {DescribeControl(SafeFocusedElement())}");
+                }
+                else
+                {
+                    log($"  could not explicitly click the {firstFieldLabel} - relying on the window's own default focus.");
+                }
+            }
+            else
+            {
+                log($"  focused control is not an Edit field inside 'Report Parameters' (type={focusedControlType?.ToString() ?? "unknown"}) - skipping the click (never invoke a button/checkbox/combo by accident) and relying on the window's own default focus.");
+            }
+        }
+        else
+        {
+            log("  could not read the currently focused control - relying on the window's own default focus.");
+        }
 
         for (var i = 0; i < plan.Count; i++)
         {
@@ -2356,7 +2379,69 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return TryGetValuePatternValue(focused, out var value) ? value : null;
     }
 
-    /// <summary>Round 6 (GOAL brief step 2): explicitly clicks an element's own bounding-rectangle centre to force real OS focus onto it, before the very first keystroke of the plan - not just trusting whatever the window claims already has default focus. Same foreground/point-ownership safety checks as TryActivateRibbonElement's own mouse-click fallback (never clicks blind at whatever is physically under the cursor without confirming it's still Pioneer's).</summary>
+    /// <summary>
+    /// Round 7 (review fix, blocking): true only when <paramref name="element"/>
+    /// genuinely lives inside <paramref name="window"/> - the gate
+    /// ReplayReportParameterKeyPlan's initial click needs so it can never
+    /// invoke a button/checkbox/combo on Will's behalf. Two strategies,
+    /// tried in order:
+    ///   1. Native-handle: PioneerRx is WinForms (see MainWindowSelector's
+    ///      "WindowsForms10.*" class check), where most controls carry
+    ///      their OWN distinct HWND (unlike WPF's single-HWND-per-window
+    ///      model) - GetAncestor(elementHandle, GA_ROOT) walks up to the
+    ///      owning top-level window's handle and compares it to window's.
+    ///   2. UIA Parent-walk fallback: for an element with no native HWND
+    ///      of its own (a pure UIA child), walks AutomationElement.Parent
+    ///      up to MaxAncestorWalkDepth levels, comparing each ancestor's
+    ///      OWN native handle against window's - covers a control that
+    ///      never gets its own HWND at all, at the cost of only detecting
+    ///      the match once the walk reaches an HWND-backed ancestor.
+    /// Never throws; an unreadable property at any step is treated as "not
+    /// inside" rather than guessed.
+    /// </summary>
+    private const int MaxAncestorWalkDepth = 50;
+
+    private static bool IsWithinWindow(AutomationElement element, AutomationElement window)
+    {
+        var windowHandle = SafeNativeHandle(window);
+        if (windowHandle == IntPtr.Zero) return false;
+
+        var elementHandle = SafeNativeHandle(element);
+        if (elementHandle != IntPtr.Zero)
+        {
+            if (elementHandle == windowHandle) return true;
+
+            try
+            {
+                var root = GetAncestor(elementHandle, GA_ROOT);
+                if (root == windowHandle) return true;
+            }
+            catch
+            {
+                // fall through to the UIA parent-walk below
+            }
+        }
+
+        try
+        {
+            AutomationElement? current = element;
+            for (var depth = 0; depth < MaxAncestorWalkDepth && current is not null; depth++)
+            {
+                var currentHandle = SafeNativeHandle(current);
+                if (currentHandle != IntPtr.Zero && currentHandle == windowHandle) return true;
+
+                current = current.Parent;
+            }
+        }
+        catch
+        {
+            // Best-effort - an unwalkable tree just means "not confirmed inside".
+        }
+
+        return false;
+    }
+
+    /// <summary>Round 6 (GOAL brief step 2): explicitly clicks an element's own bounding-rectangle centre to force real OS focus onto it, before the very first keystroke of the plan - not just trusting whatever the window claims already has default focus. Same foreground/point-ownership safety checks as TryActivateRibbonElement's own mouse-click fallback (never clicks blind at whatever is physically under the cursor without confirming it's still Pioneer's). CALLER'S RESPONSIBILITY (review fix, blocking): only ever called after IsWithinWindow + a ControlType.Edit check - this method itself does not re-verify either, so it must never be called directly on an arbitrary focused element again.</summary>
     private bool TryClickElementCenter(AutomationElement element, Action<string> log, string label)
     {
         try

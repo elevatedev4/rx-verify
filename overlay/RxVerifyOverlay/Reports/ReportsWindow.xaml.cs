@@ -182,6 +182,7 @@ public sealed partial class ReportsWindow : Window
         }
 
         RunButton.IsEnabled = false;
+        TestDateEntryButton.IsEnabled = false;
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
 
@@ -192,6 +193,7 @@ public sealed partial class ReportsWindow : Window
         finally
         {
             RunButton.IsEnabled = true;
+            TestDateEntryButton.IsEnabled = true;
             StopButton.IsEnabled = false;
             _runCts?.Dispose();
             _runCts = null;
@@ -204,10 +206,14 @@ public sealed partial class ReportsWindow : Window
     /// selection) against whichever single report is checked in the
     /// picker, using this window's own Begin/End dates - Will opens the
     /// Report Parameters popup by hand in Pioneer first, then clicks this
-    /// to verify the paste/Tab/read-back behavior in ~5 seconds. Disables
-    /// both this button and Run while it's in flight, same shape as
-    /// OnRunClick, but deliberately does NOT touch the per-row status
-    /// list (ReportsCoordinator.TestDateEntryAsync never raises
+    /// to verify the paste/Tab/read-back behavior in ~5 seconds. Same
+    /// shape as OnRunClick now, review fix: wired to the SAME _runCts/
+    /// StopButton (both Run and Test date entry disable each other so
+    /// only one can be in flight at a time, and Stop cancels whichever
+    /// one is running) - previously used its own local, never-wired
+    /// CancellationTokenSource, so Stop did nothing for a test run.
+    /// Deliberately does NOT touch the per-row status list
+    /// (ReportsCoordinator.TestDateEntryAsync never raises
     /// ProgressChanged) - this is a log-only diagnostic, not a real run.
     /// </summary>
     private async void OnTestDateEntryClick(object sender, RoutedEventArgs e)
@@ -241,15 +247,20 @@ public sealed partial class ReportsWindow : Window
 
         TestDateEntryButton.IsEnabled = false;
         RunButton.IsEnabled = false;
+        StopButton.IsEnabled = true;
+        _runCts = new CancellationTokenSource();
+
         try
         {
-            using var testCts = new CancellationTokenSource();
-            await _coordinator.TestDateEntryAsync(item, AppendLog, testCts.Token);
+            await _coordinator.TestDateEntryAsync(item, AppendLog, _runCts.Token);
         }
         finally
         {
             TestDateEntryButton.IsEnabled = true;
             RunButton.IsEnabled = true;
+            StopButton.IsEnabled = false;
+            _runCts?.Dispose();
+            _runCts = null;
         }
     }
 

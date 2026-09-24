@@ -658,7 +658,11 @@ try {
     # Keep the 'local' fallback - see comment above.
 }
 if ([string]::IsNullOrWhiteSpace($buildSha)) { $buildSha = 'local' }
-$buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')
+# Review fix (blocking): space-free (ISO-ish "T" separator, no space)
+# so this can never split into two MSBuild -p: arguments partway through
+# - a bare space here would hand dotnet build a malformed second token
+# ("HH:mm" alone) with no property name.
+$buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm')
 Write-Detail "Build stamp: sha=$buildSha time=$buildTime UTC (this is what the Reports window title / startup log should show after launch)."
 
 Write-Step 'Building overlay (dotnet build)...'
