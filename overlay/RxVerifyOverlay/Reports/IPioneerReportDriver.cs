@@ -92,4 +92,18 @@ public interface IPioneerReportDriver
     /// RunFinancialReport.
     /// </summary>
     Task<ReportRunResult> RunPaymentsExport(ReportRunItem item, Action<string> log, CancellationToken ct);
+
+    /// <summary>
+    /// "Test date entry" button (W-T92 round 3, GOAL brief step 3): runs
+    /// ONLY the date-entry portion (SelectAll/PasteText/Tab, with
+    /// read-back verification) against whatever "Report Parameters"
+    /// window is ALREADY open in Pioneer right now - never F12, never
+    /// selects a report row, never exports/saves anything. Same
+    /// never-throws-for-an-ordinary-automation-failure contract as
+    /// RunFinancialReport/RunPaymentsExport - ReportRunResult.Saved here
+    /// means "the plan replayed and every read-back matched", not that
+    /// any file was written (SavedPath is a fixed placeholder string, not
+    /// a real path).
+    /// </summary>
+    Task<ReportRunResult> TestDateEntry(ReportRunItem item, Action<string> log, CancellationToken ct);
 }

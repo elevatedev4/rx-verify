@@ -37,6 +37,9 @@ public sealed class FakeReportDriver : IPioneerReportDriver
     public Task<ReportRunResult> RunPaymentsExport(ReportRunItem item, Action<string> log, CancellationToken ct) =>
         RunAny(item, ct);
 
+    public Task<ReportRunResult> TestDateEntry(ReportRunItem item, Action<string> log, CancellationToken ct) =>
+        RunAny(item, ct);
+
     private Task<ReportRunResult> RunAny(ReportRunItem item, CancellationToken ct)
     {
         Calls.Add(item.Entry.Key);

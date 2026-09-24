@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using RxVerifyOverlay.Update;
 
 namespace RxVerifyOverlay.Reports;
 
@@ -81,6 +82,11 @@ public sealed class ReportsCoordinator
             _runLog(runLogFolder, runLogFileName, text);
         }
 
+        // W-T92 round 3 (GOAL brief step 1): first line of every run log,
+        // so a run's own log file always says which build actually
+        // produced it - see Update/BuildInfo.cs's own doc for why.
+        WriteLine(BuildInfo.Summary);
+
         if (!_driver.FindMainWindow(WriteLine, ct))
         {
             WriteLine("Could not find the main PioneerRx window - is Pioneer open?");
@@ -147,6 +153,49 @@ public sealed class ReportsCoordinator
         }
 
         return outcomes;
+    }
+
+    /// <summary>
+    /// "Test date entry" button (W-T92 round 3, GOAL brief step 3): the
+    /// same FindMainWindow-then-drive-one-thing shape as RunAsync, but for
+    /// exactly one item and IPioneerReportDriver.TestDateEntry instead of
+    /// RunFinancialReport/RunPaymentsExport - never touches the picker's
+    /// row-status list (ReportsWindow doesn't pass this through
+    /// ProgressChanged), only the log.
+    /// </summary>
+    public async Task<ReportRunResult> TestDateEntryAsync(ReportRunItem item, Action<string> log, CancellationToken ct)
+    {
+        var runLogFileName = BuildRunLogFileName(DateTime.Now);
+        var runLogFolder = item.OutputFolder;
+
+        void WriteLine(string text)
+        {
+            log(text);
+            _appLog(text);
+            _runLog(runLogFolder, runLogFileName, text);
+        }
+
+        WriteLine($"Test date entry - {BuildInfo.Summary}");
+
+        if (!_driver.FindMainWindow(WriteLine, ct))
+        {
+            WriteLine("Could not find the main PioneerRx window - is Pioneer open?");
+            return ReportRunResult.Failed("PioneerRx main window not found", TimeSpan.Zero);
+        }
+
+        try
+        {
+            var result = await _driver.TestDateEntry(item, WriteLine, ct).ConfigureAwait(false);
+            WriteLine(result.Status == ReportRunStatus.Saved
+                ? "Test date entry: done - check the Begin/End lines above."
+                : $"Test date entry: failed - {result.FailureReason}");
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            WriteLine("Test date entry: stopped.");
+            return ReportRunResult.Failed("Stopped", TimeSpan.Zero);
+        }
     }
 
     private void RaiseProgress(ReportRunOutcome outcome) => ProgressChanged?.Invoke(this, new ReportProgressEventArgs(outcome));

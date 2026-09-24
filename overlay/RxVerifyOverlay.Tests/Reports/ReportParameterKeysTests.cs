@@ -183,6 +183,46 @@ public class ReportParameterKeysTests
         }
     }
 
+    // --- W-T92 round 3: includeF12: false for the "Test date entry" button ---
+
+    [Fact]
+    public void IncludeF12FalseOmitsF12ButKeepsEverythingElseIdentical()
+    {
+        var entry = ReportCatalog.FindByKey(ReportCatalog.ArAgedTrialBalanceKey)!;
+        var begin = new DateTime(2026, 8, 1);
+        var end = new DateTime(2026, 8, 31);
+
+        var fullPlan = ReportParameterKeyPlan.Build(entry, begin, end);
+        var testPlan = ReportParameterKeyPlan.Build(entry, begin, end, includeF12: false);
+
+        Assert.Equal(fullPlan.Count - 1, testPlan.Count);
+        Assert.Equal(fullPlan.Take(fullPlan.Count - 1), testPlan);
+        Assert.DoesNotContain(testPlan, a => a.Kind == ReportParameterKeyActionKind.F12);
+    }
+
+    [Fact]
+    public void IncludeF12FalseStillEndsWithThePasteTextStepForEveryReport()
+    {
+        foreach (var entry in ReportCatalog.All.Where(e => e.ParameterKind != ReportParameterKind.PaymentsSearch))
+        {
+            var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 1), new DateTime(2026, 1, 31), includeF12: false);
+
+            Assert.NotEmpty(plan);
+            Assert.Equal(ReportParameterKeyActionKind.SelectAll, plan[0].Kind);
+            Assert.Equal(ReportParameterKeyActionKind.PasteText, plan[^1].Kind);
+        }
+    }
+
+    [Fact]
+    public void IncludeF12FalseProducesAnEmptyPlanForPaymentsSearchToo()
+    {
+        var entry = ReportCatalog.FindByKey(ReportCatalog.PaymentsKey)!;
+
+        var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 8, 1), new DateTime(2026, 8, 31), includeF12: false);
+
+        Assert.Empty(plan);
+    }
+
     // --- ReportTimeoutPlan.CalculateTimeout ---
 
     [Fact]

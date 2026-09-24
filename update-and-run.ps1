@@ -632,10 +632,39 @@ if ($processesToStop.Count -gt 0) {
     Write-Detail 'Rx Verify stopped.'
 }
 
+# ---------------------------------------------------------------------
+# Step 4b: build-freshness stamp (W-T92 round 3 - owner's "Literally the
+# action hasn't changed at all" after two rounds of source changes that
+# DID land). Whatever caused that gap between a real commit and what he
+# actually saw run, the fix is to make it impossible to miss going
+# forward: this run's own git sha + UTC time are passed into the build as
+# MSBuild properties (RxVerifyOverlay.csproj turns them into
+# AssemblyMetadataAttribute values; Update/BuildInfo.cs reads them back
+# at runtime and shows them at startup, in every Reports run log, and in
+# the Reports window's own title bar). Computed AFTER the git
+# checkout -f -B main above, so it's always THIS run's actual checked-out
+# commit, never a stale value from before the sync. git rev-parse can't
+# fail here (the checkout above already succeeded), but it's wrapped
+# anyway so a freshness-stamp problem can never block the real build/
+# launch this script exists for.
+# ---------------------------------------------------------------------
+$buildSha = 'local'
+try {
+    $shaOutput = Invoke-NativeCapture { git rev-parse --short HEAD }
+    if ($script:NativeExitCode -eq 0 -and $shaOutput) {
+        $buildSha = ($shaOutput | Select-Object -Last 1).ToString().Trim()
+    }
+} catch {
+    # Keep the 'local' fallback - see comment above.
+}
+if ([string]::IsNullOrWhiteSpace($buildSha)) { $buildSha = 'local' }
+$buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')
+Write-Detail "Build stamp: sha=$buildSha time=$buildTime UTC (this is what the Reports window title / startup log should show after launch)."
+
 Write-Step 'Building overlay (dotnet build)...'
 Push-Location $overlayProjectDir
 try {
-    dotnet build
+    dotnet build "-p:RxVerifyBuildSha=$buildSha" "-p:RxVerifyBuildTime=$buildTime"
     $overlayBuildExitCode = $LASTEXITCODE
 } finally {
     Pop-Location

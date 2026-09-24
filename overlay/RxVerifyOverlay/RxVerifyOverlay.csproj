@@ -54,6 +54,21 @@
     -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!--
+      BUILD FRESHNESS STAMP (W-T92 round 3 — Will: "Literally the action
+      hasn't changed at all" after two rounds of date-entry fixes that
+      DID land in source. Whatever caused that gap on his machine, the
+      fix here is to make every build self-identifying so it can never
+      happen silently again): update-and-run.ps1 passes
+      -p:RxVerifyBuildSha=<short git sha> -p:RxVerifyBuildTime=<UTC time>
+      on every `dotnet build` (see that script). The Condition defaults
+      below only apply for a plain `dotnet build`/Visual Studio build
+      that didn't pass those properties (e.g. a dev building locally) -
+      "local"/the actual build clock time, never blank, so BuildInfo.cs
+      always has something real to show.
+    -->
+    <RxVerifyBuildSha Condition="'$(RxVerifyBuildSha)' == ''">local</RxVerifyBuildSha>
+    <RxVerifyBuildTime Condition="'$(RxVerifyBuildTime)' == ''">$([System.DateTime]::UtcNow.ToString(`yyyy-MM-dd HH:mm`))</RxVerifyBuildTime>
+    <!--
       This app reads the local screen (via UI Automation AND, on this
       branch, a screen-region OCR capture of the on-screen e-script image
       — see Ocr/EscriptImageCapture.cs) and calls a local Node subprocess.
@@ -83,6 +98,16 @@
       works on Windows" caveat on this package doesn't apply here.
     -->
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- BUILD FRESHNESS STAMP: embeds RxVerifyBuildSha/RxVerifyBuildTime (see
+       above) as AssemblyMetadataAttribute values, read back at runtime by
+       Update/BuildInfo.cs - no custom code-gen target needed, this is the
+       standard MSBuild-supported way to bake build-time values into the
+       assembly. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="RxVerifyBuildSha" Value="$(RxVerifyBuildSha)" />
+    <AssemblyMetadata Include="RxVerifyBuildTime" Value="$(RxVerifyBuildTime)" />
   </ItemGroup>
 
 </Project>
