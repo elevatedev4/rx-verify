@@ -138,9 +138,13 @@ public class ReportCatalogTests
     [Fact]
     public void OnlyInventoryValuationHasTrailingKeys()
     {
+        // Reviewer round 4 correction: the macro's own trailing F12
+        // (%date_text%<TAB><ARROW DOWN><F12><F12>) is part of TrailingKeys
+        // too, not collapsed away - ReportParameterKeyPlan.Build appends a
+        // SEPARATE run F12 after these three.
         var inventoryValuation = ReportCatalog.FindByKey(ReportCatalog.InventoryValuationKey)!;
         Assert.Equal(
-            new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown },
+            new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown, ReportParameterKeyActionKind.F12 },
             inventoryValuation.TrailingKeys);
 
         foreach (var entry in ReportCatalog.All.Where(e => e.Key != ReportCatalog.InventoryValuationKey))

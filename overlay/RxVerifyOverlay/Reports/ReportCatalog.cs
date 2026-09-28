@@ -85,12 +85,18 @@ public enum ReportOutputFormat
 /// with no leading &lt;TAB&gt;.
 /// </param>
 /// <param name="TrailingKeys">
-/// Round 4 fix. Extra keys ReportParameterKeyPlan sends AFTER the last
-/// date is typed and BEFORE F12 — null/empty (the default) for every
-/// report whose macro goes straight to &lt;F12&gt;. Only Inventory
-/// Valuation's macro has any (Tab then Arrow Down, to reach and confirm
-/// its "Inventory Group" dropdown) — see that entry's own comment below.
-/// Restricted to Tab/ArrowDown; never SelectAll/TypeText/PasteText/F12.
+/// Round 4 fix, reviewer round 4 correction. Extra keys
+/// ReportParameterKeyPlan sends AFTER the last date is typed — null/empty
+/// (the default) for every report whose macro goes straight to
+/// &lt;F12&gt;. Only Inventory Valuation's macro has any (Tab, Arrow Down,
+/// then its OWN trailing F12 — its macro is literally
+/// %date_text%&lt;TAB&gt;&lt;ARROW DOWN&gt;&lt;F12&gt;&lt;F12&gt;, two F12s
+/// back to back: the first is part of this list, the second is the
+/// "run" F12 ReportParameterKeyPlan.Build appends separately for every
+/// entry) — see that entry's own comment below. Restricted to
+/// Tab/ArrowDown/F12; never SelectAll/TypeText/PasteText. Any F12 in this
+/// list is stripped by ReportParameterKeyPlan.Build when includeF12 is
+/// false ("Test date entry"), same as the separate run F12.
 /// </param>
 public sealed record ReportCatalogEntry(
     string Key,
@@ -181,9 +187,9 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Inventory Valuation",
             Enabled: true,
-            // Macro "Inventory valuation": %date_text%<TAB><ARROW DOWN><F12><F12> — no leading tabs; after the date, Tab then Arrow Down reaches/confirms the Inventory Group dropdown (left at its all-groups default per this file's own header doc), then F12 runs it (the macro's own trailing double-F12 is treated as one run key here — see ReportParameterKeys.cs). 15s report_run_time.
+            // Macro "Inventory valuation": %date_text%<TAB><ARROW DOWN><F12><F12> — no leading tabs; after the date, Tab then Arrow Down reaches/confirms the Inventory Group dropdown (left at its all-groups default per this file's own header doc), then the macro's own F12 (its first one, part of TrailingKeys), then ReportParameterKeyPlan.Build's separate run F12 - mirrored exactly (reviewer round 4 correction: round 4 originally collapsed the macro's two F12s into one). 15s report_run_time.
             MacroRunTime: TimeSpan.FromSeconds(15),
-            TrailingKeys: new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown }),
+            TrailingKeys: new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown, ReportParameterKeyActionKind.F12 }),
 
         new(
             Key: InventoryControlBalanceKey,

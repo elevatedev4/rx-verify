@@ -103,9 +103,12 @@ public class ReportParameterKeysTests
     }
 
     [Fact]
-    public void InventoryValuationAddsTabThenArrowDownBeforeF12()
+    public void InventoryValuationEndsWithTwoF12sMatchingItsMacroExactly()
     {
-        // Inventory valuation's macro: %date_text%<TAB><ARROW DOWN><F12><F12> - Tab then Arrow Down reach/confirm the Inventory Group dropdown before the run F12.
+        // Reviewer round 4 correction: the macro is
+        // %date_text%<TAB><ARROW DOWN><F12><F12> - two F12s back to back,
+        // not one. Tab/ArrowDown/the first F12 come from TrailingKeys; the
+        // second is ReportParameterKeyPlan.Build's own separate run F12.
         var entry = ReportCatalog.FindByKey(ReportCatalog.InventoryValuationKey)!;
         var begin = new DateTime(2026, 8, 1);
         var end = new DateTime(2026, 8, 31);
@@ -117,6 +120,7 @@ public class ReportParameterKeysTests
             ReportParameterKeyAction.TypeText("08312026"),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.ArrowDown(),
+            ReportParameterKeyAction.F12(),
             ReportParameterKeyAction.F12(),
         };
 
@@ -206,11 +210,14 @@ public class ReportParameterKeysTests
     // --- W-T92 round 3 (still true in round 4): includeF12: false for the "Test date entry" button ---
 
     [Fact]
-    public void IncludeF12FalseOmitsOnlyTheTrailingF12ForEveryReport()
+    public void IncludeF12FalseStripsEveryTrailingF12ForEveryReport()
     {
-        // Covers a plain 2-field report, an as-of report, and Inventory
-        // Valuation's own trailing Tab/ArrowDown (its test-mode plan must
-        // still end with ArrowDown, never F12) in one sweep.
+        // Reviewer round 4 correction: Inventory Valuation's full plan now
+        // ends with TWO F12s, so "omit the last one" is no longer enough -
+        // Test date entry must strip ALL trailing F12s, or it would still
+        // fire a keystroke that runs the report. Verified generically here
+        // (works for both the single-F12 reports and Inventory Valuation's
+        // double) rather than assuming a fixed count.
         foreach (var entry in ReportCatalog.All.Where(e => e.ParameterKind != ReportParameterKind.PaymentsSearch))
         {
             var begin = new DateTime(2026, 1, 1);
@@ -219,21 +226,27 @@ public class ReportParameterKeysTests
             var fullPlan = ReportParameterKeyPlan.Build(entry, begin, end);
             var testPlan = ReportParameterKeyPlan.Build(entry, begin, end, includeF12: false);
 
+            var expectedTestPlan = fullPlan.ToList();
+            while (expectedTestPlan.Count > 0 && expectedTestPlan[^1].Kind == ReportParameterKeyActionKind.F12)
+            {
+                expectedTestPlan.RemoveAt(expectedTestPlan.Count - 1);
+            }
+
             Assert.Equal(ReportParameterKeyActionKind.F12, fullPlan[^1].Kind);
-            Assert.Equal(fullPlan.Count - 1, testPlan.Count);
-            Assert.Equal(fullPlan.Take(fullPlan.Count - 1), testPlan);
+            Assert.Equal(expectedTestPlan, testPlan);
             Assert.DoesNotContain(testPlan, a => a.Kind == ReportParameterKeyActionKind.F12);
         }
     }
 
     [Fact]
-    public void IncludeF12FalseInventoryValuationStillEndsWithArrowDown()
+    public void IncludeF12FalseInventoryValuationEndsWithArrowDownAndNoF12()
     {
         var entry = ReportCatalog.FindByKey(ReportCatalog.InventoryValuationKey)!;
 
         var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 1), new DateTime(2026, 1, 31), includeF12: false);
 
         Assert.Equal(ReportParameterKeyActionKind.ArrowDown, plan[^1].Kind);
+        Assert.DoesNotContain(plan, a => a.Kind == ReportParameterKeyActionKind.F12);
     }
 
     [Fact]
@@ -271,4 +284,37 @@ public class ReportParameterKeysTests
     {
         Assert.Equal(TimeSpan.FromSeconds(30), ReportTimeoutPlan.CalculateTimeout(TimeSpan.Zero));
     }
+
+    // --- ReadbackEvaluator.Decide (reviewer round 4, blocking finding 2) ---
+
+    [Fact]
+    public void DecideIsOkWhenReadbackMatchesExpectedExactly()
+    {
+        Assert.Equal(ReadbackDecision.Ok, ReadbackEvaluator.Decide("09212026", "09212026"));
+    }
+
+    [Fact]
+    public void DecideIsUnavailableWhenReadbackIsNull()
+    {
+        // Null means "could not read this field at all" (ValuePattern AND
+        // LegacyIAccessible both failed) - NOT "the field is wrong". This is
+        // the exact case that used to abort every report, every run.
+        Assert.Equal(ReadbackDecision.Unavailable, ReadbackEvaluator.Decide(null, "09212026"));
+    }
+
+    [Fact]
+    public void DecideIsMismatchWhenReadbackIsNonNullAndDifferent()
+    {
+        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide("01012020", "09212026"));
+    }
+
+    [Fact]
+    public void DecideIsMismatchNotUnavailableForAnEmptyStringReadback()
+    {
+        // An empty string IS a real (if unhelpful) readback, distinct from
+        // null/unreadable - it should still count as a mismatch, not be
+        // treated as "couldn't read it".
+        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide(string.Empty, "09212026"));
+    }
+
 }

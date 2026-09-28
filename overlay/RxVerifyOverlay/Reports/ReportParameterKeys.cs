@@ -105,7 +105,7 @@ public static class ReportParameterKeyPlan
             case ReportParameterKind.AsOfDate:
                 AddLeadingTabs(actions, entry);
                 actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(end)));
-                AddTrailingKeys(actions, entry);
+                AddTrailingKeys(actions, entry, includeF12);
                 if (includeF12) actions.Add(ReportParameterKeyAction.F12());
                 break;
 
@@ -117,7 +117,7 @@ public static class ReportParameterKeyPlan
                     actions.Add(ReportParameterKeyAction.Tab());
                 }
                 actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(end)));
-                AddTrailingKeys(actions, entry);
+                AddTrailingKeys(actions, entry, includeF12);
                 if (includeF12) actions.Add(ReportParameterKeyAction.F12());
                 break;
 
@@ -143,18 +143,34 @@ public static class ReportParameterKeyPlan
         }
     }
 
-    /// <summary>Only Inventory Valuation has any today (Tab, Arrow Down — see its ReportCatalog entry comment); every other report's TrailingKeys is null/empty and this is a no-op.</summary>
-    private static void AddTrailingKeys(List<ReportParameterKeyAction> actions, ReportCatalogEntry entry)
+    /// <summary>
+    /// Only Inventory Valuation has any today (Tab, Arrow Down, F12 — see
+    /// its ReportCatalog entry comment, matching its macro's own trailing
+    /// &lt;TAB&gt;&lt;ARROW DOWN&gt;&lt;F12&gt; before the run F12); every
+    /// other report's TrailingKeys is null/empty and this is a no-op.
+    ///
+    /// Round 4 reviewer fix (blocking finding 3): the macro's OWN trailing
+    /// F12 (Inventory Valuation: %date_text%&lt;TAB&gt;&lt;ARROW DOWN&gt;&lt;F12&gt;&lt;F12&gt;)
+    /// is now part of TrailingKeys itself, not just the separate "run" F12
+    /// Build() appends afterward - so <paramref name="includeF12"/> has to
+    /// gate BOTH: "Test date entry" (includeF12: false) must strip every
+    /// trailing F12, not just the very last one, or it would still fire a
+    /// keystroke that runs the report.
+    /// </summary>
+    private static void AddTrailingKeys(List<ReportParameterKeyAction> actions, ReportCatalogEntry entry, bool includeF12)
     {
         if (entry.TrailingKeys is null) return;
 
         foreach (var kind in entry.TrailingKeys)
         {
+            if (kind == ReportParameterKeyActionKind.F12 && !includeF12) continue;
+
             actions.Add(kind switch
             {
                 ReportParameterKeyActionKind.Tab => ReportParameterKeyAction.Tab(),
                 ReportParameterKeyActionKind.ArrowDown => ReportParameterKeyAction.ArrowDown(),
-                _ => throw new ArgumentOutOfRangeException(nameof(entry), kind, "ReportCatalogEntry.TrailingKeys may only contain Tab or ArrowDown.")
+                ReportParameterKeyActionKind.F12 => ReportParameterKeyAction.F12(),
+                _ => throw new ArgumentOutOfRangeException(nameof(entry), kind, "ReportCatalogEntry.TrailingKeys may only contain Tab, ArrowDown, or F12.")
             });
         }
     }
@@ -181,5 +197,37 @@ public static class ReportTimeoutPlan
 
         var ceiling = TimeSpan.FromTicks(macroRunTime.Ticks * 4);
         return ceiling > MinimumTimeout ? ceiling : MinimumTimeout;
+    }
+}
+
+/// <summary>
+/// Round 4 reviewer fix (blocking finding 2): PioneerReportDriver.
+/// TryReadFocusedFieldValue returning null used to be treated as a
+/// mismatch (a wrong value), triggering the one clipboard-paste retry and
+/// then aborting the whole report without F12 if the retry ALSO read back
+/// null - which is exactly what happens on every run against any field
+/// that doesn't expose ValuePattern or LegacyIAccessible at all (readback
+/// genuinely impossible, not wrong). This distinguishes the three real
+/// outcomes as pure data so the decision itself is unit-testable without
+/// any FlaUI/UIA dependency: Ok (matches), Unavailable (readback is null -
+/// the macro-faithful keys were already sent; nothing to retry against, so
+/// the driver proceeds without retrying or aborting), Mismatch (readback
+/// is non-null and genuinely different - the one clipboard-paste retry
+/// applies here, and a second Mismatch aborts without F12).
+/// </summary>
+public enum ReadbackDecision
+{
+    Ok,
+    Unavailable,
+    Mismatch
+}
+
+/// <summary>Pure wrapper around ReadbackDecision - see that enum's own doc.</summary>
+public static class ReadbackEvaluator
+{
+    public static ReadbackDecision Decide(string? readback, string expected)
+    {
+        if (readback is null) return ReadbackDecision.Unavailable;
+        return string.Equals(readback, expected, StringComparison.Ordinal) ? ReadbackDecision.Ok : ReadbackDecision.Mismatch;
     }
 }

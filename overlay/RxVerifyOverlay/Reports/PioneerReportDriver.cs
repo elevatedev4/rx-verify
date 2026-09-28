@@ -90,7 +90,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 1): "wait (&lt;=10 s) for a NEW Pioneer-owned top-level window whose title contains 'Report Parameters'" - the explicit locate step RunFinancialReport runs right after row selection, before any date keystroke goes out. Deliberately longer than ReportParametersConfirmationTimeout (that one is polled three times, once per row-selection strategy - this one only needs to run once, after row selection has already succeeded).</summary>
     private static readonly TimeSpan ReportParametersWindowLocateTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-action pause ReplayReportParameterKeyPlan uses after every Tab/TypeText/ArrowDown/F12 step (TypeText's own per-character settle is UnicodeCharSettleDelay, applied inside TypeUnicodeText).</summary>
+    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-action pause ReplayReportParameterKeyPlan uses after every Tab/TypeText/ArrowDown/F12 step (TypeText's own per-character settle is NativeInput.CharSettleDelay, applied inside NativeInput.TypeUnicodeText).</summary>
     private static readonly TimeSpan KeyEntrySettleDelay = TimeSpan.FromMilliseconds(100);
 
     /// <summary>Round 3 (GOAL brief fix 2b): grid keyboard strategy's own inner wait after Enter, before falling back to a direct double-click.</summary>
@@ -202,87 +202,15 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     private const int VK_NUMLOCK = 0x90;
 
-    // ------------------------------------------------------------------
-    // Round 4 (W-T92 round 4, GOAL brief step 2): raw SendInput/
-    // KEYEVENTF_UNICODE P/Invoke for TypeUnicodeText below — see that
-    // method's own doc for why this bypasses FlaUI's Keyboard entirely
-    // for date-digit entry.
-    // ------------------------------------------------------------------
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KEYBDINPUT
-    {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    private struct InputUnion
-    {
-        [FieldOffset(0)]
-        public KEYBDINPUT ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct INPUT
-    {
-        public uint type;
-        public InputUnion u;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-    private const uint INPUT_KEYBOARD = 1;
-    private const uint KEYEVENTF_UNICODE = 0x0004;
-    private const uint KEYEVENTF_KEYUP = 0x0002;
-
-    /// <summary>Between-character settle for TypeUnicodeText — GOAL brief step 2: "Keep ~50-100 ms settle between keys."</summary>
-    private static readonly TimeSpan UnicodeCharSettleDelay = TimeSpan.FromMilliseconds(75);
-
-    /// <summary>
-    /// Round 4 (W-T92 round 4, GOAL brief step 2): types <paramref name="text"/>
-    /// into whatever currently has keyboard focus, one character at a time,
-    /// via raw SendInput with KEYEVENTF_UNICODE (WM_CHAR-style — wVk=0,
-    /// wScan=the UTF-16 code unit, no virtual-key or scan-code lookup at
-    /// all). Deliberately NOT FlaUI's Keyboard.Type(VirtualKeyShort...) —
-    /// that overload is exactly what round 5 blamed for the "down arrow
-    /// pushed repeatedly" bug (a digit's virtual-key code getting
-    /// reinterpreted as a numpad key when NumLock is off). FlaUI's own
-    /// Keyboard.Type(string) could not be confirmed from this Mac to be
-    /// unicode-only all the way down (its DLL does carry KEYEVENTF_UNICODE
-    /// plumbing, but also VkKeyScan/scan-code paths that a digit character
-    /// could still hit) — sending SendInput ourselves removes that
-    /// uncertainty entirely for the one place it would be catastrophic to
-    /// get wrong (typing a date that then gets F12'd against live
-    /// PioneerRx). Every character gets its own key-down + key-up pair and
-    /// its own UnicodeCharSettleDelay, same "slow and deliberate" spirit
-    /// as the rest of this class's date entry.
-    /// </summary>
-    private static void TypeUnicodeText(string text)
-    {
-        foreach (var ch in text)
-        {
-            var down = new INPUT
-            {
-                type = INPUT_KEYBOARD,
-                u = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = KEYEVENTF_UNICODE, time = 0, dwExtraInfo = IntPtr.Zero } }
-            };
-            var up = new INPUT
-            {
-                type = INPUT_KEYBOARD,
-                u = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time = 0, dwExtraInfo = IntPtr.Zero } }
-            };
-
-            SendInput(1, new[] { down }, Marshal.SizeOf<INPUT>());
-            SendInput(1, new[] { up }, Marshal.SizeOf<INPUT>());
-
-            Thread.Sleep(UnicodeCharSettleDelay);
-        }
-    }
+    // Round 4 reviewer fix (blocking finding 1): the raw SendInput/
+    // KEYEVENTF_UNICODE P/Invoke for Unicode date-text entry now lives in
+    // Reports/NativeInput.cs (NativeInput.TypeUnicodeText) instead of here —
+    // extracted so its INPUT/KEYBDINPUT/MOUSEINPUT/HARDWAREINPUT struct
+    // layout (the union originally declared only KEYBDINPUT, so
+    // Marshal.SizeOf<INPUT>() was 32 bytes instead of the real Win32
+    // struct's 40 on x64/28 on x86 — SendInput silently sent nothing
+    // against that wrong cbSize) can be unit-tested without any FlaUI/WPF
+    // dependency. See that file's own doc for the full story.
 
     /// <summary>Plain Win32 POINT (screen coordinates) for WindowFromPoint - review fix (blocker 2), see TryActivateRibbonElement/IsPointOwnedByPioneer.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -2262,8 +2190,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// report's own LeadingTabs first (from ReportCatalogEntry, taken
     /// verbatim from Will's own working Macro Express recordings -
     /// Reports/recipes/README-macro-strings.txt), then types the date text
-    /// itself via TypeUnicodeText (raw SendInput/KEYEVENTF_UNICODE, no
-    /// VK/scan-code mapping ever involved - see that method's own doc for
+    /// itself via NativeInput.TypeUnicodeText (raw SendInput/KEYEVENTF_UNICODE,
+    /// no VK/scan-code mapping ever involved - see that method's own doc for
     /// why). After each date, the focused field's value is read back via
     /// ValuePattern; a mismatch gets exactly ONE retry using the OLD
     /// clipboard-paste path (Ctrl+A, Ctrl+V - ClipboardHelper.TrySetText,
@@ -2335,48 +2263,88 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
                         var expected = action.Text ?? string.Empty;
                         log($"  text {expected}");
-                        TypeUnicodeText(expected);
+
+                        // Round 4 reviewer fix (blocking finding 1): SendInput's
+                        // return value is now checked (NativeInput.TypeUnicodeText
+                        // returns false on any short send - see that method's
+                        // doc for the cbSize bug this guards against). A failed
+                        // send is logged distinctly from a readback mismatch, but
+                        // still falls through to the SAME readback+retry logic
+                        // below - if nothing was actually typed, the readback
+                        // will legitimately show Unavailable/Mismatch and the
+                        // existing decision handles it honestly rather than this
+                        // branch guessing.
+                        if (!NativeInput.TypeUnicodeText(expected, sendFailure => log($"  {fieldLabel}: {sendFailure}")))
+                        {
+                            log($"  {fieldLabel}: TypeUnicodeText reported a failed send - checking the readback anyway.");
+                        }
                         Thread.Sleep(KeyEntrySettleDelay);
 
                         var readBack = TryReadFocusedFieldValue();
-                        if (string.Equals(readBack, expected, StringComparison.Ordinal))
+                        var decision = ReadbackEvaluator.Decide(readBack, expected);
+
+                        if (decision == ReadbackDecision.Ok)
                         {
                             log($"  {fieldLabel} = {expected} ✓ (focused: {DescribeControl(SafeFocusedElement())})");
+                            break;
+                        }
+
+                        if (decision == ReadbackDecision.Unavailable)
+                        {
+                            // Round 4 reviewer fix (blocking finding 2): Pioneer's
+                            // date fields don't reliably expose ValuePattern (this
+                            // file already needed a LegacyIAccessible fallback for
+                            // row-text matching - see TryGetLegacyIAccessibleNameOrValue).
+                            // TryReadFocusedFieldValue now tries that fallback too,
+                            // so "Unavailable" here means BOTH failed to read
+                            // anything at all - not that the value is wrong. The
+                            // macro-faithful keys were already sent; there is no
+                            // signal here to retry against, and treating an
+                            // unreadable field as a mismatch would abort (and skip
+                            // F12) on EVERY report, every run, which is worse than
+                            // just proceeding.
+                            log($"  {fieldLabel}: readback unavailable (focused: {DescribeControl(SafeFocusedElement())}) - continuing without a retry.");
+                            break;
+                        }
+
+                        // ReadbackDecision.Mismatch - a real, different value came back.
+                        log($"  {fieldLabel} read back as '{readBack}', expected '{expected}' - retrying once with clipboard paste (Ctrl+A, Ctrl+V).");
+
+                        if (!EnsureWindowForeground(parametersWindow, log, "Report Parameters window"))
+                        {
+                            log("  aborting date entry - 'Report Parameters' window lost focus during retry.");
+                            return false;
+                        }
+
+                        if (!ClipboardHelper.TrySetText(expected))
+                        {
+                            log($"  {fieldLabel}: could not set the clipboard for the paste retry - aborting rather than run the report against a wrong date.");
+                            return false;
+                        }
+
+                        log("  key Ctrl+A");
+                        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
+                        Thread.Sleep(KeyEntrySettleDelay);
+
+                        log("  key Ctrl+V");
+                        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
+                        Thread.Sleep(KeyEntrySettleDelay);
+
+                        var retryReadBack = TryReadFocusedFieldValue();
+                        var retryDecision = ReadbackEvaluator.Decide(retryReadBack, expected);
+
+                        if (retryDecision == ReadbackDecision.Ok)
+                        {
+                            log($"  {fieldLabel} = {expected} ✓ (after paste retry, focused: {DescribeControl(SafeFocusedElement())})");
+                        }
+                        else if (retryDecision == ReadbackDecision.Unavailable)
+                        {
+                            log($"  {fieldLabel}: readback still unavailable after the paste retry (focused: {DescribeControl(SafeFocusedElement())}) - continuing without aborting.");
                         }
                         else
                         {
-                            log($"  {fieldLabel} read back as '{readBack ?? "(unreadable)"}', expected '{expected}' - retrying once with clipboard paste (Ctrl+A, Ctrl+V).");
-
-                            if (!EnsureWindowForeground(parametersWindow, log, "Report Parameters window"))
-                            {
-                                log("  aborting date entry - 'Report Parameters' window lost focus during retry.");
-                                return false;
-                            }
-
-                            if (!ClipboardHelper.TrySetText(expected))
-                            {
-                                log($"  {fieldLabel}: could not set the clipboard for the paste retry - aborting rather than run the report against a wrong date.");
-                                return false;
-                            }
-
-                            log("  key Ctrl+A");
-                            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
-                            Thread.Sleep(KeyEntrySettleDelay);
-
-                            log("  key Ctrl+V");
-                            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
-                            Thread.Sleep(KeyEntrySettleDelay);
-
-                            var retryReadBack = TryReadFocusedFieldValue();
-                            if (string.Equals(retryReadBack, expected, StringComparison.Ordinal))
-                            {
-                                log($"  {fieldLabel} = {expected} ✓ (after paste retry, focused: {DescribeControl(SafeFocusedElement())})");
-                            }
-                            else
-                            {
-                                log($"  {fieldLabel} still reads back as '{retryReadBack ?? "(unreadable)"}' after the retry - aborting rather than run the report against a wrong date.");
-                                return false;
-                            }
+                            log($"  {fieldLabel} still reads back as '{retryReadBack}' after the retry - aborting rather than run the report against a wrong date.");
+                            return false;
                         }
                         break;
                     }
@@ -2423,11 +2391,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     }
 
     /// <summary>Reads back whatever currently has keyboard focus via ValuePattern - the actual verification the GOAL brief asks for ("read it back through UI Automation ValuePattern"). Null (not empty string) means unreadable, distinct from a real empty value.</summary>
+    /// <summary>
+    /// Round 4 reviewer fix (blocking finding 2): ValuePattern-only left
+    /// EVERY readback null on a field that doesn't expose it - this file
+    /// already needed the LegacyIAccessible fallback for row-text matching
+    /// (TryGetLegacyIAccessibleNameOrValue, used by TrySelectAndOpenReportRow)
+    /// because Pioneer's own controls don't reliably expose ValuePattern, so
+    /// the date fields in "Report Parameters" are entirely plausible
+    /// candidates for the same gap. Falls back to it here too before giving
+    /// up (returning null, which ReadbackEvaluator.Decide treats as
+    /// Unavailable, not Mismatch - see ReplayReportParameterKeyPlan's
+    /// TypeText case).
+    /// </summary>
     private string? TryReadFocusedFieldValue()
     {
         var focused = SafeFocusedElement();
         if (focused is null) return null;
-        return TryGetValuePatternValue(focused, out var value) ? value : null;
+        if (TryGetValuePatternValue(focused, out var value)) return value;
+        return TryGetLegacyIAccessibleNameOrValue(focused, out var legacyText) ? legacyText : null;
     }
 
     private bool SetPaymentsDateRange(ReportRunItem item, Action<string> log)
