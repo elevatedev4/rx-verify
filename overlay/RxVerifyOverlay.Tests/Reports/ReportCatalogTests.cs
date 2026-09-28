@@ -109,4 +109,43 @@ public class ReportCatalogTests
     {
         Assert.Null(ReportCatalog.FindByKey("does-not-exist"));
     }
+
+    // --- Round 4 (W-T92 round 4): LeadingTabs/TrailingKeys, one value per report's own macro line ---
+
+    [Theory]
+    [InlineData(ReportCatalog.ArAgedTrialBalanceKey, 2)]
+    [InlineData(ReportCatalog.ThirdPartyAgedTrialBalanceKey, 0)]
+    [InlineData(ReportCatalog.ThirdPartyControlBalanceKey, 0)]
+    [InlineData(ReportCatalog.InventoryValuationKey, 0)]
+    [InlineData(ReportCatalog.InventoryControlBalanceKey, 0)]
+    [InlineData(ReportCatalog.SalesSummaryKey, 0)]
+    public void EveryEnabledFinancialReportHasALeadingTabsValueFromItsOwnMacroLine(string key, int expectedLeadingTabs)
+    {
+        var entry = ReportCatalog.FindByKey(key);
+        Assert.NotNull(entry);
+        Assert.Equal(expectedLeadingTabs, entry!.LeadingTabs);
+    }
+
+    [Fact]
+    public void OnlyArAgedTrialBalanceHasNonZeroLeadingTabs()
+    {
+        foreach (var entry in ReportCatalog.All.Where(e => e.Key != ReportCatalog.ArAgedTrialBalanceKey))
+        {
+            Assert.Equal(0, entry.LeadingTabs);
+        }
+    }
+
+    [Fact]
+    public void OnlyInventoryValuationHasTrailingKeys()
+    {
+        var inventoryValuation = ReportCatalog.FindByKey(ReportCatalog.InventoryValuationKey)!;
+        Assert.Equal(
+            new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown },
+            inventoryValuation.TrailingKeys);
+
+        foreach (var entry in ReportCatalog.All.Where(e => e.Key != ReportCatalog.InventoryValuationKey))
+        {
+            Assert.Null(entry.TrailingKeys);
+        }
+    }
 }

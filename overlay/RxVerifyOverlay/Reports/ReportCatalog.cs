@@ -70,6 +70,28 @@ public enum ReportOutputFormat
 /// the macros didn't record a run time for — ReportTimeoutPlan's 30s
 /// floor covers that case.
 /// </param>
+/// <param name="LeadingTabs">
+/// Round 4 fix (W-T92 round 4 — Will's report on build 67a1566: "it's
+/// making it to the report parameters screen, then it does something,
+/// then it starts scrolling through the months in the initial date
+/// window ... You need to use tab to get between fields"). How many Tab
+/// keys ReportParameterKeyPlan sends BEFORE typing the first date — the
+/// popup's initial focus is NOT reliably the Begin/Date field for every
+/// report (round 3 assumed it always was, which is exactly what put the
+/// cursor somewhere else and made typed keystrokes "scroll through
+/// months"). Value is each report's own macro line
+/// (recipes/README-macro-strings.txt) counted verbatim; 0 (the default)
+/// for every report whose macro types straight into "Set up report"
+/// with no leading &lt;TAB&gt;.
+/// </param>
+/// <param name="TrailingKeys">
+/// Round 4 fix. Extra keys ReportParameterKeyPlan sends AFTER the last
+/// date is typed and BEFORE F12 — null/empty (the default) for every
+/// report whose macro goes straight to &lt;F12&gt;. Only Inventory
+/// Valuation's macro has any (Tab then Arrow Down, to reach and confirm
+/// its "Inventory Group" dropdown) — see that entry's own comment below.
+/// Restricted to Tab/ArrowDown; never SelectAll/TypeText/PasteText/F12.
+/// </param>
 public sealed record ReportCatalogEntry(
     string Key,
     string DisplayName,
@@ -80,7 +102,9 @@ public sealed record ReportCatalogEntry(
     bool Enabled,
     string? PioneerRowTextAlias = null,
     int TabsBetweenDates = 2,
-    TimeSpan MacroRunTime = default);
+    TimeSpan MacroRunTime = default,
+    int LeadingTabs = 0,
+    IReadOnlyList<ReportParameterKeyActionKind>? TrailingKeys = null);
 
 /// <summary>
 /// The fixed phase-1 report list (GOAL brief "WHAT PIONEER LOOKS LIKE"
@@ -112,9 +136,10 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Customer A-R Control Balance",
             Enabled: true,
-            // Macro "Customer A/R Control Balance": <TAB><TAB>%start_date_text%<TAB><TAB>%date_text%<F12> — 2 tabs between dates (the default), 6s report_run_time.
+            // Macro "Customer A/R Control Balance": <TAB><TAB>%start_date_text%<TAB><TAB>%date_text%<F12> — 2 leading tabs (popup does NOT open with Begin focused), 2 tabs between dates, 6s report_run_time.
             TabsBetweenDates: 2,
-            MacroRunTime: TimeSpan.FromSeconds(6)),
+            MacroRunTime: TimeSpan.FromSeconds(6),
+            LeadingTabs: 2),
 
         new(
             Key: ThirdPartyAgedTrialBalanceKey,
@@ -133,7 +158,7 @@ public static class ReportCatalog
             SaveName: "Third Party Aged Trial Balance",
             Enabled: true,
             PioneerRowTextAlias: "Third Party Aged Trial Balance As of Date",
-            // Macro "Third Party Aged Trial Balance": %date_text%<F12> — 20s report_run_time.
+            // Macro "Third Party Aged Trial Balance": %date_text%<F12> — no leading tabs, 20s report_run_time.
             MacroRunTime: TimeSpan.FromSeconds(20)),
 
         new(
@@ -144,7 +169,7 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Third Party Control Balance Summary",
             Enabled: true,
-            // Macro "Third Party Control Balance": %start_date_text%<TAB>%date_text%<F12> — single tab, 20s report_run_time.
+            // Macro "Third Party Control Balance": %start_date_text%<TAB>%date_text%<F12> — no leading tabs, single tab between dates, 20s report_run_time.
             TabsBetweenDates: 1,
             MacroRunTime: TimeSpan.FromSeconds(20)),
 
@@ -156,8 +181,9 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Inventory Valuation",
             Enabled: true,
-            // Macro "Inventory valuation": %date_text%<TAB><ARROW DOWN><F12><F12> — 15s report_run_time. The dropdown/second F12 are left at their all-groups default per this file's own header doc.
-            MacroRunTime: TimeSpan.FromSeconds(15)),
+            // Macro "Inventory valuation": %date_text%<TAB><ARROW DOWN><F12><F12> — no leading tabs; after the date, Tab then Arrow Down reaches/confirms the Inventory Group dropdown (left at its all-groups default per this file's own header doc), then F12 runs it (the macro's own trailing double-F12 is treated as one run key here — see ReportParameterKeys.cs). 15s report_run_time.
+            MacroRunTime: TimeSpan.FromSeconds(15),
+            TrailingKeys: new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown }),
 
         new(
             Key: InventoryControlBalanceKey,
@@ -167,7 +193,7 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Inventory Control Balance Summary",
             Enabled: true,
-            // Macro "Inventory Control Balance": %start_date_text%<TAB>%date_text%<F12> — single tab, 20s report_run_time.
+            // Macro "Inventory Control Balance": %start_date_text%<TAB>%date_text%<F12> — no leading tabs, single tab between dates, 20s report_run_time.
             TabsBetweenDates: 1,
             MacroRunTime: TimeSpan.FromSeconds(20)),
 
@@ -179,7 +205,7 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Sales Summary",
             Enabled: true,
-            // Macro "Sales summary": %start_date_text%<TAB>%date_text%<F12> — single tab, 6s report_run_time.
+            // Macro "Sales summary": %start_date_text%<TAB>%date_text%<F12> — no leading tabs, single tab between dates, 6s report_run_time.
             TabsBetweenDates: 1,
             MacroRunTime: TimeSpan.FromSeconds(6)),
 

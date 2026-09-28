@@ -90,7 +90,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 1): "wait (&lt;=10 s) for a NEW Pioneer-owned top-level window whose title contains 'Report Parameters'" - the explicit locate step RunFinancialReport runs right after row selection, before any date keystroke goes out. Deliberately longer than ReportParametersConfirmationTimeout (that one is polled three times, once per row-selection strategy - this one only needs to run once, after row selection has already succeeded).</summary>
     private static readonly TimeSpan ReportParametersWindowLocateTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-keystroke pause ReplayReportParameterKeyPlan uses after every SelectAll/PasteText/Tab/F12 step.</summary>
+    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-action pause ReplayReportParameterKeyPlan uses after every Tab/TypeText/ArrowDown/F12 step (TypeText's own per-character settle is UnicodeCharSettleDelay, applied inside TypeUnicodeText).</summary>
     private static readonly TimeSpan KeyEntrySettleDelay = TimeSpan.FromMilliseconds(100);
 
     /// <summary>Round 3 (GOAL brief fix 2b): grid keyboard strategy's own inner wait after Enter, before falling back to a direct double-click.</summary>
@@ -202,11 +202,87 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     private const int VK_NUMLOCK = 0x90;
 
-    /// <summary>Round 7 (review fix, blocking): GetAncestor(hwnd, GA_ROOT) walks UP from a control's own HWND to its owning top-level window - the native-handle half of IsWithinWindow's descendant check, for WinForms controls (PioneerRx's own — see MainWindowSelector's "WindowsForms10.*" class check) that each carry a distinct HWND, unlike WPF's single-HWND-per-window model.</summary>
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    // ------------------------------------------------------------------
+    // Round 4 (W-T92 round 4, GOAL brief step 2): raw SendInput/
+    // KEYEVENTF_UNICODE P/Invoke for TypeUnicodeText below — see that
+    // method's own doc for why this bypasses FlaUI's Keyboard entirely
+    // for date-digit entry.
+    // ------------------------------------------------------------------
 
-    private const uint GA_ROOT = 2;
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion
+    {
+        [FieldOffset(0)]
+        public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        public uint type;
+        public InputUnion u;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    private const uint INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+
+    /// <summary>Between-character settle for TypeUnicodeText — GOAL brief step 2: "Keep ~50-100 ms settle between keys."</summary>
+    private static readonly TimeSpan UnicodeCharSettleDelay = TimeSpan.FromMilliseconds(75);
+
+    /// <summary>
+    /// Round 4 (W-T92 round 4, GOAL brief step 2): types <paramref name="text"/>
+    /// into whatever currently has keyboard focus, one character at a time,
+    /// via raw SendInput with KEYEVENTF_UNICODE (WM_CHAR-style — wVk=0,
+    /// wScan=the UTF-16 code unit, no virtual-key or scan-code lookup at
+    /// all). Deliberately NOT FlaUI's Keyboard.Type(VirtualKeyShort...) —
+    /// that overload is exactly what round 5 blamed for the "down arrow
+    /// pushed repeatedly" bug (a digit's virtual-key code getting
+    /// reinterpreted as a numpad key when NumLock is off). FlaUI's own
+    /// Keyboard.Type(string) could not be confirmed from this Mac to be
+    /// unicode-only all the way down (its DLL does carry KEYEVENTF_UNICODE
+    /// plumbing, but also VkKeyScan/scan-code paths that a digit character
+    /// could still hit) — sending SendInput ourselves removes that
+    /// uncertainty entirely for the one place it would be catastrophic to
+    /// get wrong (typing a date that then gets F12'd against live
+    /// PioneerRx). Every character gets its own key-down + key-up pair and
+    /// its own UnicodeCharSettleDelay, same "slow and deliberate" spirit
+    /// as the rest of this class's date entry.
+    /// </summary>
+    private static void TypeUnicodeText(string text)
+    {
+        foreach (var ch in text)
+        {
+            var down = new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                u = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = KEYEVENTF_UNICODE, time = 0, dwExtraInfo = IntPtr.Zero } }
+            };
+            var up = new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                u = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time = 0, dwExtraInfo = IntPtr.Zero } }
+            };
+
+            SendInput(1, new[] { down }, Marshal.SizeOf<INPUT>());
+            SendInput(1, new[] { up }, Marshal.SizeOf<INPUT>());
+
+            Thread.Sleep(UnicodeCharSettleDelay);
+        }
+    }
 
     /// <summary>Plain Win32 POINT (screen coordinates) for WindowFromPoint - review fix (blocker 2), see TryActivateRibbonElement/IsPointOwnedByPioneer.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -539,7 +615,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// SetReportParameters/ReplayReportParameterKeyPlan against whatever
     /// "Report Parameters" window is ALREADY open in Pioneer right now -
     /// no ribbon navigation, no report-row selection, and (per the brief)
-    /// never F12 - so Will can verify the paste+Tab+read-back behavior in
+    /// never F12 - so Will can verify the Tab+type+read-back behavior in
     /// about 5 seconds and paste the resulting log, without ever actually
     /// running or saving a report. FindMainWindow still has to run first
     /// (it's what sets _pioneerProcessId, which
@@ -2142,17 +2218,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// Round 4 rewrite (W-T92 follow-up — owner's real "Report Parameters"
-    /// popup test, verbatim: "the app was just cycling through dates in a
-    /// weird way. It needs to select all on each date field and paste the
-    /// proper date into it in the format MMDDYYYY, then F12 to run the
-    /// report"). The old version searched _mainWindow for Edit controls
-    /// and called ValuePattern.SetValue on Pioneer's masked date pickers —
-    /// that is exactly what was "cycling through dates". This is now
-    /// purely keyboard, macro-style, replayed against the SPECIFIC
-    /// "Report Parameters" window <paramref name="parametersWindow"/> —
-    /// see ReplayReportParameterKeyPlan and the pure
-    /// Reports/ReportParameterKeys.cs plan builder it replays.
+    /// Round 4 rewrite (W-T92 round 4 — Will's build-67a1566 report,
+    /// verbatim: "it's making it to the report parameters screen, then it
+    /// does something, then it starts scrolling through the months in the
+    /// initial date window, probably pushing the down arrow. You need to
+    /// use tab to get between fields"). Purely keyboard, macro-style,
+    /// replayed against the SPECIFIC "Report Parameters" window
+    /// <paramref name="parametersWindow"/> — see ReplayReportParameterKeyPlan
+    /// and the pure Reports/ReportParameterKeys.cs plan builder it replays.
     /// </summary>
     private bool SetReportParameters(ReportRunItem item, AutomationElement parametersWindow, Action<string> log)
     {
@@ -2171,86 +2244,53 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>
     /// Sends one ReportParameterKeyPlan (Reports/ReportParameterKeys.cs)
     /// keystroke-for-keystroke against <paramref name="parametersWindow"/>
-    /// — never a UIA field lookup, matching the owner's own description of
-    /// how this popup actually behaves (masked fields; the begin field is
-    /// already focused/highlighted the moment the popup opens). Same
-    /// per-key foreground-check convention as TryKeyboardKeyTipsNavigate:
+    /// — never a UIA field lookup, never a click. Same per-key
+    /// foreground-check convention as TryKeyboardKeyTipsNavigate:
     /// re-verify foreground == THIS SPECIFIC window (EnsureWindowForeground,
     /// not just "owned by Pioneer's process") immediately before every key,
     /// aborting rather than risk a keystroke landing on the wrong window. A
-    /// small settle (KeyEntrySettleDelay) follows every key.
+    /// small settle (KeyEntrySettleDelay) follows every key/action.
     ///
-    /// Round 5 fix (W-T92 follow-up — the owner's next round of testing:
-    /// "It seems that the down arrow is being pushed repeatedly, which
-    /// lowers the month on the first item. Instead, you should copy/paste
-    /// as I mentioned before and use tab to navigate."). Round 4's plain
-    /// Keyboard.Type of digit characters was apparently landing as
-    /// numpad/scan-code input in Pioneer's masked date field rather than
-    /// real top-row digits (numpad 2 == Down when NumLock is off) — so
-    /// PasteText steps set the Windows clipboard (ClipboardHelper.TrySetText
-    /// — retrying, STA-marshaled; see that class's doc) and send Ctrl+V
-    /// instead of typing the digits one at a time. Belt-and-braces: before
-    /// the very first key of the plan, this just LOGS whether NumLock is
-    /// off (GetKeyState(VK_NUMLOCK)) so the next screenshot round can
-    /// confirm the theory — never toggled, since silently flipping a
-    /// pharmacist's NumLock state would be its own surprise.
+    /// Round 4 rewrite (W-T92 round 4 — see SetReportParameters' doc for
+    /// Will's exact report). Rounds 3-5 assumed the popup's Begin/Date
+    /// field is already focused the instant it opens and tried to force
+    /// that assumption true with a click - that click (on whatever
+    /// happened to have OS focus) is exactly what could land on a
+    /// calendar-picker button or some other control and start "scrolling
+    /// through months". This version never clicks and never calls
+    /// SelectAll/Ctrl+V on the default path at all - it just sends each
+    /// report's own LeadingTabs first (from ReportCatalogEntry, taken
+    /// verbatim from Will's own working Macro Express recordings -
+    /// Reports/recipes/README-macro-strings.txt), then types the date text
+    /// itself via TypeUnicodeText (raw SendInput/KEYEVENTF_UNICODE, no
+    /// VK/scan-code mapping ever involved - see that method's own doc for
+    /// why). After each date, the focused field's value is read back via
+    /// ValuePattern; a mismatch gets exactly ONE retry using the OLD
+    /// clipboard-paste path (Ctrl+A, Ctrl+V - ClipboardHelper.TrySetText,
+    /// retrying/STA-marshaled) on the SAME field, and a second mismatch
+    /// aborts the whole plan without ever sending F12 - never run a report
+    /// against a wrong date. Belt-and-braces: before the very first key of
+    /// the plan, this still just LOGS whether NumLock is off
+    /// (GetKeyState(VK_NUMLOCK)) - never toggled, since silently flipping a
+    /// pharmacist's NumLock state would be its own surprise, and Unicode
+    /// SendInput doesn't depend on it anyway.
     /// </summary>
     private bool ReplayReportParameterKeyPlan(IReadOnlyList<ReportParameterKeyAction> plan, AutomationElement parametersWindow, Action<string> log)
     {
         if (plan.Count == 0) return true;
 
-        var pasteCount = 0;
+        var typeCount = 0;
         foreach (var a in plan)
         {
-            if (a.Kind == ReportParameterKeyActionKind.PasteText) pasteCount++;
+            if (a.Kind == ReportParameterKeyActionKind.TypeText) typeCount++;
         }
-        var pasteSeen = 0;
-        var firstFieldLabel = pasteCount <= 1 ? "Date field" : "Begin field";
+        var typeSeen = 0;
 
         var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
         log($"  NumLock is {(numLockOn ? "ON" : "OFF")} before date entry.");
 
-        // Round 7 (review fix, blocking): the original version clicked
-        // WHATEVER had OS focus unconditionally. On the "Test date entry"
-        // path Will may have already tabbed/clicked around the popup
-        // himself, so focus could just as easily sit on OK/Print/Run/
-        // Cancel or a checkbox - clicking THAT invokes it against live
-        // PioneerRx, exactly what "Test date entry" promises never to do.
-        // Now only clicks when the focused element is an Edit control AND
-        // actually lives inside THIS parametersWindow (never some other
-        // Pioneer window) - anything else (a button, checkbox, combo,
-        // menu item, or an Edit field that belongs to a different window
-        // entirely) is left alone and logged instead, falling through to
-        // the window's own default focus exactly like a lookup failure
-        // already did.
         var initialFocused = SafeFocusedElement();
-        if (initialFocused is not null)
-        {
-            log($"  focused control before date entry: {DescribeControl(initialFocused)}");
-
-            ControlType? focusedControlType = null;
-            try { focusedControlType = initialFocused.ControlType; } catch { /* leave null - treated as "not Edit" below */ }
-
-            if (focusedControlType == ControlType.Edit && IsWithinWindow(initialFocused, parametersWindow))
-            {
-                if (TryClickElementCenter(initialFocused, log, firstFieldLabel))
-                {
-                    log($"  clicked to force focus - now: {DescribeControl(SafeFocusedElement())}");
-                }
-                else
-                {
-                    log($"  could not explicitly click the {firstFieldLabel} - relying on the window's own default focus.");
-                }
-            }
-            else
-            {
-                log($"  focused control is not an Edit field inside 'Report Parameters' (type={focusedControlType?.ToString() ?? "unknown"}) - skipping the click (never invoke a button/checkbox/combo by accident) and relying on the window's own default focus.");
-            }
-        }
-        else
-        {
-            log("  could not read the currently focused control - relying on the window's own default focus.");
-        }
+        log($"  focused control before date entry: {DescribeControl(initialFocused)}");
 
         for (var i = 0; i < plan.Count; i++)
         {
@@ -2267,34 +2307,35 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             {
                 var tabCount = 1;
                 while (i + tabCount < plan.Count && plan[i + tabCount].Kind == ReportParameterKeyActionKind.Tab) tabCount++;
-                log($"  Tab x{tabCount} (focused before: {DescribeControl(SafeFocusedElement())})");
+                log($"  key Tab x{tabCount} (focused before: {DescribeControl(SafeFocusedElement())})");
             }
 
             try
             {
                 switch (action.Kind)
                 {
-                    case ReportParameterKeyActionKind.SelectAll:
-                        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
+                    case ReportParameterKeyActionKind.Tab:
+                        Keyboard.Type(VirtualKeyShort.TAB);
                         break;
 
-                    case ReportParameterKeyActionKind.PasteText:
+                    case ReportParameterKeyActionKind.ArrowDown:
+                        log("  key ArrowDown");
+                        Keyboard.Type(VirtualKeyShort.DOWN);
+                        break;
+
+                    case ReportParameterKeyActionKind.TypeText:
                     {
                         // "Begin"/"End" for a two-date plan, "Date" for a
                         // single-date (AsOfDate) plan - derived from
                         // position, not stored on the action itself, so
                         // ReportParameterKeyPlan's own record-equality
                         // golden tests don't have to carry a label field.
-                        var fieldLabel = pasteCount <= 1 ? "Date" : (pasteSeen == 0 ? "Begin" : "End");
-                        pasteSeen++;
+                        var fieldLabel = typeCount <= 1 ? "Date" : (typeSeen == 0 ? "Begin" : "End");
+                        typeSeen++;
 
                         var expected = action.Text ?? string.Empty;
-                        if (!ClipboardHelper.TrySetText(expected))
-                        {
-                            log($"  [{fieldLabel}] could not set the clipboard for date paste - aborting.");
-                            return false;
-                        }
-                        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
+                        log($"  text {expected}");
+                        TypeUnicodeText(expected);
                         Thread.Sleep(KeyEntrySettleDelay);
 
                         var readBack = TryReadFocusedFieldValue();
@@ -2304,7 +2345,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                         }
                         else
                         {
-                            log($"  {fieldLabel} paste read back as '{readBack ?? "(unreadable)"}', expected '{expected}' - retrying once with typed digits (NumLock forced ON).");
+                            log($"  {fieldLabel} read back as '{readBack ?? "(unreadable)"}', expected '{expected}' - retrying once with clipboard paste (Ctrl+A, Ctrl+V).");
 
                             if (!EnsureWindowForeground(parametersWindow, log, "Report Parameters window"))
                             {
@@ -2312,20 +2353,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                                 return false;
                             }
 
-                            TryForceNumLockOn(log);
+                            if (!ClipboardHelper.TrySetText(expected))
+                            {
+                                log($"  {fieldLabel}: could not set the clipboard for the paste retry - aborting rather than run the report against a wrong date.");
+                                return false;
+                            }
+
+                            log("  key Ctrl+A");
                             Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
                             Thread.Sleep(KeyEntrySettleDelay);
 
-                            if (!TryTypeDigits(expected, log))
-                            {
-                                log($"  {fieldLabel}: typed-digit retry failed - aborting.");
-                                return false;
-                            }
+                            log("  key Ctrl+V");
+                            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
+                            Thread.Sleep(KeyEntrySettleDelay);
 
                             var retryReadBack = TryReadFocusedFieldValue();
                             if (string.Equals(retryReadBack, expected, StringComparison.Ordinal))
                             {
-                                log($"  {fieldLabel} = {expected} ✓ (after typed-digit retry, focused: {DescribeControl(SafeFocusedElement())})");
+                                log($"  {fieldLabel} = {expected} ✓ (after paste retry, focused: {DescribeControl(SafeFocusedElement())})");
                             }
                             else
                             {
@@ -2336,13 +2381,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                         break;
                     }
 
-                    case ReportParameterKeyActionKind.Tab:
-                        Keyboard.Type(VirtualKeyShort.TAB);
-                        break;
-
                     case ReportParameterKeyActionKind.F12:
                         Keyboard.Type(VirtualKeyShort.F12);
-                        log("  F12 sent");
+                        log("  key F12");
+                        break;
+
+                    case ReportParameterKeyActionKind.SelectAll:
+                    case ReportParameterKeyActionKind.PasteText:
+                    default:
+                        // Never produced by ReportParameterKeyPlan.Build -
+                        // SelectAll/PasteText are sent directly by the
+                        // TypeText mismatch-retry branch above, never
+                        // queued as their own plan step.
+                        log($"  unexpected plan action '{action.Kind}' - ignoring.");
                         break;
                 }
             }
@@ -2377,159 +2428,6 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         var focused = SafeFocusedElement();
         if (focused is null) return null;
         return TryGetValuePatternValue(focused, out var value) ? value : null;
-    }
-
-    /// <summary>
-    /// Round 7 (review fix, blocking): true only when <paramref name="element"/>
-    /// genuinely lives inside <paramref name="window"/> - the gate
-    /// ReplayReportParameterKeyPlan's initial click needs so it can never
-    /// invoke a button/checkbox/combo on Will's behalf. Two strategies,
-    /// tried in order:
-    ///   1. Native-handle: PioneerRx is WinForms (see MainWindowSelector's
-    ///      "WindowsForms10.*" class check), where most controls carry
-    ///      their OWN distinct HWND (unlike WPF's single-HWND-per-window
-    ///      model) - GetAncestor(elementHandle, GA_ROOT) walks up to the
-    ///      owning top-level window's handle and compares it to window's.
-    ///   2. UIA Parent-walk fallback: for an element with no native HWND
-    ///      of its own (a pure UIA child), walks AutomationElement.Parent
-    ///      up to MaxAncestorWalkDepth levels, comparing each ancestor's
-    ///      OWN native handle against window's - covers a control that
-    ///      never gets its own HWND at all, at the cost of only detecting
-    ///      the match once the walk reaches an HWND-backed ancestor.
-    /// Never throws; an unreadable property at any step is treated as "not
-    /// inside" rather than guessed.
-    /// </summary>
-    private const int MaxAncestorWalkDepth = 50;
-
-    private static bool IsWithinWindow(AutomationElement element, AutomationElement window)
-    {
-        var windowHandle = SafeNativeHandle(window);
-        if (windowHandle == IntPtr.Zero) return false;
-
-        var elementHandle = SafeNativeHandle(element);
-        if (elementHandle != IntPtr.Zero)
-        {
-            if (elementHandle == windowHandle) return true;
-
-            try
-            {
-                var root = GetAncestor(elementHandle, GA_ROOT);
-                if (root == windowHandle) return true;
-            }
-            catch
-            {
-                // fall through to the UIA parent-walk below
-            }
-        }
-
-        try
-        {
-            AutomationElement? current = element;
-            for (var depth = 0; depth < MaxAncestorWalkDepth && current is not null; depth++)
-            {
-                var currentHandle = SafeNativeHandle(current);
-                if (currentHandle != IntPtr.Zero && currentHandle == windowHandle) return true;
-
-                current = current.Parent;
-            }
-        }
-        catch
-        {
-            // Best-effort - an unwalkable tree just means "not confirmed inside".
-        }
-
-        return false;
-    }
-
-    /// <summary>Round 6 (GOAL brief step 2): explicitly clicks an element's own bounding-rectangle centre to force real OS focus onto it, before the very first keystroke of the plan - not just trusting whatever the window claims already has default focus. Same foreground/point-ownership safety checks as TryActivateRibbonElement's own mouse-click fallback (never clicks blind at whatever is physically under the cursor without confirming it's still Pioneer's). CALLER'S RESPONSIBILITY (review fix, blocking): only ever called after IsWithinWindow + a ControlType.Edit check - this method itself does not re-verify either, so it must never be called directly on an arbitrary focused element again.</summary>
-    private bool TryClickElementCenter(AutomationElement element, Action<string> log, string label)
-    {
-        try
-        {
-            var rect = element.BoundingRectangle;
-            if (rect.Width <= 0 || rect.Height <= 0)
-            {
-                log($"    {label}: no usable bounding rectangle to click.");
-                return false;
-            }
-
-            var center = new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
-
-            if (!EnsurePioneerForeground(log))
-            {
-                log($"    {label}: skipping click - Pioneer lost focus.");
-                return false;
-            }
-
-            if (!IsPointOwnedByPioneer(center))
-            {
-                log($"    {label}: skipping click - the window at the click point is not Pioneer's.");
-                return false;
-            }
-
-            Mouse.LeftClick(center);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            log($"    {label}: click failed - {ex.Message}");
-            return false;
-        }
-    }
-
-    /// <summary>Belt-and-braces retry step (GOAL brief step 2: "retry once with SendKeys typing digits with NumLock forced ON"). Only called from the PasteText read-back-mismatch branch above - the primary path is always Ctrl+V paste, never typing. Toggles NumLock via the real NUMLOCK key (never any other key) only when GetKeyState shows it's currently off; never toggled back off afterward - silently flipping it back would be its own surprise mid-shift.</summary>
-    private void TryForceNumLockOn(Action<string> log)
-    {
-        var numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
-        if (numLockOn)
-        {
-            log("  NumLock already ON.");
-            return;
-        }
-
-        try
-        {
-            Keyboard.Press(VirtualKeyShort.NUMLOCK);
-            Keyboard.Release(VirtualKeyShort.NUMLOCK);
-            Thread.Sleep(50);
-        }
-        catch
-        {
-            // Best-effort - the re-check below reports whatever actually happened.
-        }
-
-        numLockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
-        log($"  NumLock forced {(numLockOn ? "ON" : "still OFF - toggle failed")}.");
-    }
-
-    /// <summary>Types <paramref name="digits"/> one real top-row digit key at a time (VirtualKeyShort.KEY_0..KEY_9 - the SAME numeric range as Win32's VK_0..VK_9/ASCII '0'-'9', never a NUMPADn key and never an arrow key) - the fallback path GOAL brief step 2 asks for when a paste's read-back doesn't match. Returns false without sending anything if <paramref name="digits"/> contains a non-digit character.</summary>
-    private static bool TryTypeDigits(string digits, Action<string> log)
-    {
-        foreach (var ch in digits)
-        {
-            if (ch < '0' || ch > '9')
-            {
-                log($"  typed-digit fallback: '{digits}' contains a non-digit character - aborting the fallback.");
-                return false;
-            }
-        }
-
-        foreach (var ch in digits)
-        {
-            var key = (VirtualKeyShort)((int)VirtualKeyShort.KEY_0 + (ch - '0'));
-            try
-            {
-                Keyboard.Type(key);
-            }
-            catch (Exception ex)
-            {
-                log($"  typed-digit fallback failed on '{ch}': {ex.Message}");
-                return false;
-            }
-            Thread.Sleep(KeyEntrySettleDelay);
-        }
-
-        return true;
     }
 
     private bool SetPaymentsDateRange(ReportRunItem item, Action<string> log)

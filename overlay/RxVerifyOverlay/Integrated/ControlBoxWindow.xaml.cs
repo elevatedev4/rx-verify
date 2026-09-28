@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Update;
 
 namespace RxVerifyOverlay.Integrated;
 
@@ -153,6 +154,12 @@ public sealed partial class ControlBoxWindow : Window
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
         Closed += OnClosed;
+
+        // W-T92 round 4 (Will: "Put the current build in the settings
+        // dropdown for easy access. I can't see the window title."). Set
+        // once - BuildInfo never changes after the process starts, so this
+        // never needs to be a binding.
+        BuildStampTextBlock.Text = $"Build: {BuildInfo.Summary}";
     }
 
     /// <summary>
@@ -420,6 +427,19 @@ public sealed partial class ControlBoxWindow : Window
     }
 
     private void OnCopyLogsNoHipaaClick(object sender, RoutedEventArgs e) => CopyLogsNoHipaaRequested?.Invoke(this, (Button)sender);
+
+    /// <summary>W-T92 round 4: copies the exact build-stamp text shown next to it (not just BuildInfo.Summary again) so what Will pastes into HQ always matches what's on screen. Best-effort - Clipboard can throw if another process is briefly holding it; never crashes the settings popup over a copy failing.</summary>
+    private void OnCopyBuildStampClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Clipboard.SetText(BuildStampTextBlock.Text);
+        }
+        catch
+        {
+            // Best-effort only - a failed clipboard copy must never crash the settings popup.
+        }
+    }
 
     private void OnOpenSeparateClick(object sender, RoutedEventArgs e) => OpenSeparateWindowRequested?.Invoke(this, EventArgs.Empty);
 
