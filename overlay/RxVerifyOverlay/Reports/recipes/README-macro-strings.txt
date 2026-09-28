@@ -12,6 +12,25 @@ Save As naming). Two macro groups are visible below: "Reports-EOM (new,
 in process)" (the 7 in-scope financial/payments reports) and
 "Reports-POS Sales" (out of scope for phase 1 — POS daily reports).
 
+W-T92 round 4 (Will, build 67a1566: "it's making it to the report
+parameters screen, then it does something, then it starts scrolling
+through the months in the initial date window, probably pushing the down
+arrow. You need to use tab to get between fields."): ReportCatalog.cs's
+LeadingTabs/TabsBetweenDates/TrailingKeys fields for every DateRange/
+AsOfDate entry are read directly off that report's own <TAB>/<ARROW DOWN>
+sequence below — see ReportCatalog.cs's own per-entry comments for the
+exact line-by-line mapping. ReportParameterKeyPlan.Build turns those into
+the plan PioneerReportDriver.ReplayReportParameterKeyPlan replays: the
+popup's Begin/Date field is NEVER assumed to already have focus (that
+wrong assumption in round 3 is what let a keystroke meant for the date
+field land on some other control instead), so the plan always sends its
+own leading tabs first, then types the date text one Unicode character at
+a time (SendInput/KEYEVENTF_UNICODE — see PioneerReportDriver.
+TypeUnicodeText's own doc), never a click and never Ctrl+A/Ctrl+V on the
+default path. A read-back mismatch gets exactly one retry via the OLD
+clipboard-paste path (Ctrl+A, Ctrl+V) on the same field; a second mismatch
+aborts the report without ever sending F12.
+
 ---8<--- RAW STRINGS OUTPUT BELOW ---8<---
 
 Reports-EOM (new, in process)

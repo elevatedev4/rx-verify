@@ -2,7 +2,10 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    # W-T92 round 4: gh is unavailable from the sandbox that ships fixes to
+    # this repo, so work happens on a branch with no PR ever opened. "**"
+    # (every branch) keeps CI running on push instead of only on main/PRs.
+    branches: ["**"]
   pull_request: {}
 
 concurrency:

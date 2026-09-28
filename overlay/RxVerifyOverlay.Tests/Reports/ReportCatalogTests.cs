@@ -109,4 +109,47 @@ public class ReportCatalogTests
     {
         Assert.Null(ReportCatalog.FindByKey("does-not-exist"));
     }
+
+    // --- Round 4 (W-T92 round 4): LeadingTabs/TrailingKeys, one value per report's own macro line ---
+
+    [Theory]
+    [InlineData(ReportCatalog.ArAgedTrialBalanceKey, 2)]
+    [InlineData(ReportCatalog.ThirdPartyAgedTrialBalanceKey, 0)]
+    [InlineData(ReportCatalog.ThirdPartyControlBalanceKey, 0)]
+    [InlineData(ReportCatalog.InventoryValuationKey, 0)]
+    [InlineData(ReportCatalog.InventoryControlBalanceKey, 0)]
+    [InlineData(ReportCatalog.SalesSummaryKey, 0)]
+    public void EveryEnabledFinancialReportHasALeadingTabsValueFromItsOwnMacroLine(string key, int expectedLeadingTabs)
+    {
+        var entry = ReportCatalog.FindByKey(key);
+        Assert.NotNull(entry);
+        Assert.Equal(expectedLeadingTabs, entry!.LeadingTabs);
+    }
+
+    [Fact]
+    public void OnlyArAgedTrialBalanceHasNonZeroLeadingTabs()
+    {
+        foreach (var entry in ReportCatalog.All.Where(e => e.Key != ReportCatalog.ArAgedTrialBalanceKey))
+        {
+            Assert.Equal(0, entry.LeadingTabs);
+        }
+    }
+
+    [Fact]
+    public void OnlyInventoryValuationHasTrailingKeys()
+    {
+        // Reviewer round 4 correction: the macro's own trailing F12
+        // (%date_text%<TAB><ARROW DOWN><F12><F12>) is part of TrailingKeys
+        // too, not collapsed away - ReportParameterKeyPlan.Build appends a
+        // SEPARATE run F12 after these three.
+        var inventoryValuation = ReportCatalog.FindByKey(ReportCatalog.InventoryValuationKey)!;
+        Assert.Equal(
+            new[] { ReportParameterKeyActionKind.Tab, ReportParameterKeyActionKind.ArrowDown, ReportParameterKeyActionKind.F12 },
+            inventoryValuation.TrailingKeys);
+
+        foreach (var entry in ReportCatalog.All.Where(e => e.Key != ReportCatalog.InventoryValuationKey))
+        {
+            Assert.Null(entry.TrailingKeys);
+        }
+    }
 }
