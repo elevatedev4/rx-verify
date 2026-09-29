@@ -1307,11 +1307,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// moment something new is found, and the full last-seen inventory if
     /// nothing ever appears, so a future failure can still be diagnosed
     /// from the run log alone.
+    ///
+    /// Review fix (BLOCKING, round 6 review): NewWindowDetector.NewWindows
+    /// itself now excludes transient chrome (tooltips, combo/auto-suggest
+    /// dropdowns, IME windows, anything under 100x100 - see
+    /// TransientWindowFilter's own doc) so a false positive there can
+    /// never trigger TrySelectAndOpenReportRow's hardStop the way the
+    /// original title-matching bug did. Every window
+    /// NewWindowDetector.IgnoredTransientWindows reports is logged too
+    /// (once per handle, per poll call) so a real miss is still
+    /// diagnosable - it just never counts as "the" new window. When more
+    /// than one real new window exists, NewWindows already returns them
+    /// largest-first, so index 0 here is always the biggest.
     /// </summary>
     private NativeWindowSnapshot? WaitForNewPioneerWindow(IReadOnlyCollection<IntPtr> baselineHandles, TimeSpan timeout, Action<string> log, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
         var lastSnapshot = new List<NativeWindowSnapshot>();
+        var loggedIgnoredHandles = new HashSet<IntPtr>();
 
         while (true)
         {
@@ -1319,6 +1332,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
             lastSnapshot = EnumerateVisibleTopLevelWindowsForProcess(_pioneerProcessId);
             var newWindows = NewWindowDetector.NewWindows(baselineHandles, lastSnapshot);
+
+            foreach (var ignored in NewWindowDetector.IgnoredTransientWindows(baselineHandles, lastSnapshot))
+            {
+                if (loggedIgnoredHandles.Add(ignored.Handle))
+                {
+                    log($"    {NativeWindowSnapshotLog.FormatIgnoredTransient(ignored)}");
+                }
+            }
 
             if (newWindows.Count > 0)
             {

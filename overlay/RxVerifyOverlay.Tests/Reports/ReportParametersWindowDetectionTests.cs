@@ -112,6 +112,156 @@ public class ReportParametersWindowDetectionTests
 
             Assert.Empty(newWindows);
         }
+
+        // --- Review fix (BLOCKING, round 6 review): a transient window
+        // (tooltip/dropdown/IME/tiny chrome) must never count as "the row
+        // opened" - that would reproduce the exact original title-match
+        // false positive, just for a different reason. ---
+
+        [Fact]
+        public void DetectIgnoresATooltipClassWindow()
+        {
+            var before = new HashSet<IntPtr> { Main };
+            var after = new List<NativeWindowSnapshot>
+            {
+                new(Popup, "tooltips_class32", 0, 200, 40, Main)
+            };
+
+            var result = NewWindowDetector.Detect(before, after);
+
+            Assert.Equal(NewWindowDetectionResult.None, result);
+            Assert.Empty(NewWindowDetector.NewWindows(before, after));
+        }
+
+        [Fact]
+        public void DetectIgnoresATinyWindow()
+        {
+            var before = new HashSet<IntPtr> { Main };
+            var after = new List<NativeWindowSnapshot>
+            {
+                new(Popup, "WindowsForms10.Window.8", 0, 20, 20, Main)
+            };
+
+            var result = NewWindowDetector.Detect(before, after);
+
+            Assert.Equal(NewWindowDetectionResult.None, result);
+            Assert.Empty(NewWindowDetector.NewWindows(before, after));
+        }
+
+        [Fact]
+        public void NewWindowsSelectsTheRealPopupOverAnAccompanyingTooltip()
+        {
+            var before = new HashSet<IntPtr> { Main };
+            var after = new List<NativeWindowSnapshot>
+            {
+                new(Popup, "WindowsForms10.Window.8", 0, 600, 400, Main),
+                new(OtherPopup, "tooltips_class32", 0, 180, 32, Main)
+            };
+
+            var result = NewWindowDetector.Detect(before, after);
+            var newWindows = NewWindowDetector.NewWindows(before, after);
+
+            Assert.Equal(NewWindowDetectionResult.NewWindowAppeared, result);
+            Assert.Single(newWindows);
+            Assert.Equal(Popup, newWindows[0].Handle);
+        }
+
+        [Fact]
+        public void NewWindowsPrefersTheLargerOfTwoRealNewWindows()
+        {
+            var smaller = new IntPtr(400);
+            var before = new HashSet<IntPtr> { Main };
+            var after = new List<NativeWindowSnapshot>
+            {
+                new(smaller, "WindowsForms10.Window.8", 0, 300, 200, Main),
+                new(Popup, "WindowsForms10.Window.8", 0, 600, 400, Main)
+            };
+
+            var newWindows = NewWindowDetector.NewWindows(before, after);
+
+            Assert.Equal(2, newWindows.Count);
+            Assert.Equal(Popup, newWindows[0].Handle);
+            Assert.Equal(smaller, newWindows[1].Handle);
+        }
+
+        [Theory]
+        [InlineData("Auto-Suggest Dropdown")]
+        [InlineData("ComboLBox")]
+        [InlineData("MSCTFIME UI")]
+        [InlineData("BroadcastEventWindow.4.0")]
+        [InlineData("GDI+ Hook Window Class")]
+        public void DetectIgnoresEveryKnownTransientClassSubstring(string className)
+        {
+            var before = new HashSet<IntPtr> { Main };
+            var after = new List<NativeWindowSnapshot>
+            {
+                new(Popup, className, 0, 400, 300, Main)
+            };
+
+            Assert.Equal(NewWindowDetectionResult.None, NewWindowDetector.Detect(before, after));
+        }
+
+        [Fact]
+        public void IgnoredTransientWindowsReturnsOnlyTheFilteredOnes()
+        {
+            var before = new HashSet<IntPtr> { Main };
+            var after = new List<NativeWindowSnapshot>
+            {
+                new(Main, "WindowsForms10.Window.8", 12, 800, 600, IntPtr.Zero),
+                new(Popup, "WindowsForms10.Window.8", 0, 600, 400, Main),
+                new(OtherPopup, "tooltips_class32", 0, 180, 32, Main)
+            };
+
+            var ignored = NewWindowDetector.IgnoredTransientWindows(before, after);
+
+            Assert.Single(ignored);
+            Assert.Equal(OtherPopup, ignored[0].Handle);
+        }
+    }
+
+    public class TransientWindowFilterTests
+    {
+        [Theory]
+        [InlineData("tooltips_class32")]
+        [InlineData("Auto-Suggest Dropdown")]
+        [InlineData("ComboLBox")]
+        [InlineData("MSCTFIME UI")]
+        [InlineData("IME Window")]
+        [InlineData("BroadcastEventWindow.4.0")]
+        [InlineData("GDI+ Hook Window Class")]
+        public void IsTransientTrueForKnownChromeClassesRegardlessOfCase(string className)
+        {
+            var window = new NativeWindowSnapshot(new IntPtr(200), className.ToUpperInvariant(), 0, 400, 300, IntPtr.Zero);
+
+            Assert.True(TransientWindowFilter.IsTransient(window));
+        }
+
+        [Theory]
+        [InlineData(99, 300)]
+        [InlineData(300, 99)]
+        [InlineData(0, 0)]
+        public void IsTransientTrueBelowTheMinimumDimension(int width, int height)
+        {
+            var window = new NativeWindowSnapshot(new IntPtr(200), "WindowsForms10.Window.8", 0, width, height, IntPtr.Zero);
+
+            Assert.True(TransientWindowFilter.IsTransient(window));
+        }
+
+        [Fact]
+        public void IsTransientFalseForARealSizedDialogWithAnOrdinaryClass()
+        {
+            var window = new NativeWindowSnapshot(new IntPtr(200), "WindowsForms10.Window.8", 0, 600, 400, IntPtr.Zero);
+
+            Assert.False(TransientWindowFilter.IsTransient(window));
+        }
+
+        [Fact]
+        public void IsTransientFalseExactlyAtTheMinimumDimension()
+        {
+            var window = new NativeWindowSnapshot(new IntPtr(200), "WindowsForms10.Window.8", 0, 100, 100, IntPtr.Zero);
+
+            Assert.False(TransientWindowFilter.IsTransient(window));
+        }
     }
 
     public class NativeWindowSnapshotLogTests
@@ -132,6 +282,16 @@ public class ReportParametersWindowDetectionTests
             // 1: "never titles, they can contain patient data") — the
             // formatted line can never contain a title= field with text.
             Assert.DoesNotContain("title='", line);
+        }
+
+        [Fact]
+        public void FormatIgnoredTransientMatchesTheRequestedShape()
+        {
+            var window = new NativeWindowSnapshot(new IntPtr(200), "tooltips_class32", 0, 180, 32, new IntPtr(100));
+
+            var line = NativeWindowSnapshotLog.FormatIgnoredTransient(window);
+
+            Assert.Equal("ignored transient: tooltips_class32 (180x32)", line);
         }
     }
 
