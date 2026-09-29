@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FlaUI.Core;
@@ -84,14 +85,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 3 (GOAL brief fix 1): FindMainWindow keeps re-enumerating the desktop for up to this long before giving up, rather than a single snapshot attempt - Pioneer's real shell window may not have appeared yet the instant this is called.</summary>
     private static readonly TimeSpan MainWindowFindTimeout = TimeSpan.FromSeconds(5);
 
-    /// <summary>Round 3 (GOAL brief fix 2): "success = a new top-level window ... whose title contains 'Report Parameters' ... within 5 s" - the outer confirmation every row-selection strategy is checked against.</summary>
+    /// <summary>Round 3 (GOAL brief fix 2): "success = a new top-level window owned by the Pioneer pid ... within 5 s" - the outer confirmation every row-selection strategy is checked against. Round 6: no longer requires a title match at all - see WaitForNewPioneerWindow's own doc.</summary>
     private static readonly TimeSpan ReportParametersConfirmationTimeout = TimeSpan.FromSeconds(5);
 
-    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 1): "wait (&lt;=10 s) for a NEW Pioneer-owned top-level window whose title contains 'Report Parameters'" - the explicit locate step RunFinancialReport runs right after row selection, before any date keystroke goes out. Deliberately longer than ReportParametersConfirmationTimeout (that one is polled three times, once per row-selection strategy - this one only needs to run once, after row selection has already succeeded).</summary>
+    /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 1): "wait (&lt;=10 s) for a NEW Pioneer-owned top-level window" - the explicit locate step RunFinancialReport runs right after row selection, before any date keystroke goes out. Deliberately longer than ReportParametersConfirmationTimeout (that one is polled three times, once per row-selection strategy - this one only needs to run once, after row selection has already succeeded). Round 6: used only as WaitForReportParametersWindow's fallback-search timeout now that the normal path resolves a cached handle instead of re-polling.</summary>
     private static readonly TimeSpan ReportParametersWindowLocateTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>Round 4 (W-T92 follow-up, GOAL brief step 2): "Small (~100 ms) settles between keys" - the per-action pause ReplayReportParameterKeyPlan uses after every Tab/TypeText/ArrowDown/F12 step (TypeText's own per-character settle is NativeInput.CharSettleDelay, applied inside NativeInput.TypeUnicodeText).</summary>
     private static readonly TimeSpan KeyEntrySettleDelay = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>Round 6 (W-T92 follow-up, GOAL brief step 4: "wait the macro's settle delay ... use the existing MacroRunTime/settle constant in ReportCatalog if there is one, else 1000ms"). No such constant exists on ReportCatalogEntry — MacroRunTime there feeds ReportTimeoutPlan's PREVIEW-wait timeout, not a popup settle delay — so this is the dedicated one: the pause ForegroundAndSettleReportParametersWindow takes after bringing the "Report Parameters" popup to the foreground and before the first keystroke, matching how Will's own macro waits before typing.</summary>
+    private static readonly TimeSpan ReportParametersSettleDelay = TimeSpan.FromMilliseconds(1000);
 
     /// <summary>Round 3 (GOAL brief fix 2b): grid keyboard strategy's own inner wait after Enter, before falling back to a direct double-click.</summary>
     private static readonly TimeSpan GridKeyboardEnterConfirmationTimeout = TimeSpan.FromSeconds(2);
@@ -169,6 +173,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private AutomationElement? _previewWindowElement;
     private IntPtr _previewWindowHandle = IntPtr.Zero;
 
+    /// <summary>
+    /// Round 6 (W-T92 follow-up): the "Report Parameters" popup's native
+    /// handle, set by TrySelectAndOpenReportRow the moment its own
+    /// title-agnostic native-window-inventory diff (WaitForNewPioneerWindow)
+    /// sees a new Pioneer-owned top-level window appear — WaitForReportParametersWindow
+    /// then resolves THIS exact handle to an AutomationElement instead of
+    /// re-searching, so it can never land on a different window than the
+    /// one row selection actually confirmed opened. Reset to Zero at the
+    /// top of every RunFinancialReport/TestDateEntry call so a stale
+    /// handle from a previous report in the same batch is never reused.
+    /// </summary>
+    private IntPtr _reportParametersWindowHandle = IntPtr.Zero;
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
@@ -195,6 +212,47 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     [DllImport("user32.dll")]
     private static extern IntPtr WindowFromPoint(POINT point);
+
+    // Round 6 (W-T92 follow-up, GOAL brief step 1): raw Win32 top-level
+    // window enumeration for EnumerateVisibleTopLevelWindowsForProcess -
+    // deliberately independent of FlaUI/UIA3Automation.GetDesktop() (the
+    // basis of EnumeratePioneerOwnedTopLevelWindows below), which is what
+    // missed the "Report Parameters" popup in Will's build da39140 run:
+    // that popup either never exposed a UIA Name at all, or FlaUI's own
+    // desktop-children snapshot simply hadn't picked it up yet by the
+    // time the old title match polled it. GetWindowTextLength (not
+    // GetWindowText) is used everywhere a title's LENGTH is logged, so
+    // this enumeration can never capture or leak the title text itself.
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    private const uint GW_OWNER = 4;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 
     /// <summary>Round 5 (W-T92 follow-up, belt-and-braces item): reads a key's toggle state (bit 0 of the return value) - used only to LOG whether NumLock is off before the first Report Parameters keystroke goes out, per the owner's numpad/scan-code theory. Never used to toggle NumLock - see ReplayReportParameterKeyPlan's doc for why.</summary>
     [DllImport("user32.dll")]
@@ -375,6 +433,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             ct.ThrowIfCancellationRequested();
 
+            // Round 6 (W-T92 follow-up): never carry a stale popup handle
+            // into a new report - TrySelectAndOpenReportRow sets this the
+            // moment it confirms a new Pioneer window opened, and
+            // WaitForReportParametersWindow trusts it as-is.
+            _reportParametersWindowHandle = IntPtr.Zero;
+
             if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
             if (_mainWindow is null) return ReportRunResult.Failed("PioneerRx main window not found", stopwatch.Elapsed);
 
@@ -401,7 +465,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
             log($"'Report Parameters' window found. class='{SafeClassName(reportParametersWindow)}' title_len={SafeName(reportParametersWindow).Length}");
 
-            if (!EnsureWindowForeground(reportParametersWindow, log, "Report Parameters window"))
+            if (!ForegroundAndSettleReportParametersWindow(reportParametersWindow, log))
                 return ReportRunResult.Failed("'Report Parameters' window lost focus", stopwatch.Elapsed);
 
             // Round 4 (GOAL brief step 4's fallback path): snapshot every
@@ -567,6 +631,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             ct.ThrowIfCancellationRequested();
 
+            // Round 6 (W-T92 follow-up): this button never runs row
+            // selection, so any cached handle would be stale from a
+            // previous run - always fall through to WaitForReportParametersWindow's
+            // title-agnostic "any non-main Pioneer window" search below.
+            _reportParametersWindowHandle = IntPtr.Zero;
+
             if (!FindMainWindow(log, ct) || _mainWindow is null)
                 return Task.FromResult(ReportRunResult.Failed("PioneerRx main window not found", stopwatch.Elapsed));
 
@@ -580,7 +650,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
             log($"'Report Parameters' window found. class='{SafeClassName(reportParametersWindow)}' title_len={SafeName(reportParametersWindow).Length}");
 
-            if (!EnsureWindowForeground(reportParametersWindow, log, "Report Parameters window"))
+            if (!ForegroundAndSettleReportParametersWindow(reportParametersWindow, log))
                 return Task.FromResult(ReportRunResult.Failed("'Report Parameters' window lost focus", stopwatch.Elapsed));
 
             if (item.Entry.ParameterKind == ReportParameterKind.PaymentsSearch)
@@ -698,6 +768,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return false;
     }
 
+    /// <summary>
+    /// Round 6 (W-T92 follow-up, GOAL brief step 4: "bring it to the
+    /// foreground if it is not ... wait the macro's settle delay ... then
+    /// run the existing date-entry sequence unchanged"). Shared by
+    /// RunFinancialReport and TestDateEntry - both used to call
+    /// EnsureWindowForeground directly and go straight into date entry
+    /// with no pause at all; Will's own macro waits after the popup opens
+    /// before it starts typing.
+    /// </summary>
+    private bool ForegroundAndSettleReportParametersWindow(AutomationElement window, Action<string> log)
+    {
+        if (!EnsureWindowForeground(window, log, "Report Parameters window")) return false;
+
+        log($"  settling {ReportParametersSettleDelay.TotalMilliseconds:0}ms before date entry...");
+        Thread.Sleep(ReportParametersSettleDelay);
+        return true;
+    }
+
     /// <summary>Synchronous counterpart to WaitUntilAsync below, for the handful of call sites (EnsurePioneerForeground, the keyboard fallback steps) that run on the calling thread with no CancellationToken in scope.</summary>
     private static bool WaitUntilSync(Func<bool> condition, TimeSpan timeout, TimeSpan pollInterval)
     {
@@ -715,6 +803,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
     }
 
+    /// <summary>
+    /// Round 6 (W-T92 follow-up, GOAL brief step 2: "'Pioneer lost focus'
+    /// must mean the foreground window belongs to a different PROCESS than
+    /// Pioneer - any window of the Pioneer PID (main window, the popup, its
+    /// dialogs) counts as focused"). This was already a process-id (not
+    /// window-handle) comparison, so it already treats the "Report
+    /// Parameters" popup - or any other Pioneer-owned window - as focused;
+    /// the pure decision itself is now factored out into
+    /// ForegroundOwnershipRule so it is unit tested directly, independent
+    /// of GetForegroundWindow/GetWindowThreadProcessId.
+    /// </summary>
     private bool IsForegroundOwnedByPioneer()
     {
         try
@@ -722,7 +821,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             var fg = GetForegroundWindow();
             if (fg == IntPtr.Zero) return false;
             GetWindowThreadProcessId(fg, out var pid);
-            return _pioneerProcessId != 0 && pid == (uint)_pioneerProcessId;
+            return ForegroundOwnershipRule.IsStillFocused((int)pid, _pioneerProcessId);
         }
         catch
         {
@@ -1127,35 +1226,39 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// Tries each row-text candidate (PioneerRowText, then
-    /// PioneerRowTextAlias if the catalog entry has one — see
-    /// ReportCatalog's round-3 fix) and, for each, the three layered
-    /// strategies in order (UIA deep search, grid keyboard, OCR) via the
-    /// pure ReportRowSelectionSequencer — stopping at the first strategy
-    /// whose own attempt AND the outer "Report Parameters" window
-    /// confirmation both succeed. Synchronous by design (the sequencer's
-    /// delegates are sync; TryOcrRowSelect's own async OCR call is
-    /// blocked on internally, same "this file already mixes Thread.Sleep
-    /// with async Task methods" idiom used throughout, e.g.
-    /// TryKeyboardKeyTipsNavigate's KeyboardStepWait sleeps) so
-    /// RunFinancialReport can call this like every other bool-returning
-    /// step guard.
+    /// Round 6 rewrite (W-T92 follow-up, Will's build da39140 run: the
+    /// double-click DID open the "Report Parameters" popup, but the old
+    /// title match ("contains 'Report Parameters'") never recognized it -
+    /// see WaitForNewPioneerWindow's own doc for the theory - so this
+    /// fell through to grid-keyboard arrow keys landing on the now-open
+    /// popup's date field ("scrolling through the months") and then
+    /// aborted with "Pioneer lost focus" when a later foreground check hit
+    /// a window it didn't expect). Detection of "did the row open" is now
+    /// title-agnostic entirely: a native-window-inventory snapshot is
+    /// taken once before any strategy runs, and after each strategy's
+    /// click/Enter attempt, WaitForNewPioneerWindow polls for ANY new
+    /// visible top-level window of Pioneer's own pid against that
+    /// baseline - GOAL brief step 3's own rule ("a new window means the
+    /// row opened") IS the confirmation now, not a side effect of it.
     ///
-    /// Review fix (PR #11, non-blocking): after each strategy's click/
-    /// Enter, if a NEW Pioneer-owned top-level window appears that is NOT
-    /// "Report Parameters" (an unexpected error/confirmation dialog, say)
-    /// the WHOLE row-selection sequence stops right there — every later
-    /// strategy/row-text candidate short-circuits to failure — rather
-    /// than blindly trying the next strategy against a screen that isn't
-    /// the report list any more. hardStop is a closure-local flag (not
-    /// instance state — one call of this method handles exactly one
-    /// report) so the three strategy delegates below stay simple
-    /// Func&lt;string, bool&gt; the pure sequencer already expects.
+    /// Tries each row-text candidate (PioneerRowText, then
+    /// PioneerRowTextAlias if the catalog entry has one) and, for each,
+    /// the three layered strategies in order (UIA deep search, grid
+    /// keyboard, OCR) via the pure ReportRowSelectionSequencer - stopping
+    /// at the first strategy whose own attempt AND the new-window
+    /// confirmation both succeed. hardStop (GOAL brief step 3: "never
+    /// start row strategy 2 or 3 ... if a new Pioneer window appeared
+    /// after strategy 1") is now set the instant ANY new window is
+    /// confirmed, success or not - there is no more "unexpected, keep
+    /// going" case now that recognizing the popup doesn't depend on its
+    /// title: once something new opened, every later strategy attempt
+    /// would just be sending clicks/keys into a screen that already
+    /// moved on.
     /// </summary>
     private bool TrySelectAndOpenReportRow(ReportCatalogEntry entry, Action<string> log, CancellationToken ct)
     {
         var rowTextCandidates = ReportRowSelectionSequencer.BuildRowTextCandidates(entry);
-        var knownWindowHandles = new HashSet<IntPtr>(EnumeratePioneerOwnedTopLevelWindows().Select(w => w.Candidate.Handle));
+        var baselineHandles = SnapshotPioneerWindowHandles();
         var hardStop = false;
 
         bool RunStrategy(Func<string, bool> clickAttempt, string rowText)
@@ -1163,18 +1266,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             if (hardStop) return false;
 
             var clicked = clickAttempt(rowText);
-            var confirmed = clicked && WaitForReportParametersWindowSync(ct);
+            if (!clicked) return false;
 
-            if (!confirmed && TryFindUnexpectedNewPioneerWindow(knownWindowHandles, log))
-            {
-                hardStop = true;
-            }
+            var newWindow = WaitForNewPioneerWindow(baselineHandles, ReportParametersConfirmationTimeout, log, ct);
+            if (newWindow is null) return false;
 
-            return confirmed;
+            // A new Pioneer-owned top-level window appeared - the row DID
+            // open, whatever its title is. Never try a later strategy
+            // against a screen that has already moved on, and hand the
+            // confirmed handle straight to WaitForReportParametersWindow
+            // so it resolves this EXACT window rather than re-searching.
+            hardStop = true;
+            _reportParametersWindowHandle = newWindow.Value.Handle;
+            return true;
         }
 
         bool UiaDeepSearchStrategy(string rowText) => RunStrategy(rt => TryDeepUiaRowSelect(rt, log), rowText);
-        bool GridKeyboardStrategy(string rowText) => RunStrategy(rt => TryGridKeyboardRowSelect(rt, log, ct), rowText);
+        bool GridKeyboardStrategy(string rowText) => RunStrategy(rt => TryGridKeyboardRowSelect(rt, baselineHandles, log, ct), rowText);
         bool OcrStrategy(string rowText) => RunStrategy(rt => TryOcrRowSelectSync(rt, log, ct), rowText);
 
         var strategies = new List<Func<string, bool>> { UiaDeepSearchStrategy, GridKeyboardStrategy, OcrStrategy };
@@ -1183,57 +1291,84 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             log($"  Row selection strategy {strategyNumber}/3 for '{rowText}'..."));
     }
 
-    /// <summary>Non-blocking review fix: true (and logs) the first time a Pioneer-owned top-level window not already in <paramref name="knownHandles"/> appears whose title does NOT contain "Report Parameters" — an unexpected dialog/screen change mid row-selection. Adds the window to <paramref name="knownHandles"/> so it is reported only once. Logs class + title LENGTH only, per this file's established PHI-safety convention (see MainWindowCandidateLog) — never the title text itself, which could echo field content from an error dialog.</summary>
-    private bool TryFindUnexpectedNewPioneerWindow(HashSet<IntPtr> knownHandles, Action<string> log)
+    /// <summary>Native (non-UIA) snapshot of Pioneer's own visible top-level window handles right now - the "before" baseline WaitForNewPioneerWindow diffs against. See EnumerateVisibleTopLevelWindowsForProcess's own doc for why this is raw Win32, not EnumeratePioneerOwnedTopLevelWindows' UIA desktop walk.</summary>
+    private HashSet<IntPtr> SnapshotPioneerWindowHandles() =>
+        new(EnumerateVisibleTopLevelWindowsForProcess(_pioneerProcessId).Select(w => w.Handle));
+
+    /// <summary>
+    /// Round 6 (W-T92 follow-up, GOAL brief step 1): polls (every
+    /// PollInterval, up to <paramref name="timeout"/>) for any NEW visible
+    /// top-level window of Pioneer's own process id that wasn't in
+    /// <paramref name="baselineHandles"/> - title-agnostic by
+    /// construction, since EnumerateVisibleTopLevelWindowsForProcess never
+    /// reads a window's title text at all. Logs the diff (class/
+    /// title-length/size/owner handle - never a title, per this file's
+    /// established PHI-safety convention, see MainWindowCandidateLog) the
+    /// moment something new is found, and the full last-seen inventory if
+    /// nothing ever appears, so a future failure can still be diagnosed
+    /// from the run log alone.
+    /// </summary>
+    private NativeWindowSnapshot? WaitForNewPioneerWindow(IReadOnlyCollection<IntPtr> baselineHandles, TimeSpan timeout, Action<string> log, CancellationToken ct)
     {
-        foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+        var deadline = DateTime.UtcNow + timeout;
+        var lastSnapshot = new List<NativeWindowSnapshot>();
+
+        while (true)
         {
-            if (candidate.Handle == IntPtr.Zero || knownHandles.Contains(candidate.Handle)) continue;
-            if (!string.IsNullOrEmpty(candidate.Title) && candidate.Title.Contains("Report Parameters", StringComparison.OrdinalIgnoreCase)) continue;
+            if (ct.IsCancellationRequested) return null;
 
-            knownHandles.Add(candidate.Handle);
-            var className = SafeClassName(window);
-            var titleLength = candidate.Title.Length;
-            log($"    unexpected new Pioneer window appeared - stopping the row selection sequence for this report. class='{className}' title_len={titleLength}");
-            return true;
-        }
+            lastSnapshot = EnumerateVisibleTopLevelWindowsForProcess(_pioneerProcessId);
+            var newWindows = NewWindowDetector.NewWindows(baselineHandles, lastSnapshot);
 
-        return false;
-    }
-
-    /// <summary>GOAL brief fix 2's closing rule, shared by all three strategies: "success = a new top-level window owned by the Pioneer pid whose title contains 'Report Parameters' ... within 5 s". Synchronous wrapper (WaitUntilAsync needs an await) so the sequencer's plain bool delegates can call it directly.</summary>
-    private bool WaitForReportParametersWindowSync(CancellationToken ct) =>
-        WaitUntilAsync(IsReportParametersWindowOpen, ReportParametersConfirmationTimeout, ct).GetAwaiter().GetResult();
-
-    private bool IsReportParametersWindowOpen()
-    {
-        foreach (var (_, candidate) in EnumeratePioneerOwnedTopLevelWindows())
-        {
-            if (!string.IsNullOrEmpty(candidate.Title) && candidate.Title.Contains("Report Parameters", StringComparison.OrdinalIgnoreCase))
+            if (newWindows.Count > 0)
             {
-                return true;
+                foreach (var w in newWindows)
+                {
+                    log($"    new Pioneer window: {NativeWindowSnapshotLog.Format(w)}");
+                }
+
+                return newWindows[0];
             }
+
+            if (DateTime.UtcNow >= deadline) break;
+            Thread.Sleep(PollInterval);
         }
 
-        return false;
+        log("    no new Pioneer window appeared within the timeout. Current inventory:");
+        if (lastSnapshot.Count == 0)
+        {
+            log("      (none)");
+        }
+        foreach (var w in lastSnapshot)
+        {
+            log($"      {NativeWindowSnapshotLog.Format(w)}");
+        }
+
+        return null;
     }
 
     /// <summary>
-    /// Round 4 (W-T92 follow-up, GOAL brief step 1: "after the row
-    /// double-click, wait (&lt;=10 s) for a NEW Pioneer-owned top-level
-    /// window whose title contains 'Report Parameters'"). Row selection
-    /// (TrySelectAndOpenReportRow) already confirms via
-    /// WaitForReportParametersWindowSync that this window exists before
-    /// it returns true, so this almost always resolves on the very first
-    /// poll here - this second wait exists so RunFinancialReport gets
-    /// back an actual AutomationElement (needed to bring it to the
-    /// foreground and target keystrokes at it specifically), not just a
-    /// bool, and so a window that closed again in the brief gap between
-    /// row selection returning and this call is re-confirmed rather than
-    /// assumed still open.
+    /// Round 6 rewrite (W-T92 follow-up). Prefers the exact window
+    /// TrySelectAndOpenReportRow already confirmed opened
+    /// (_reportParametersWindowHandle, set by its own WaitForNewPioneerWindow
+    /// call) - resolving a cached HANDLE instead of re-searching means this
+    /// can never land on a DIFFERENT window than the one row selection
+    /// actually saw appear. Falls back to a title-agnostic "any non-main
+    /// Pioneer-owned window" poll only when there is no cached handle (the
+    /// "Test date entry" button runs this with no row selection having
+    /// happened first - see that method's own doc) or the cached handle no
+    /// longer resolves to a live window.
     /// </summary>
     private AutomationElement? WaitForReportParametersWindow(Action<string> log, CancellationToken ct)
     {
+        if (_reportParametersWindowHandle != IntPtr.Zero)
+        {
+            var cached = ResolveNativeHandleToElement(_reportParametersWindowHandle);
+            if (cached is not null) return cached;
+
+            log("  cached 'Report Parameters' window handle is no longer visible - falling back to a fresh search.");
+        }
+
         AutomationElement? match = null;
 
         // Non-blocking review fix: reuses WaitUntilSync (same poll/timeout
@@ -1241,29 +1376,108 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         // deadline loop - the condition delegate both checks cancellation
         // (returning true to stop polling early, same as WaitUntilSync's
         // own "stop as soon as the condition is met" contract) and stashes
-        // whatever FindReportParametersWindowElement found into the
+        // whatever FindNonMainPioneerWindowElement found into the
         // captured `match` local.
         WaitUntilSync(() =>
         {
             if (ct.IsCancellationRequested) return true;
-            match = FindReportParametersWindowElement();
+            match = FindNonMainPioneerWindowElement();
             return match is not null;
         }, ReportParametersWindowLocateTimeout, PollInterval);
 
         return ct.IsCancellationRequested ? null : match;
     }
 
-    private AutomationElement? FindReportParametersWindowElement()
+    /// <summary>Title-agnostic fallback used only when there's no confirmed handle from row selection (see WaitForReportParametersWindow's own doc): any visible Pioneer-owned top-level window that isn't the main ribbon window.</summary>
+    private AutomationElement? FindNonMainPioneerWindowElement()
     {
-        foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+        var mainHandle = _mainWindow is null ? IntPtr.Zero : SafeNativeHandle(_mainWindow);
+
+        foreach (var snapshot in EnumerateVisibleTopLevelWindowsForProcess(_pioneerProcessId))
         {
-            if (!string.IsNullOrEmpty(candidate.Title) && candidate.Title.Contains("Report Parameters", StringComparison.OrdinalIgnoreCase))
-            {
-                return window;
-            }
+            if (snapshot.Handle == IntPtr.Zero || snapshot.Handle == mainHandle) continue;
+
+            var element = ResolveNativeHandleToElement(snapshot.Handle);
+            if (element is not null) return element;
         }
 
         return null;
+    }
+
+    /// <summary>Converts a native HWND into a FlaUI AutomationElement (AutomationBase.FromHandle) - never throws, returns null for a stale/invalid/no-longer-visible handle.</summary>
+    private AutomationElement? ResolveNativeHandleToElement(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return null;
+
+        try
+        {
+            if (!IsWindowVisible(handle)) return null;
+            return GetOrCreateAutomation().FromHandle(handle);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Round 6 (W-T92 follow-up, GOAL brief step 1): raw Win32 enumeration
+    /// - EnumWindows + GetWindowThreadProcessId + IsWindowVisible -
+    /// deliberately independent of FlaUI/UIA3Automation.GetDesktop() (the
+    /// basis of EnumeratePioneerOwnedTopLevelWindows below), which is what
+    /// missed the "Report Parameters" popup in Will's build da39140 run:
+    /// that popup either never exposed a UIA Name at all, or FlaUI's own
+    /// desktop-children snapshot simply hadn't caught up to it yet by the
+    /// time the old title match polled it. Never reads a window's title
+    /// TEXT - only its LENGTH (GetWindowTextLength, no GetWindowText call
+    /// at all) - so nothing here can ever log or leak field content.
+    /// </summary>
+    private static List<NativeWindowSnapshot> EnumerateVisibleTopLevelWindowsForProcess(int processId)
+    {
+        var result = new List<NativeWindowSnapshot>();
+        if (processId == 0) return result;
+
+        try
+        {
+            EnumWindows((hWnd, _) =>
+            {
+                try
+                {
+                    if (!IsWindowVisible(hWnd)) return true;
+
+                    GetWindowThreadProcessId(hWnd, out var pid);
+                    if (pid != (uint)processId) return true;
+
+                    var classNameBuilder = new StringBuilder(256);
+                    GetClassName(hWnd, classNameBuilder, classNameBuilder.Capacity);
+
+                    var owner = GetWindow(hWnd, GW_OWNER);
+                    var titleLength = GetWindowTextLength(hWnd);
+
+                    var width = 0;
+                    var height = 0;
+                    if (GetWindowRect(hWnd, out var rect))
+                    {
+                        width = rect.Right - rect.Left;
+                        height = rect.Bottom - rect.Top;
+                    }
+
+                    result.Add(new NativeWindowSnapshot(hWnd, classNameBuilder.ToString(), titleLength, width, height, owner));
+                }
+                catch
+                {
+                    // Best-effort per-window - a window that can't be inspected is simply skipped.
+                }
+
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            // Best-effort - an empty list here just means the caller's poll tries again.
+        }
+
+        return result;
     }
 
     /// <summary>What TryFindFallbackPreviewWindow found, for RunFinancialReport to react to — see that method's own doc for why "found a new window" and "found a new window that's actually a preview" have to be distinguished (W-T92 review fix, BLOCKING).</summary>
@@ -1284,7 +1498,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// never trips but the Report Parameters window has closed and a new
     /// Pioneer-owned window appeared, treat that new window as the
     /// preview"). Same "new since a known-handles snapshot" idiom as
-    /// TryFindUnexpectedNewPioneerWindow (row selection's own hard-stop
+    /// WaitForNewPioneerWindow (row selection's own new-window confirmation
     /// check) - <paramref name="knownHandlesBeforeParameterEntry"/> is
     /// captured right after the Report Parameters window was located and
     /// foregrounded, before any date keystroke went out, so anything not
@@ -1556,10 +1770,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// value; else step Down one row at a time (max MaxGridKeyboardSteps)
     /// until the selected/focused row's text exactly matches; then Enter —
     /// falling back to a direct double-click on the believed-selected row
-    /// if no "Report Parameters" window appears within
-    /// GridKeyboardEnterConfirmationTimeout.
+    /// if no new Pioneer-owned top-level window appears within
+    /// GridKeyboardEnterConfirmationTimeout (round 6: title-agnostic - see
+    /// WaitForNewPioneerWindow's own doc - rather than the old "titled
+    /// 'Report Parameters'" check, which is exactly what missed the popup
+    /// in Will's build da39140 run and let Enter's own arrow-key fallback
+    /// path scroll the now-open popup's date field instead).
     /// </summary>
-    private bool TryGridKeyboardRowSelect(string rowText, Action<string> log, CancellationToken ct)
+    private bool TryGridKeyboardRowSelect(string rowText, IReadOnlyCollection<IntPtr> baselineHandles, Action<string> log, CancellationToken ct)
     {
         log($"    strategy 2/3 (grid keyboard navigation) for '{rowText}'...");
 
@@ -1633,12 +1851,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         try { Keyboard.Type(VirtualKeyShort.RETURN); }
         catch { return false; }
 
-        if (WaitUntilSync(IsReportParametersWindowOpen, GridKeyboardEnterConfirmationTimeout, PollInterval))
+        if (WaitForNewPioneerWindow(baselineHandles, GridKeyboardEnterConfirmationTimeout, log, ct) is not null)
         {
             return true;
         }
 
-        log("    'Report Parameters' did not appear after Enter - falling back to a direct double-click on the selected row.");
+        log("    no new Pioneer window appeared after Enter - falling back to a direct double-click on the selected row.");
 
         var focusedElement = SafeFocusedElement();
         return focusedElement is not null && TryDoubleClickElement(focusedElement, log, "grid keyboard fallback");
@@ -1784,7 +2002,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return false;
     }
 
-    /// <summary>Synchronous wrapper for ReportRowSelectionSequencer's Func&lt;string, bool&gt; strategy slot - same "this file already blocks on async work from a sync helper" idiom as WaitForReportParametersWindowSync above.</summary>
+    /// <summary>Synchronous wrapper for ReportRowSelectionSequencer's Func&lt;string, bool&gt; strategy slot - same "this file already blocks on async work from a sync helper" idiom used throughout this class.</summary>
     private bool TryOcrRowSelectSync(string rowText, Action<string> log, CancellationToken ct) =>
         TryOcrRowSelect(rowText, log, ct).GetAwaiter().GetResult();
 
