@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace RxVerifyOverlay.Reports;
@@ -22,11 +23,11 @@ namespace RxVerifyOverlay.Reports;
 /// </summary>
 public static class ReportDateKeys
 {
-    /// <summary>Begin-date text for a DateRange popup's first field — the macro's %start_date_text% (%month%-01-%year%): two-digit month, dash, two-digit day, dash, FOUR-digit year.</summary>
-    public static string FormatBegin(DateTime date) => date.ToString("MM-dd-yyyy");
+    /// <summary>Begin-date text for a DateRange popup's first field — the macro's %start_date_text% (%month%-01-%year%): two-digit month, dash, two-digit day, dash, FOUR-digit year. CultureInfo.InvariantCulture (reviewer round 5 non-blocking fix) so this can never pick up a non-Gregorian/non-ASCII-digit calendar from whatever culture the workstation is running under.</summary>
+    public static string FormatBegin(DateTime date) => date.ToString("MM-dd-yyyy", CultureInfo.InvariantCulture);
 
-    /// <summary>End-date text for a DateRange popup's second field, and the single field on an AsOfDate popup — the macro's %date_text% (Macro Express format mm'-'dd'-'yy): two-digit month, dash, two-digit day, dash, TWO-digit year.</summary>
-    public static string FormatEnd(DateTime date) => date.ToString("MM-dd-yy");
+    /// <summary>End-date text for a DateRange popup's second field, and the single field on an AsOfDate popup — the macro's %date_text% (Macro Express format mm'-'dd'-'yy): two-digit month, dash, two-digit day, dash, TWO-digit year. CultureInfo.InvariantCulture, same reason as FormatBegin.</summary>
+    public static string FormatEnd(DateTime date) => date.ToString("MM-dd-yy", CultureInfo.InvariantCulture);
 }
 
 /// <summary>
@@ -251,20 +252,35 @@ public enum ReadbackDecision
 /// 4-digit year only needs its last two digits to agree; month and day
 /// must always match exactly. Only a real month/day/last-two-year-digit
 /// mismatch triggers the caller's one-time Ctrl+A/Ctrl+V retry.
+///
+/// Round 5 reviewer fix (blocking finding 2): a readback that is
+/// null/empty/whitespace, OR that has FEWER than three digit groups, is
+/// now Unavailable ("cannot judge this readback"), never Mismatch -
+/// treating either as a wrong value used to fire the destructive
+/// Ctrl+A/Ctrl+V retry (and possibly abort a run whose date was actually
+/// correct) against a field that simply didn't give us enough to compare.
+/// A readback with THREE OR MORE digit groups (e.g. a date+time value
+/// like "09/28/2026 12:00:00 AM" - 6 groups) uses only the FIRST three as
+/// (month, day, year); the expected side always has exactly three by
+/// construction (it's always ReportDateKeys.FormatBegin/FormatEnd
+/// output). Mismatch now fires ONLY when both sides parse to three real
+/// digit groups and those groups genuinely differ.
 /// </summary>
 public static class ReadbackEvaluator
 {
     public static ReadbackDecision Decide(string? readback, string expected)
     {
-        if (readback is null) return ReadbackDecision.Unavailable;
+        if (string.IsNullOrWhiteSpace(readback)) return ReadbackDecision.Unavailable;
 
         if (string.Equals(readback, expected, StringComparison.Ordinal)) return ReadbackDecision.Ok;
 
         var readParts = ExtractDateDigitGroups(readback);
-        var expectedParts = ExtractDateDigitGroups(expected);
+        if (readParts is null) return ReadbackDecision.Unavailable;
 
-        if (readParts is not null && expectedParts is not null
-            && readParts[0] == expectedParts[0]
+        var expectedParts = ExtractDateDigitGroups(expected);
+        if (expectedParts is null) return ReadbackDecision.Unavailable;
+
+        if (readParts[0] == expectedParts[0]
             && readParts[1] == expectedParts[1]
             && YearsMatch(readParts[2], expectedParts[2]))
         {
@@ -274,11 +290,11 @@ public static class ReadbackEvaluator
         return ReadbackDecision.Mismatch;
     }
 
-    /// <summary>Month/day/year as integers (leading zeros stripped), taken from the value's own digit runs — null unless there are exactly three groups (any non-digit separator: '/', '-', etc.).</summary>
+    /// <summary>First three digit runs, as (month, day, year) integers (leading zeros stripped) — null unless there are AT LEAST three groups (any non-digit separator: '/', '-', a space before a time suffix, etc.). Extra groups past the third (e.g. a trailing "12:00:00 AM" time) are ignored, not treated as a mismatch signal.</summary>
     private static int[]? ExtractDateDigitGroups(string value)
     {
         var matches = Regex.Matches(value, @"\d+");
-        if (matches.Count != 3) return null;
+        if (matches.Count < 3) return null;
 
         var groups = new int[3];
         for (var i = 0; i < 3; i++)

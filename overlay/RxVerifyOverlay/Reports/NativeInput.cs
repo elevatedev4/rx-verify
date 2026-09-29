@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -81,18 +82,61 @@ public static class NativeInput
     public const uint INPUT_KEYBOARD = 1;
     public const uint KEYEVENTF_UNICODE = 0x0004;
     public const uint KEYEVENTF_KEYUP = 0x0002;
+
+    /// <summary>
+    /// Reviewer round 5 blocking finding 1: MapVirtualKeyW(VK_DOWN,
+    /// MAPVK_VK_TO_VSC) returns the BASE scan code, which Windows shares
+    /// with the NumPad-2 key — without this flag set, whether the OS
+    /// delivers the keystroke as the arrow key or as NumPad '2' depends on
+    /// the target's NumLock state, not on wVk. Every "extended" key (the
+    /// arrow cluster, Home/End/Insert/Delete/PageUp/PageDown, NumPad
+    /// divide, NumLock, right Ctrl/Alt — see IsExtendedKey) must OR this
+    /// into dwFlags on both key down and key up, exactly like a physical
+    /// extended key's own scan-code prefix (0xE0) would signal.
+    /// </summary>
+    public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+
     private const uint MAPVK_VK_TO_VSC = 0;
     private const ushort VK_SHIFT = 0x10;
+
+    /// <summary>
+    /// The Win32 virtual-key codes that MUST carry KEYEVENTF_EXTENDEDKEY —
+    /// every one of these shares its base scan code with a NumPad key (or,
+    /// for RCONTROL/RMENU, with its left-hand counterpart), so the OS can
+    /// only tell them apart from the NumLock-affected NumPad key or the
+    /// left-hand key by that flag. Pure data, no P/Invoke — unit-testable
+    /// directly (NativeInputTests.IsExtendedKeyIsTrueForVkDown, etc.).
+    /// </summary>
+    private static readonly HashSet<ushort> ExtendedKeyVirtualKeys = new()
+    {
+        0x21, // VK_PRIOR (Page Up)
+        0x22, // VK_NEXT (Page Down)
+        0x23, // VK_END
+        0x24, // VK_HOME
+        0x25, // VK_LEFT
+        0x26, // VK_UP
+        0x27, // VK_RIGHT
+        0x28, // VK_DOWN
+        0x2D, // VK_INSERT
+        0x2E, // VK_DELETE
+        0x6F, // VK_DIVIDE (NumPad /)
+        0x90, // VK_NUMLOCK
+        0xA3, // VK_RCONTROL
+        0xA5, // VK_RMENU (right Alt)
+    };
+
+    /// <summary>True for a virtual-key code that must carry KEYEVENTF_EXTENDEDKEY on every SendInput key event — see ExtendedKeyVirtualKeys' own doc.</summary>
+    public static bool IsExtendedKey(ushort vk) => ExtendedKeyVirtualKeys.Contains(vk);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
     /// <summary>VkKeyScanW('0'..'9', '-', etc.) -&gt; low byte is the virtual-key code, high byte's low 3 bits are the shift state (bit 0 = Shift, bit 1 = Ctrl, bit 2 = Alt) needed to produce that character on the current keyboard layout. Returns -1 (0xFFFF as a signed short) when the layout cannot produce the character at all.</summary>
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern short VkKeyScanW(char ch);
 
     /// <summary>MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) -&gt; the hardware scan code for a virtual-key code, on the current keyboard layout.</summary>
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 
     /// <summary>Between-character settle for TypeUnicodeText — GOAL brief step 2: "Keep ~50-100 ms settle between keys."</summary>
@@ -203,20 +247,34 @@ public static class NativeInput
             var (vk, needsShift) = DecodeVkKeyScan(scanResult);
             var scan = (ushort)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
 
-            if (needsShift)
+            // Non-blocking reviewer fix (round 5): guarantee Shift-up is
+            // sent even if the character's own down/up fails after
+            // Shift-down succeeded - a failed send must never leave Shift
+            // physically "held" for every keystroke sent afterward.
+            var shiftIsDown = false;
+            bool charSendOk;
+            try
             {
-                var shiftScan = (ushort)MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC);
-                if (!SendKeyEvent(VK_SHIFT, shiftScan, down: true, inputSize, onSendFailure, "Shift down")) return false;
+                if (needsShift)
+                {
+                    var shiftDownScan = (ushort)MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC);
+                    if (!SendKeyEvent(VK_SHIFT, shiftDownScan, down: true, inputSize, onSendFailure, "Shift down")) return false;
+                    shiftIsDown = true;
+                }
+
+                charSendOk = SendKeyEvent(vk, scan, down: true, inputSize, onSendFailure, $"key down '{ch}'")
+                    && SendKeyEvent(vk, scan, down: false, inputSize, onSendFailure, $"key up '{ch}'");
+            }
+            finally
+            {
+                if (shiftIsDown)
+                {
+                    var shiftUpScan = (ushort)MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC);
+                    SendKeyEvent(VK_SHIFT, shiftUpScan, down: false, inputSize, onSendFailure, "Shift up");
+                }
             }
 
-            if (!SendKeyEvent(vk, scan, down: true, inputSize, onSendFailure, $"key down '{ch}'")) return false;
-            if (!SendKeyEvent(vk, scan, down: false, inputSize, onSendFailure, $"key up '{ch}'")) return false;
-
-            if (needsShift)
-            {
-                var shiftScan = (ushort)MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC);
-                if (!SendKeyEvent(VK_SHIFT, shiftScan, down: false, inputSize, onSendFailure, "Shift up")) return false;
-            }
+            if (!charSendOk) return false;
 
             Thread.Sleep(perKeyDelayMs);
         }
@@ -267,6 +325,7 @@ public static class NativeInput
     private static bool SendKeyEvent(ushort vk, ushort scan, bool down, int inputSize, Action<string>? onSendFailure, string label)
     {
         var flags = down ? 0u : KEYEVENTF_KEYUP;
+        if (IsExtendedKey(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
         var input = new INPUT { type = INPUT_KEYBOARD, u = new InputUnion { ki = new KEYBDINPUT { wVk = vk, wScan = scan, dwFlags = flags, time = 0, dwExtraInfo = IntPtr.Zero } } };
         var sent = SendInput(1, new[] { input }, inputSize);
         if (sent != 1)

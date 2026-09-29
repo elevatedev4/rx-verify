@@ -108,4 +108,46 @@ public class NativeInputTests
         Assert.Equal((ushort)0x30, vk);
         Assert.True(needsShift);
     }
+
+    // --- NativeInput.IsExtendedKey (reviewer round 5, blocking finding 1) ---
+    //
+    // MapVirtualKeyW(VK_DOWN, MAPVK_VK_TO_VSC) returns the BASE scan code,
+    // which Windows shares with the NumPad-2 key - without
+    // KEYEVENTF_EXTENDEDKEY set, whether the OS delivers the keystroke as
+    // the arrow key or as NumPad '2' depends on the target's NumLock state.
+    // Concrete failing scenario this fixes: NumLock ON -> Inventory
+    // Valuation's trailing-keys plan (Tab, ArrowDown, F12, F12) delivers
+    // its ArrowDown as NumPad '2' instead. Pure set-membership, no
+    // P/Invoke - runs on any platform.
+
+    [Theory]
+    [InlineData((ushort)0x21)] // VK_PRIOR (Page Up)
+    [InlineData((ushort)0x22)] // VK_NEXT (Page Down)
+    [InlineData((ushort)0x23)] // VK_END
+    [InlineData((ushort)0x24)] // VK_HOME
+    [InlineData((ushort)0x25)] // VK_LEFT
+    [InlineData((ushort)0x26)] // VK_UP
+    [InlineData((ushort)0x27)] // VK_RIGHT
+    [InlineData((ushort)0x28)] // VK_DOWN - the exact key ReplayReportParameterKeyPlan sends for Inventory Valuation's TrailingKeys
+    [InlineData((ushort)0x2D)] // VK_INSERT
+    [InlineData((ushort)0x2E)] // VK_DELETE
+    [InlineData((ushort)0x6F)] // VK_DIVIDE (NumPad /)
+    [InlineData((ushort)0x90)] // VK_NUMLOCK
+    [InlineData((ushort)0xA3)] // VK_RCONTROL
+    [InlineData((ushort)0xA5)] // VK_RMENU (right Alt)
+    public void IsExtendedKeyIsTrueForEveryExtendedVirtualKey(ushort vk)
+    {
+        Assert.True(NativeInput.IsExtendedKey(vk));
+    }
+
+    [Theory]
+    [InlineData((ushort)0x09)] // VK_TAB - ReplayReportParameterKeyPlan's Tab
+    [InlineData((ushort)0x7B)] // VK_F12 - ReplayReportParameterKeyPlan's F12 (the "run report" key)
+    [InlineData((ushort)0x30)] // '0' - a plain digit, TypeKeystrokes' own date-character path
+    [InlineData((ushort)0xBD)] // VK_OEM_MINUS ('-') - the date separator character
+    [InlineData((ushort)0x10)] // VK_SHIFT itself is never extended
+    public void IsExtendedKeyIsFalseForVkTabVkF12AndDateCharacters(ushort vk)
+    {
+        Assert.False(NativeInput.IsExtendedKey(vk));
+    }
 }

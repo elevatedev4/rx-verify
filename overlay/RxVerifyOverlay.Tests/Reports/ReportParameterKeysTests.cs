@@ -356,16 +356,13 @@ public class ReportParameterKeysTests
     [Fact]
     public void DecideIsMismatchWhenReadbackIsNonNullAndDifferent()
     {
-        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide("01012020", "09212026"));
-    }
-
-    [Fact]
-    public void DecideIsMismatchNotUnavailableForAnEmptyStringReadback()
-    {
-        // An empty string IS a real (if unhelpful) readback, distinct from
-        // null/unreadable - it should still count as a mismatch, not be
-        // treated as "couldn't read it".
-        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide(string.Empty, "09212026"));
+        // W-T92 round 5 reviewer fix: the original data here ("01012020")
+        // has no separators, so it's only ONE digit run, not three - under
+        // the round 5 normalizer that's "cannot judge" (Unavailable), not
+        // a mismatch signal. Real field readbacks always carry separators
+        // (slashes or dashes) between month/day/year, so this now uses a
+        // properly 3-grouped, genuinely different date instead.
+        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide("01/01/2020", "09-21-2026"));
     }
 
     // --- ReadbackEvaluator.Decide normalization (W-T92 round 5): the
@@ -400,5 +397,52 @@ public class ReportParameterKeysTests
     public void DecideIsUnavailableWhenReadbackIsNullRegardlessOfExpectedFormat()
     {
         Assert.Equal(ReadbackDecision.Unavailable, ReadbackEvaluator.Decide(null, "09-01-2026"));
+    }
+
+    // --- ReadbackEvaluator.Decide (reviewer round 5, blocking finding 2):
+    // null/empty/whitespace and "too few digit groups to judge" readbacks
+    // must be Unavailable, never Mismatch - a Mismatch fires the
+    // destructive Ctrl+A/Ctrl+V retry, and could abort a run whose date
+    // was actually correct. Confirmed reachable: PioneerReportDriver.
+    // TryReadFocusedFieldValue can legitimately return "" (a real but
+    // unhelpful ValuePattern/LegacyIAccessible value), and a readback with
+    // a time suffix ("09/28/2026 12:00:00 AM") has 6 digit groups, not 3. ---
+
+    [Fact]
+    public void DecideIsUnavailableNotMismatchForAnEmptyStringReadback()
+    {
+        // An empty string is a real (if unhelpful) readback - but it has
+        // ZERO digit groups, so there's nothing to judge it against; it
+        // must not fire the retry.
+        Assert.Equal(ReadbackDecision.Unavailable, ReadbackEvaluator.Decide(string.Empty, "09-21-2026"));
+    }
+
+    [Fact]
+    public void DecideIsUnavailableForAWhitespaceOnlyReadback()
+    {
+        Assert.Equal(ReadbackDecision.Unavailable, ReadbackEvaluator.Decide("   ", "09-21-2026"));
+    }
+
+    [Fact]
+    public void DecideIsUnavailableForAReadbackWithFewerThanThreeDigitGroups()
+    {
+        // Only month/year, e.g. a partially-populated or truncated field -
+        // two digit groups, not enough to judge month+day+year against.
+        Assert.Equal(ReadbackDecision.Unavailable, ReadbackEvaluator.Decide("09/2026", "09-21-2026"));
+    }
+
+    [Fact]
+    public void DecideIsOkForADateWithATimeSuffixUsingOnlyTheFirstThreeGroups()
+    {
+        // A readback with MORE than three digit groups (a date+time value)
+        // still gets judged - on its first three groups (month, day,
+        // year), ignoring the time suffix's own digit groups entirely.
+        Assert.Equal(ReadbackDecision.Ok, ReadbackEvaluator.Decide("09/28/2026 12:00:00 AM", "09-28-26"));
+    }
+
+    [Fact]
+    public void DecideIsMismatchForADateWithATimeSuffixWhenTheDateItselfDiffers()
+    {
+        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide("10/28/2026 12:00:00 AM", "09-28-26"));
     }
 }
