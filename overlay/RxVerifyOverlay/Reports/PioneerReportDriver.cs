@@ -2190,9 +2190,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// report's own LeadingTabs first (from ReportCatalogEntry, taken
     /// verbatim from Will's own working Macro Express recordings -
     /// Reports/recipes/README-macro-strings.txt), then types the date text
-    /// itself via NativeInput.TypeUnicodeText (raw SendInput/KEYEVENTF_UNICODE,
-    /// no VK/scan-code mapping ever involved - see that method's own doc for
-    /// why). After each date, the focused field's value is read back via
+    /// itself. After each date, the focused field's value is read back via
     /// ValuePattern; a mismatch gets exactly ONE retry using the OLD
     /// clipboard-paste path (Ctrl+A, Ctrl+V - ClipboardHelper.TrySetText,
     /// retrying/STA-marshaled) on the SAME field, and a second mismatch
@@ -2200,8 +2198,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// against a wrong date. Belt-and-braces: before the very first key of
     /// the plan, this still just LOGS whether NumLock is off
     /// (GetKeyState(VK_NUMLOCK)) - never toggled, since silently flipping a
-    /// pharmacist's NumLock state would be its own surprise, and Unicode
-    /// SendInput doesn't depend on it anyway.
+    /// pharmacist's NumLock state would be its own surprise.
+    ///
+    /// Round 5 rewrite (W-T92, Will verbatim: "I have described the
+    /// problem to you in immaculate detail and have given you even the
+    /// exact keystrokes that are needed through the original macro file I
+    /// sent you. Fucking figure it out."). Round 4's date text was bare
+    /// "MMddyyyy" digits sent as KEYEVENTF_UNICODE packets - neither
+    /// matches the macro. Will's macro types "MM-dd-yyyy"/"MM-dd-yy" (see
+    /// ReportDateKeys) as real virtual-key + scan-code keystrokes (Macro
+    /// Express's default "Text Type" mode is "simulate keystrokes", not
+    /// Unicode input) - every Tab/date/F12 send below now goes through
+    /// NativeInput's raw SendInput helpers (SendSpecialKey/TypeKeystrokes)
+    /// instead of FlaUI.Core.Input.Keyboard/TypeUnicodeText, so every key
+    /// this method sends carries both wVk and wScan, exactly like the
+    /// macro's own physical-keyboard replay. The focused element's
+    /// ClassName/Name/AutomationId (DescribeControl) is now logged after
+    /// every key action, not just before Tab groups, so the next failure
+    /// can be diagnosed from the run log alone.
     /// </summary>
     private bool ReplayReportParameterKeyPlan(IReadOnlyList<ReportParameterKeyAction> plan, AutomationElement parametersWindow, Action<string> log)
     {
@@ -2243,12 +2257,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 switch (action.Kind)
                 {
                     case ReportParameterKeyActionKind.Tab:
-                        Keyboard.Type(VirtualKeyShort.TAB);
+                        if (!NativeInput.SendSpecialKey((ushort)VirtualKeyShort.TAB, sendFailure => log($"  Tab: {sendFailure}")))
+                        {
+                            log("  Tab: SendInput reported a failed send.");
+                        }
+                        if (i + 1 >= plan.Count || plan[i + 1].Kind != ReportParameterKeyActionKind.Tab)
+                        {
+                            log($"  focused after Tab group: {DescribeControl(SafeFocusedElement())}");
+                        }
                         break;
 
                     case ReportParameterKeyActionKind.ArrowDown:
                         log("  key ArrowDown");
-                        Keyboard.Type(VirtualKeyShort.DOWN);
+                        if (!NativeInput.SendSpecialKey((ushort)VirtualKeyShort.DOWN, sendFailure => log($"  ArrowDown: {sendFailure}")))
+                        {
+                            log("  ArrowDown: SendInput reported a failed send.");
+                        }
+                        log($"  focused after ArrowDown: {DescribeControl(SafeFocusedElement())}");
                         break;
 
                     case ReportParameterKeyActionKind.TypeText:
@@ -2263,20 +2288,25 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
                         var expected = action.Text ?? string.Empty;
                         log($"  text {expected}");
+                        log("  sent as vk+scan keystrokes");
 
-                        // Round 4 reviewer fix (blocking finding 1): SendInput's
-                        // return value is now checked (NativeInput.TypeUnicodeText
-                        // returns false on any short send - see that method's
-                        // doc for the cbSize bug this guards against). A failed
-                        // send is logged distinctly from a readback mismatch, but
-                        // still falls through to the SAME readback+retry logic
-                        // below - if nothing was actually typed, the readback
-                        // will legitimately show Unavailable/Mismatch and the
-                        // existing decision handles it honestly rather than this
+                        // Round 5 fix (W-T92, Will verbatim: "...given you
+                        // even the exact keystrokes..."): Macro Express's
+                        // default Text Type mode sends real VK+scan-code
+                        // keystrokes, not KEYEVENTF_UNICODE packets - see
+                        // NativeInput.TypeKeystrokes's own doc. SendInput's
+                        // return value is still checked the same way
+                        // (TypeKeystrokes returns false on any short send);
+                        // a failed send is logged distinctly from a
+                        // readback mismatch, but still falls through to the
+                        // SAME readback+retry logic below - if nothing was
+                        // actually typed, the readback will legitimately
+                        // show Unavailable/Mismatch and the existing
+                        // decision handles it honestly rather than this
                         // branch guessing.
-                        if (!NativeInput.TypeUnicodeText(expected, sendFailure => log($"  {fieldLabel}: {sendFailure}")))
+                        if (!NativeInput.TypeKeystrokes(expected, (int)NativeInput.KeystrokeCharDelay.TotalMilliseconds, sendFailure => log($"  {fieldLabel}: {sendFailure}")))
                         {
-                            log($"  {fieldLabel}: TypeUnicodeText reported a failed send - checking the readback anyway.");
+                            log($"  {fieldLabel}: TypeKeystrokes reported a failed send - checking the readback anyway.");
                         }
                         Thread.Sleep(KeyEntrySettleDelay);
 
@@ -2343,15 +2373,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                         }
                         else
                         {
-                            log($"  {fieldLabel} still reads back as '{retryReadBack}' after the retry - aborting rather than run the report against a wrong date.");
+                            log($"  {fieldLabel} still reads back as '{retryReadBack}' after the retry (focused: {DescribeControl(SafeFocusedElement())}) - aborting rather than run the report against a wrong date.");
                             return false;
                         }
                         break;
                     }
 
                     case ReportParameterKeyActionKind.F12:
-                        Keyboard.Type(VirtualKeyShort.F12);
+                        if (!NativeInput.SendSpecialKey((ushort)VirtualKeyShort.F12, sendFailure => log($"  F12: {sendFailure}")))
+                        {
+                            log("  F12: SendInput reported a failed send.");
+                        }
                         log("  key F12");
+                        log($"  focused after F12: {DescribeControl(SafeFocusedElement())}");
                         break;
 
                     case ReportParameterKeyActionKind.SelectAll:
@@ -2377,7 +2411,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return true;
     }
 
-    /// <summary>Name + AutomationId of an element, for the "focused control before/after" log lines the GOAL brief asks for (step 2: "Log every keystroke/paste with the focused control's name before and after"). Never throws, never returns an empty string - always something loggable.</summary>
+    /// <summary>
+    /// ClassName + Name + AutomationId of an element, for the "focused
+    /// control before/after" log lines the GOAL brief asks for (step 2:
+    /// "Log every keystroke/paste with the focused control's name before
+    /// and after"). Round 5 addition (W-T92, GOAL brief step 4): ClassName
+    /// too, logged after EVERY key action (each Tab group, each date,
+    /// F12) - this is what actually lets the next failure be diagnosed
+    /// from Documents\Pioneer Reports\&lt;yyyy-MM&gt;\run-*.log without a live
+    /// UIA session, since Name/AutomationId alone were never enough to
+    /// tell "the right date field" apart from "some other control the
+    /// popup happened to focus". Never throws, never returns an empty
+    /// string - always something loggable.
+    /// </summary>
     private static string DescribeControl(AutomationElement? element)
     {
         if (element is null) return "(none)";
@@ -2385,9 +2431,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         var name = TryGetName(element, out var n) ? n : null;
         string automationId;
         try { automationId = element.AutomationId; } catch { automationId = string.Empty; }
+        string className;
+        try { className = element.ClassName; } catch { className = string.Empty; }
 
-        if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(automationId)) return "(unnamed)";
-        return $"name='{name}' id='{automationId}'";
+        if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(automationId) && string.IsNullOrEmpty(className)) return "(unnamed)";
+        return $"class='{className}' name='{name}' id='{automationId}'";
     }
 
     /// <summary>Reads back whatever currently has keyboard focus via ValuePattern - the actual verification the GOAL brief asks for ("read it back through UI Automation ValuePattern"). Null (not empty string) means unreadable, distinct from a real empty value.</summary>

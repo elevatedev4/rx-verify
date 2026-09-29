@@ -1,20 +1,32 @@
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 namespace RxVerifyOverlay.Reports;
 
 /// <summary>
-/// Round 4 fix (W-T92 follow-up — the owner's real "Report Parameters"
-/// popup test: "It needs to select all on each date field and paste the
-/// proper date into it in the format MMDDYYYY, then F12 to run the
-/// report"). Pure "MMddyyyy" digit formatting (no slashes — Pioneer's own
-/// masked date field fills those in) for the date text
-/// ReportParameterKeyPlan types. No FlaUI/UIA dependency — unit tested in
+/// Round 5 fix (W-T92, Will verbatim: "I have described the problem to
+/// you in immaculate detail and have given you even the exact keystrokes
+/// that are needed through the original macro file I sent you"). Round
+/// 4's bare "MMddyyyy" digit formatting was never what the macro actually
+/// types — it was an earlier coder's guess, not the spec. The macro
+/// (Reports/recipes/README-macro-strings.txt) types two DIFFERENT
+/// formats, each with dash separators:
+///   %start_date_text% = %month%-01-%year%   -&gt; "MM-dd-yyyy" (4-digit year)
+///   %date_text%        = mm'-'dd'-'yy         -&gt; "MM-dd-yy"   (2-digit year)
+/// FormatBegin is the first (begin/as-of-range-start field), FormatEnd is
+/// the second (end field, and the single field on an AsOfDate popup —
+/// every AsOfDate macro types %date_text%, never %start_date_text%). No
+/// FlaUI/UIA dependency — unit tested in
 /// RxVerifyOverlay.Tests/Reports/ReportParameterKeysTests.cs.
 /// </summary>
 public static class ReportDateKeys
 {
-    public static string Format(DateTime date) => date.ToString("MMddyyyy");
+    /// <summary>Begin-date text for a DateRange popup's first field — the macro's %start_date_text% (%month%-01-%year%): two-digit month, dash, two-digit day, dash, FOUR-digit year.</summary>
+    public static string FormatBegin(DateTime date) => date.ToString("MM-dd-yyyy");
+
+    /// <summary>End-date text for a DateRange popup's second field, and the single field on an AsOfDate popup — the macro's %date_text% (Macro Express format mm'-'dd'-'yy): two-digit month, dash, two-digit day, dash, TWO-digit year.</summary>
+    public static string FormatEnd(DateTime date) => date.ToString("MM-dd-yy");
 }
 
 /// <summary>
@@ -104,19 +116,19 @@ public static class ReportParameterKeyPlan
         {
             case ReportParameterKind.AsOfDate:
                 AddLeadingTabs(actions, entry);
-                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(end)));
+                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.FormatEnd(end)));
                 AddTrailingKeys(actions, entry, includeF12);
                 if (includeF12) actions.Add(ReportParameterKeyAction.F12());
                 break;
 
             case ReportParameterKind.DateRange:
                 AddLeadingTabs(actions, entry);
-                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(begin)));
+                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.FormatBegin(begin)));
                 for (var i = 0; i < entry.TabsBetweenDates; i++)
                 {
                     actions.Add(ReportParameterKeyAction.Tab());
                 }
-                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.Format(end)));
+                actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.FormatEnd(end)));
                 AddTrailingKeys(actions, entry, includeF12);
                 if (includeF12) actions.Add(ReportParameterKeyAction.F12());
                 break;
@@ -222,12 +234,59 @@ public enum ReadbackDecision
     Mismatch
 }
 
-/// <summary>Pure wrapper around ReadbackDecision - see that enum's own doc.</summary>
+/// <summary>
+/// Round 5 fix (W-T92): a raw ordinal string compare made every legitimate
+/// read-back a false "Mismatch" the moment Pioneer's own field redisplayed
+/// what we typed in its own formatting — e.g. we type "09-01-2026"
+/// (FormatBegin, 4-digit year) but a masked date field reads back
+/// "09/01/2026" (slashes) or "9/1/2026" (no leading zeros), or we type
+/// "09-28-26" (FormatEnd, 2-digit year) and the field reads back
+/// "09/28/2026" (4-digit year). None of those are a WRONG date - only a
+/// different display of the same one - so Decide now compares the
+/// month/day/year components, not the raw text. Digits are grouped by
+/// their ORIGINAL separator runs (not flattened into one digit string):
+/// flattening "9/1/2026" would collapse into "912026", which is the wrong
+/// length to tell apart from a genuine "91-20-26"-shaped mismatch, so the
+/// three digit groups are compared positionally instead. A 2-digit vs.
+/// 4-digit year only needs its last two digits to agree; month and day
+/// must always match exactly. Only a real month/day/last-two-year-digit
+/// mismatch triggers the caller's one-time Ctrl+A/Ctrl+V retry.
+/// </summary>
 public static class ReadbackEvaluator
 {
     public static ReadbackDecision Decide(string? readback, string expected)
     {
         if (readback is null) return ReadbackDecision.Unavailable;
-        return string.Equals(readback, expected, StringComparison.Ordinal) ? ReadbackDecision.Ok : ReadbackDecision.Mismatch;
+
+        if (string.Equals(readback, expected, StringComparison.Ordinal)) return ReadbackDecision.Ok;
+
+        var readParts = ExtractDateDigitGroups(readback);
+        var expectedParts = ExtractDateDigitGroups(expected);
+
+        if (readParts is not null && expectedParts is not null
+            && readParts[0] == expectedParts[0]
+            && readParts[1] == expectedParts[1]
+            && YearsMatch(readParts[2], expectedParts[2]))
+        {
+            return ReadbackDecision.Ok;
+        }
+
+        return ReadbackDecision.Mismatch;
     }
+
+    /// <summary>Month/day/year as integers (leading zeros stripped), taken from the value's own digit runs — null unless there are exactly three groups (any non-digit separator: '/', '-', etc.).</summary>
+    private static int[]? ExtractDateDigitGroups(string value)
+    {
+        var matches = Regex.Matches(value, @"\d+");
+        if (matches.Count != 3) return null;
+
+        var groups = new int[3];
+        for (var i = 0; i < 3; i++)
+        {
+            if (!int.TryParse(matches[i].Value, out groups[i])) return null;
+        }
+        return groups;
+    }
+
+    private static bool YearsMatch(int a, int b) => a == b || (a % 100) == (b % 100);
 }

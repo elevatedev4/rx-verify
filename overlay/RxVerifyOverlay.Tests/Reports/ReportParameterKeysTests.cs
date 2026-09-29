@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using RxVerifyOverlay.Reports;
 using Xunit;
 
@@ -8,30 +9,56 @@ namespace RxVerifyOverlay.Tests.Reports;
 /// <summary>Unit tests for Reports/ReportParameterKeys.cs — pure date formatting, keystroke-plan building, and per-report timeout math. No UIA/FlaUI/WPF involved (PioneerReportDriver.ReplayReportParameterKeyPlan is the untestable-on-this-Mac shim that actually sends these).</summary>
 public class ReportParameterKeysTests
 {
-    // --- ReportDateKeys.Format ---
+    // --- ReportDateKeys.FormatBegin / FormatEnd (W-T92 round 5 — the macro is the spec) ---
 
     [Fact]
-    public void FormatUsesMMddyyyyWithNoSlashes()
+    public void FormatBeginUsesMMDashDdDashFourDigitYear()
     {
-        var date = new DateTime(2026, 9, 21);
+        // Macro's %start_date_text% = %month%-01-%year% -> "MM-dd-yyyy".
+        var date = new DateTime(2026, 9, 1);
 
-        Assert.Equal("09212026", ReportDateKeys.Format(date));
+        Assert.Equal("09-01-2026", ReportDateKeys.FormatBegin(date));
     }
 
     [Fact]
-    public void FormatPadsSingleDigitMonthAndDayWithLeadingZeros()
+    public void FormatBeginPadsSingleDigitMonthAndDayWithLeadingZeros()
     {
         var date = new DateTime(2026, 1, 5);
 
-        Assert.Equal("01052026", ReportDateKeys.Format(date));
+        Assert.Equal("01-05-2026", ReportDateKeys.FormatBegin(date));
     }
 
     [Fact]
-    public void FormatUsesTheFullFourDigitYear()
+    public void FormatBeginUsesTheFullFourDigitYear()
     {
         var date = new DateTime(2028, 12, 31);
 
-        Assert.Equal("12312028", ReportDateKeys.Format(date));
+        Assert.Equal("12-31-2028", ReportDateKeys.FormatBegin(date));
+    }
+
+    [Fact]
+    public void FormatEndUsesMMDashDdDashTwoDigitYear()
+    {
+        // Macro's %date_text% = Macro Express format mm'-'dd'-'yy -> "MM-dd-yy".
+        var date = new DateTime(2026, 9, 28);
+
+        Assert.Equal("09-28-26", ReportDateKeys.FormatEnd(date));
+    }
+
+    [Fact]
+    public void FormatEndPadsSingleDigitMonthAndDayWithLeadingZeros()
+    {
+        var date = new DateTime(2026, 1, 5);
+
+        Assert.Equal("01-05-26", ReportDateKeys.FormatEnd(date));
+    }
+
+    [Fact]
+    public void FormatEndUsesOnlyTheLastTwoYearDigits()
+    {
+        var date = new DateTime(2028, 12, 31);
+
+        Assert.Equal("12-31-28", ReportDateKeys.FormatEnd(date));
     }
 
     // --- ReportParameterKeyPlan.Build (Round 4: leading tabs, TypeText, trailing keys) ---
@@ -42,9 +69,12 @@ public class ReportParameterKeysTests
         // ArAgedTrialBalanceKey ("Customer A/R Control Balance") macro:
         // <TAB><TAB>%start_date_text%<TAB><TAB>%date_text%<F12> - the
         // popup does NOT open with Begin already focused for this report.
+        // W-T92 round 5: begin uses FormatBegin (4-digit year), end uses
+        // FormatEnd (2-digit year) - exactly the macro's two different
+        // date variables, not the same format twice.
         var entry = ReportCatalog.FindByKey(ReportCatalog.ArAgedTrialBalanceKey)!;
-        var begin = new DateTime(2026, 8, 1);
-        var end = new DateTime(2026, 8, 31);
+        var begin = new DateTime(2026, 9, 1);
+        var end = new DateTime(2026, 9, 28);
 
         var plan = ReportParameterKeyPlan.Build(entry, begin, end);
 
@@ -52,10 +82,10 @@ public class ReportParameterKeysTests
         {
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.Tab(),
-            ReportParameterKeyAction.TypeText("08012026"),
+            ReportParameterKeyAction.TypeText("09-01-2026"),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.Tab(),
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.TypeText("09-28-26"),
             ReportParameterKeyAction.F12(),
         };
 
@@ -74,9 +104,9 @@ public class ReportParameterKeysTests
 
         var expected = new[]
         {
-            ReportParameterKeyAction.TypeText("08012026"),
+            ReportParameterKeyAction.TypeText("08-01-2026"),
             ReportParameterKeyAction.Tab(),
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.TypeText("08-31-26"),
             ReportParameterKeyAction.F12(),
         };
 
@@ -86,7 +116,10 @@ public class ReportParameterKeysTests
     [Fact]
     public void AsOfDateEntryTypesOnlyTheEndDateThenF12()
     {
-        // ThirdPartyAgedTrialBalanceKey's macro: %date_text%<F12> - no leading tabs, single field.
+        // ThirdPartyAgedTrialBalanceKey's macro: %date_text%<F12> - no
+        // leading tabs, single field, and that field uses %date_text%
+        // (FormatEnd, 2-digit year) - every AsOfDate macro types
+        // %date_text%, never %start_date_text%.
         var entry = ReportCatalog.FindByKey(ReportCatalog.ThirdPartyAgedTrialBalanceKey)!;
         var begin = new DateTime(2026, 8, 1);
         var end = new DateTime(2026, 8, 31);
@@ -95,7 +128,7 @@ public class ReportParameterKeysTests
 
         var expected = new[]
         {
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.TypeText("08-31-26"),
             ReportParameterKeyAction.F12(),
         };
 
@@ -117,7 +150,7 @@ public class ReportParameterKeysTests
 
         var expected = new[]
         {
-            ReportParameterKeyAction.TypeText("08312026"),
+            ReportParameterKeyAction.TypeText("08-31-26"),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.ArrowDown(),
             ReportParameterKeyAction.F12(),
@@ -143,18 +176,36 @@ public class ReportParameterKeysTests
     }
 
     [Fact]
-    public void EveryTypeTextActionCarriesEightDigitsOnly()
+    public void EveryTypeTextActionMatchesItsExpectedDashedDateFormat()
     {
+        // W-T92 round 5: the two TypeText formats are no longer identical
+        // (bare 8-digit MMddyyyy) - the FIRST TypeText in a plan (Begin, or
+        // the only one for AsOfDate/single-field reports) is FormatBegin
+        // ("MM-dd-yyyy", 4-digit year); every subsequent one (End) is
+        // FormatEnd ("MM-dd-yy", 2-digit year). AsOfDate's single field is
+        // always the macro's %date_text% (End format) - see
+        // AsOfDateEntryTypesOnlyTheEndDateThenF12 above - so this walks
+        // every entry's own TypeText count rather than assuming position 0
+        // is always "Begin".
+        var beginFormat = new Regex(@"^\d{2}-\d{2}-\d{4}$");
+        var endFormat = new Regex(@"^\d{2}-\d{2}-\d{2}$");
+
         foreach (var entry in ReportCatalog.All.Where(e => e.ParameterKind != ReportParameterKind.PaymentsSearch))
         {
             var plan = ReportParameterKeyPlan.Build(entry, new DateTime(2026, 1, 5), new DateTime(2026, 12, 31));
+            var typeTextActions = plan.Where(a => a.Kind == ReportParameterKeyActionKind.TypeText).ToList();
 
-            foreach (var action in plan.Where(a => a.Kind == ReportParameterKeyActionKind.TypeText))
+            if (entry.ParameterKind == ReportParameterKind.AsOfDate)
             {
-                Assert.NotNull(action.Text);
-                Assert.Equal(8, action.Text!.Length);
-                Assert.All(action.Text, ch => Assert.True(char.IsDigit(ch)));
+                var single = Assert.Single(typeTextActions);
+                Assert.Matches(endFormat, single.Text);
+                continue;
             }
+
+            // DateRange: exactly two TypeText actions, Begin then End.
+            Assert.Equal(2, typeTextActions.Count);
+            Assert.Matches(beginFormat, typeTextActions[0].Text);
+            Assert.Matches(endFormat, typeTextActions[1].Text);
         }
     }
 
@@ -317,4 +368,37 @@ public class ReportParameterKeysTests
         Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide(string.Empty, "09212026"));
     }
 
+    // --- ReadbackEvaluator.Decide normalization (W-T92 round 5): the
+    // field's own display formatting (slashes vs. dashes, no leading
+    // zeros, 2- vs. 4-digit year) is not a real mismatch. ---
+
+    [Fact]
+    public void DecideIsOkWhenTheFieldRedisplaysDashesAsSlashes()
+    {
+        Assert.Equal(ReadbackDecision.Ok, ReadbackEvaluator.Decide("09/01/2026", "09-01-2026"));
+    }
+
+    [Fact]
+    public void DecideIsOkWhenTheFieldDropsLeadingZerosOnMonthAndDay()
+    {
+        Assert.Equal(ReadbackDecision.Ok, ReadbackEvaluator.Decide("9/1/2026", "09-01-2026"));
+    }
+
+    [Fact]
+    public void DecideIsOkWhenTheFieldShowsAFourDigitYearForATwoDigitExpectedYear()
+    {
+        Assert.Equal(ReadbackDecision.Ok, ReadbackEvaluator.Decide("09/28/2026", "09-28-26"));
+    }
+
+    [Fact]
+    public void DecideIsMismatchWhenTheMonthGenuinelyDiffers()
+    {
+        Assert.Equal(ReadbackDecision.Mismatch, ReadbackEvaluator.Decide("10/01/2026", "09-01-2026"));
+    }
+
+    [Fact]
+    public void DecideIsUnavailableWhenReadbackIsNullRegardlessOfExpectedFormat()
+    {
+        Assert.Equal(ReadbackDecision.Unavailable, ReadbackEvaluator.Decide(null, "09-01-2026"));
+    }
 }
