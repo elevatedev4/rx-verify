@@ -62,6 +62,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
+    /// Round 7 (W-T92, Will 2026-09-30: "it needs to wait until it is run
+    /// ... not try to save the report until that has happened, otherwise
+    /// the report will save empty"). How long
+    /// WaitForReportCompletionStatus polls Pioneer's own bottom-left
+    /// report-generation status text (every PollInterval, ~250ms) for "the
+    /// report has completed" before aborting the save step — see
+    /// ReportCompletionStatus's own doc for the full decision. Deliberately
+    /// its own fixed timeout, independent of ReportTimeoutPlan.CalculateTimeout
+    /// (that one gates the PREVIEW WINDOW/toolbar appearing at all, via
+    /// IsPreviewReady, and is sized per-report off each report's own
+    /// MacroRunTime); this one gates the save step specifically, after the
+    /// preview window is already up, and applies identically to every
+    /// report that reaches it.
+    /// </summary>
+    private static readonly TimeSpan ReportCompletionStatusTimeout = TimeSpan.FromSeconds(180);
+
+    /// <summary>
     /// Round 2 fix (Will's first real run - foreground re-check used a
     /// single fixed 150ms sleep before giving up): how long
     /// EnsurePioneerForeground will keep polling after BringToForeground
@@ -517,6 +534,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             }
 
             if (!previewReady) return ReportRunResult.Failed("Timed out waiting for the report preview", stopwatch.Elapsed);
+
+            // Round 7 (W-T92, Will 2026-09-30): the preview window/toolbar
+            // appearing (IsPreviewReady above) is not the same thing as
+            // the report actually finishing - never export/save until
+            // Pioneer's own bottom-left status text confirms "the report
+            // has completed". Shared here in RunFinancialReport so it
+            // applies to every enabled DateRange/AsOfDate report that
+            // reaches this F12 -> save path (see ReportCatalog.All),
+            // not just Customer A/R.
+            var reportCompleted = await WaitForReportCompletionStatus(log, ct).ConfigureAwait(false);
+            if (!reportCompleted) return ReportRunResult.Failed("Timed out waiting for the report to finish generating - never saved", stopwatch.Elapsed);
 
             if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
@@ -2831,6 +2859,219 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         _previewWindowElement = preview;
         _previewWindowHandle = SafeNativeHandle(preview);
         return _previewWindowHandle != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Round 7 (W-T92, Will 2026-09-30, verbatim: "when saving the report,
+    /// it needs to wait until it is run. The window will show 'Please wait
+    /// while the report is generated...' in the bottom left and then
+    /// change to 'The report has completed' when it is done. The app needs
+    /// to watch for this and not try to save the report until that has
+    /// happened, otherwise the report will save empty."). Polls every
+    /// PollInterval (~250ms) for Pioneer's own bottom-left status text
+    /// across every Pioneer-owned top-level window
+    /// (FindReportCompletionStatusElement), feeding whatever it reads
+    /// through ReportCompletionStatus.Decide — the pure decision this loop
+    /// is a thin, build/run-unverifiable-on-this-Mac shim around (see that
+    /// class's own doc). Logs every Generating/Completed/other transition
+    /// with a UTC timestamp so a run's log shows exactly when the report
+    /// actually finished, not just that it eventually did. Returns true
+    /// only once Decide says Proceed; false (never saves) on TimedOut,
+    /// after logging the last status text actually seen. If the status
+    /// element is never found at all during the wait, a one-time
+    /// diagnostic dump of every Edit/Text/StatusBar element's
+    /// AutomationId/ClassName/ControlType (never a Name/value — see
+    /// WriteStatusElementDiagnosticDump) is written before returning false,
+    /// so the real status control can be re-identified/re-tuned from the
+    /// log alone.
+    /// </summary>
+    private async Task<bool> WaitForReportCompletionStatus(Action<string> log, CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        string? lastStatusText = null;
+        string? lastLoggedPhase = null;
+        var everFound = false;
+
+        log("Waiting for Pioneer's report-completion status (bottom-left) before saving...");
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var (element, text) = FindReportCompletionStatusElement();
+            if (element is not null)
+            {
+                everFound = true;
+                lastStatusText = text;
+
+                var phase = ReportCompletionStatus.IsCompleted(text) ? "completed"
+                    : ReportCompletionStatus.IsGenerating(text) ? "generating"
+                    : "other";
+                if (phase != lastLoggedPhase)
+                {
+                    log($"  report status ({DateTime.UtcNow:O}): {phase} - '{text}'");
+                    lastLoggedPhase = phase;
+                }
+            }
+
+            var decision = ReportCompletionStatus.Decide(lastStatusText, stopwatch.Elapsed, ReportCompletionStatusTimeout);
+
+            if (decision == ReportCompletionDecision.Proceed)
+            {
+                log($"Report has completed (elapsed={stopwatch.Elapsed.TotalSeconds:0.0}s) - proceeding to save.");
+                return true;
+            }
+
+            if (decision == ReportCompletionDecision.TimedOut)
+            {
+                if (!everFound)
+                {
+                    log("Report-completion status element was never found - dumping status/editable elements once.");
+                    WriteStatusElementDiagnosticDump(log);
+                }
+
+                log($"Timed out after {ReportCompletionStatusTimeout.TotalSeconds:0}s waiting for the report to finish generating - last status text seen: '{lastStatusText ?? "<none>"}'. Not saving.");
+                return false;
+            }
+
+            await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>ControlTypes eligible for FindReportCompletionStatusElement's search and WriteStatusElementDiagnosticDump's fallback dump — a plain text/status-bar label is where Pioneer would expose this kind of transient message; restricted (not a full-tree walk) so this never accidentally matches an unrelated Edit field's current value.</summary>
+    private static readonly ControlType[] ReportStatusSearchControlTypes = { ControlType.Text, ControlType.StatusBar };
+
+    /// <summary>
+    /// Searches every Pioneer-owned top-level window's Text/StatusBar
+    /// descendants for Will's own bottom-left report-status phrases
+    /// (ReportCompletionStatus.GeneratingPhrase/CompletedPhrase) — Contains,
+    /// case-insensitive, since the live control may carry extra characters
+    /// around the phrase (a trailing ellipsis, a percentage, punctuation)
+    /// this driver has no confirmed UIA dump of yet. Returns the first
+    /// match's element plus its raw Name text — the ONE place this driver
+    /// logs that text directly (WaitForReportCompletionStatus): deliberately
+    /// allowed, since both phrases are fixed Pioneer UI labels, never a
+    /// screen VALUE/PHI.
+    /// </summary>
+    private (AutomationElement? Element, string? Text) FindReportCompletionStatusElement()
+    {
+        foreach (var (window, _) in EnumeratePioneerOwnedTopLevelWindows())
+        {
+            foreach (var controlType in ReportStatusSearchControlTypes)
+            {
+                var match = FindStatusPhraseDescendant(window, controlType);
+                if (match is { } found) return found;
+            }
+        }
+
+        return (null, null);
+    }
+
+    private static (AutomationElement Element, string Text)? FindStatusPhraseDescendant(AutomationElement window, ControlType controlType)
+    {
+        AutomationElement[] descendants;
+        try { descendants = window.FindAllDescendants(cf => cf.ByControlType(controlType)); }
+        catch { return null; }
+
+        foreach (var candidate in descendants)
+        {
+            string? name;
+            try { name = candidate.Name; } catch { continue; }
+            if (string.IsNullOrEmpty(name)) continue;
+
+            if (ReportCompletionStatus.IsGenerating(name) || ReportCompletionStatus.IsCompleted(name))
+            {
+                return (candidate, name);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Round 7 (W-T92): when WaitForReportCompletionStatus's search for the
+    /// bottom-left status text finds nothing at all, this walks every
+    /// Pioneer-owned top-level window's Edit/Text/StatusBar descendants
+    /// (depth-capped, same MaxDiagnosticDumpDepth/MaxDiagnosticDumpLines
+    /// limits as the other diagnostic dumps in this file) and logs ONLY
+    /// ControlType/AutomationId/ClassName for each — reuses
+    /// UiaDumpFormatter.FormatElementDump, which already redacts every
+    /// non-chrome-allowlisted ControlType's Name via UiaNameRedaction
+    /// (Edit/Text/StatusBar are never on that allowlist), so the real
+    /// status text is never written to the log by this path either. Kept
+    /// as its own method (not a reuse of WriteUiaDiagnosticDump) since it
+    /// filters to status/editable control types only, across every
+    /// Pioneer-owned top-level window, not just _mainWindow's own tree.
+    /// </summary>
+    private void WriteStatusElementDiagnosticDump(Action<string> log)
+    {
+        try
+        {
+            log("--- report-completion status element dump ---");
+
+            foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+            {
+                log($"  window: '{MainWindowTitleRedaction.RedactIfNeeded(candidate.Title)}' class='{SafeClassName(window)}'");
+
+                var snapshots = CaptureStatusElementSnapshots(window, MaxDiagnosticDumpDepth);
+                foreach (var line in UiaDumpFormatter.FormatElementDump(snapshots, MaxDiagnosticDumpLines))
+                {
+                    log(line);
+                }
+            }
+
+            log("--- end report-completion status element dump ---");
+        }
+        catch (Exception ex)
+        {
+            log($"Diagnostics: report-completion status dump failed - {ex.Message}");
+        }
+    }
+
+    private static readonly HashSet<ControlType> StatusDiagnosticControlTypes = new()
+    {
+        ControlType.Edit, ControlType.Text, ControlType.StatusBar
+    };
+
+    private static List<UiaElementSnapshot> CaptureStatusElementSnapshots(AutomationElement root, int maxDepth)
+    {
+        var result = new List<UiaElementSnapshot>();
+        CaptureStatusElementsRecursive(root, 1, maxDepth, result);
+        return result;
+    }
+
+    private static void CaptureStatusElementsRecursive(AutomationElement element, int depth, int maxDepth, List<UiaElementSnapshot> result)
+    {
+        if (depth > maxDepth) return;
+        if (result.Count >= MaxDiagnosticDumpLines * 2) return;
+
+        AutomationElement[] children;
+        try { children = element.FindAllChildren(); }
+        catch { return; }
+
+        foreach (var child in children)
+        {
+            if (result.Count >= MaxDiagnosticDumpLines * 2) return;
+
+            ControlType controlType;
+            string controlTypeName;
+            try { controlType = child.ControlType; controlTypeName = controlType.ToString(); }
+            catch { controlType = default; controlTypeName = "<unknown>"; }
+
+            if (StatusDiagnosticControlTypes.Contains(controlType))
+            {
+                var name = SafeName(child);
+
+                string automationId;
+                try { automationId = child.AutomationId ?? string.Empty; } catch { automationId = string.Empty; }
+
+                var className = SafeClassName(child);
+
+                result.Add(new UiaElementSnapshot(controlTypeName, name, automationId, className, depth));
+            }
+
+            CaptureStatusElementsRecursive(child, depth + 1, maxDepth, result);
+        }
     }
 
     /// <summary>

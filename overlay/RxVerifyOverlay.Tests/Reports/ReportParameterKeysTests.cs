@@ -64,19 +64,20 @@ public class ReportParameterKeysTests
     // --- ReportParameterKeyPlan.Build (Round 4: leading tabs, TypeText, trailing keys) ---
 
     [Fact]
-    public void ControlBalanceEntryStartsWithBeginDateThenOneTabThenEndDateThenF12()
+    public void ControlBalanceEntryStartsWithBeginDateThenTwoTabsThenEndDateThenF12()
     {
-        // W-T92 round 6 correction (Will, 2026-09-29, verbatim: "you
-        // tabbed before entering the start date. Instead, you need to
-        // enter the start date, then tab to the end date field and enter
-        // that, then F12 to run the report."). The popup for THIS report
-        // opens with focus already in Begin/start-date - the originally
-        // recorded macro's <TAB><TAB> leader was wrong. ReportCatalog.cs
-        // now sets LeadingTabs: 0, TabsBetweenDates: 1 for
-        // ArAgedTrialBalanceKey, so the plan must be exactly: type begin
-        // date, one Tab, type end date, F12 - nothing before the first
-        // date, one Tab between dates. Begin uses FormatBegin (4-digit
-        // year), end uses FormatEnd (2-digit year).
+        // W-T92 round 7 correction (Will, 2026-09-30, verbatim: "You need
+        // to tab twice to enter to the end date. Your 1 tab ended in the
+        // time field of the start date."). Round 6 already confirmed the
+        // popup opens with focus already in Begin/start-date (LeadingTabs
+        // stays 0), but round 6's single Tab between Begin and End left
+        // the cursor in the Begin field's own trailing time sub-field
+        // instead of the End/date field - ReportCatalog.cs now sets
+        // TabsBetweenDates: 2 for ArAgedTrialBalanceKey, so the plan must
+        // be exactly: type begin date, two Tabs, type end date, F12 -
+        // nothing before the first date, two Tabs between dates. Begin
+        // uses FormatBegin (4-digit year), end uses FormatEnd (2-digit
+        // year).
         var entry = ReportCatalog.FindByKey(ReportCatalog.ArAgedTrialBalanceKey)!;
         var begin = new DateTime(2026, 9, 1);
         var end = new DateTime(2026, 9, 28);
@@ -86,6 +87,7 @@ public class ReportParameterKeysTests
         var expected = new[]
         {
             ReportParameterKeyAction.TypeText("09-01-2026"),
+            ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.Tab(),
             ReportParameterKeyAction.TypeText("09-28-26"),
             ReportParameterKeyAction.F12(),
@@ -102,9 +104,10 @@ public class ReportParameterKeysTests
         // per-entry data, not per-report code paths. This proves the
         // builder still honors LeadingTabs: 2 / TabsBetweenDates: 2 for
         // whichever entry (if any) actually needs that shape, independent
-        // of ArAgedTrialBalanceKey's round 6 correction to 0/1 above - a
-        // synthetic entry stands in so this test doesn't depend on any
-        // particular catalog row keeping those old values.
+        // of ArAgedTrialBalanceKey's own LeadingTabs: 0 / TabsBetweenDates: 2
+        // (round 6/7 corrections) above - a synthetic entry stands in so
+        // this test doesn't depend on any particular catalog row keeping
+        // those old values.
         var entry = new ReportCatalogEntry(
             Key: "test-two-leading-two-between",
             DisplayName: "Test Two Leading Two Between",

@@ -46,6 +46,35 @@ below verbatim. Do not "fix" the catalog entry back to match the raw
 macro text for this one report — the macro recording was the thing that
 was wrong.
 
+W-T92 round 7 correction (Will, 2026-09-30, verbatim: "You need to tab
+twice to enter to the end date. Your 1 tab ended in the time field of
+the start date."): round 6's single Tab above was one Tab short — the
+Begin/start-date field has its own trailing time sub-field, so the first
+Tab only moves focus from the date portion to the time portion of that
+SAME field; a second Tab is what actually reaches the End/date field.
+ReportCatalog.cs's ArAgedTrialBalanceKey entry is now LeadingTabs: 0,
+TabsBetweenDates: 2 (actual sequence: type begin date, Tab, Tab, type end
+date, F12). Coincidentally this matches the raw macro's END-of-sequence
+Tab count (it had two Tabs before %date_text%, just preceded by two
+Tabs it turns out were never needed before %start_date_text%) — still
+not a reason to "fix" LeadingTabs back to 2; Will's round 6 correction on
+that half stands.
+
+W-T92 round 7 addition (Will, 2026-09-30, verbatim: "when saving the
+report, it needs to wait until it is run. The window will show 'Please
+wait while the report is generated...' in the bottom left and then
+change to 'The report has completed' when it is done. The app needs to
+watch for this and not try to save the report until that has happened,
+otherwise the report will save empty."): PioneerReportDriver's shared
+RunFinancialReport sequencing (every enabled entry above except
+Payments, which never reaches this popup) now polls that bottom-left
+status text every ~250ms after F12, before the Export/Save step, and
+proceeds only once it reads "the report has completed" — see
+Reports/ReportCompletionStatus.cs for the pure decision and
+PioneerReportDriver.WaitForReportCompletionStatus for the poll loop.
+180s timeout; the last status text seen is logged and the report is
+never saved if it times out.
+
 ---8<--- RAW STRINGS OUTPUT BELOW ---8<---
 
 Reports-EOM (new, in process)

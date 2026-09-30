@@ -148,9 +148,18 @@ public static class ReportCatalog
             // enter that, then F12 to run the report"). The recorded
             // macro's <TAB><TAB> leader was wrong for this popup — it
             // opens with focus already in the Begin/start-date field, so
-            // 0 leading tabs and a single Tab between Begin and End is
-            // the actual sequence Will confirmed: %start_date_text%<TAB>%date_text%<F12>.
-            TabsBetweenDates: 1,
+            // 0 leading tabs is still correct (kept from round 6).
+            //
+            // Round 7 correction (W-T92, Will 2026-09-30, verbatim: "You
+            // need to tab twice to enter to the end date. Your 1 tab
+            // ended in the time field of the start date."). Round 6's
+            // single Tab between Begin and End was one tab short — the
+            // popup's Begin/start-date field has its own trailing time
+            // sub-field, so the FIRST Tab only leaves the date portion
+            // for the time portion of that SAME field; a second Tab is
+            // what actually reaches the End/date field. Actual sequence:
+            // %start_date_text%<TAB><TAB>%date_text%<F12>.
+            TabsBetweenDates: 2,
             MacroRunTime: TimeSpan.FromSeconds(6),
             LeadingTabs: 0),
 
