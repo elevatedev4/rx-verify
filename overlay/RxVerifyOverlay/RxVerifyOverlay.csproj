@@ -83,6 +83,26 @@
       triggers — both stay on the local workstation. See README.md
       "Local-only, by construction" for the full audit.
     -->
+    <!--
+      Velopack installer channel (feat/velopack-installer, mirrors
+      vaccine-assist's identical change). Suppresses the WPF SDK's
+      auto-generated Main() (App.xaml's Build Action stays
+      "ApplicationDefinition" so InitializeComponent() is still generated —
+      only the paired Main() is suppressed) so Program.cs can provide its
+      own, calling VelopackApp.Build().Run() first. See Program.cs's doc
+      comment for the full explanation — Microsoft's own documented
+      mechanism for a custom WPF entry point, not a hack.
+
+      Both DefineConstants and StartupObject are needed together (same CI
+      fix vaccine-assist hit): DISABLE_XAML_GENERATED_MAIN alone doesn't
+      reliably suppress the generated Main in every build (the *_wpftmp
+      intermediate project can still see two Main() methods and fail with
+      CS0017 "Program has more than one entry point defined"); StartupObject
+      is MSBuild's equivalent of the compiler's /main flag and makes the
+      intent unambiguous either way.
+    -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <StartupObject>RxVerifyOverlay.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -102,6 +122,48 @@
       works on Windows" caveat on this package doesn't apply here.
     -->
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+
+    <!--
+      Velopack installer channel: real Setup.exe + self-update as an
+      ADDITIONAL channel alongside the existing bootstrap-fresh.ps1 +
+      shortcut flow, which must keep working exactly as today — see
+      Velopack/VelopackUpdater.cs's gate on UpdateManager.IsInstalled for
+      how that's enforced. Same version as vaccine-assist's identical
+      channel (newest stable release on nuget.org as of 2026-09-29).
+    -->
+    <PackageReference Include="Velopack" Version="1.2.161" />
+
+    <!--
+      Velopack's own NuGet package has NO client-side S3 update source
+      (verified against github.com/velopack/velopack tag 1.2.161 —
+      Sources/ only ships GithubSource/GitlabSource/GiteaSource/
+      SimpleWebSource/SimpleFileSource/VelopackFlowSource; S3 support is
+      CLI-only, for `vpk upload/download s3`, i.e. for PUSHING a release,
+      not for an app to pull one). Velopack/S3UpdateSource.cs implements
+      the missing client-side half directly against S3 using this SDK, for
+      the private-bucket + embedded-read-only-key design (mirrors
+      vaccine-assist's identical channel).
+    -->
+    <PackageReference Include="AWSSDK.S3" Version="4.0.103.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Read-only S3 credentials for update checks — see
+      Velopack/release-source.example.json (committed, placeholders only)
+      and this repo's .gitignore. The SDK's default item globs already pick
+      this file up as a "None" item when it exists (it's just another file
+      under the project directory) — this only ADDS the copy-to-output
+      metadata to that existing item (via Update=, not Include=, so there's
+      no duplicate-item conflict with the implicit glob). Condition="Exists(...)"
+      means a checkout without this file (every checkout except a
+      workstation deliberately configured for it) builds exactly as before —
+      VelopackUpdater logs once and skips update checks entirely when it's
+      missing (see ReleaseSourceConfig.Load).
+    -->
+    <None Update="Velopack\release-source.json" Condition="Exists('Velopack\release-source.json')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- BUILD FRESHNESS STAMP: embeds RxVerifyBuildSha/RxVerifyBuildTime (see
