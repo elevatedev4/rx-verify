@@ -10,8 +10,12 @@ cert yet).
 
 1. Node.js must already be installed on the PC (major version 20+) — the
    old shortcut's `bootstrap-fresh.ps1` flow installs it via `winget`; this
-   installer does **not** bundle Node.js itself, only the overlay app and
-   the compiled engine (`dist/`).
+   installer does **not** bundle Node.js itself, only the overlay app, the
+   compiled engine (`current\dist\`), and its drug/NDC/RxNorm datasets
+   (`current\data\*.json.gz`) — the loaders in `src/drug/` read `data/` as
+   a sibling of `dist/`, so both must land side by side under
+   `%LocalAppData%\RxVerifyOverlay\current\` exactly as they sit at the
+   repo root in the checkout flow.
 2. Download `RxVerifyOverlay-Setup.exe` (link provided separately — the S3
    bucket is private, so there is no public URL to paste here).
 3. Run it. Windows SmartScreen will show an "unrecognized app" warning
@@ -48,10 +52,10 @@ git push --tags
 
 Pushing a `v*` tag triggers `.github/workflows/desktop-release.yml`, which
 builds the engine (`npm ci && npm run build`), publishes and packs the
-overlay (`vpk`), and uploads the installer + update feed to the private S3
-bucket. You can also trigger it manually from the GitHub Actions tab
-("Desktop release" → Run workflow) with a version number, for a release
-with no tag.
+overlay together with the committed `data/*.json.gz` datasets (`vpk`), and
+uploads the installer + update feed to the private S3 bucket. You can also
+trigger it manually from the GitHub Actions tab ("Desktop release" → Run
+workflow) with a version number, for a release with no tag.
 
 ## One-time repo setup (Will only)
 

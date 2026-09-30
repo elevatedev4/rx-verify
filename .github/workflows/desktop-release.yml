@@ -72,6 +72,33 @@ jobs:
         shell: pwsh
         run: Copy-Item -Recurse dist publish/dist
 
+      # REVIEWER FIX (blocking, feat/velopack-installer): the engine's data
+      # loaders (src/drug/index.ts's LocalNdcProvider, src/drug/rxnorm.ts,
+      # src/drug/catalog.ts) all resolve their *.json.gz files as
+      # path.join(<dir of the running JS file>, '..', '..', 'data', ...) —
+      # i.e. TWO levels above dist/cli.js, making data/ a SIBLING of dist/,
+      # never a child of it. Copying only dist/ (above) into publish/dist/
+      # makes publish/ itself that sibling level, so data/ has to land at
+      # publish/data — not publish/dist/data — for the installed
+      # %LocalAppData%\RxVerifyOverlay\current\ layout to match the
+      # checkout's <repoRoot>/data/ layout exactly. Without this, every
+      # installed copy's three loaders silently fall through to their
+      # EMPTY_DATASET/empty-index fallback (see each file's own try/catch)
+      # and every lookup becomes unknown_drug.
+      - name: Copy drug/NDC/RxNorm data into publish output
+        shell: pwsh
+        run: Copy-Item -Recurse data publish/data
+
+      - name: Verify data files were copied
+        shell: pwsh
+        run: |
+          $dataFiles = Get-ChildItem -Path publish/data -Filter "*.json.gz" -ErrorAction SilentlyContinue
+          if (-not $dataFiles -or $dataFiles.Count -eq 0) {
+            throw "publish/data contains no *.json.gz files — the drug/NDC/RxNorm datasets would be missing from every installed copy. Failing the job."
+          }
+          Write-Host "Found data files:"
+          $dataFiles | ForEach-Object { Write-Host " - $($_.Name)" }
+
       - name: Install vpk
         run: dotnet tool install -g vpk
 
