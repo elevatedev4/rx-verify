@@ -142,6 +142,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private const int ReportStatusSearchMaxDepth = 8;
 
     /// <summary>
+    /// Reviewer round 7 re-review non-blocking fix: a total-node cap for
+    /// CollectStatusPhraseCandidates' walk, in addition to
+    /// ReportStatusSearchMaxDepth's depth cap — same "cap the walk, not
+    /// just its depth" idea as MaxRowDiagnosticDumpNodes, but a much
+    /// smaller number: that cap belongs to a one-time diagnostic dump,
+    /// while this walk runs every ~250ms for up to 180s, so a wide (not
+    /// just deep) window tree still can't make every poll tick expensive.
+    /// </summary>
+    private const int ReportStatusSearchMaxNodes = 400;
+
+    /// <summary>
     /// Round 3 (GOAL brief fix 2b): "click once inside the grid (work-area
     /// pane rect, ~40% across, first data row)". Owner's screenshot: the
     /// grid starts roughly 130px below the WINDOW top at 100% scaling
@@ -2894,10 +2905,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// to watch for this and not try to save the report until that has
     /// happened, otherwise the report will save empty."). Polls every
     /// PollInterval (~250ms) for Pioneer's own bottom-left status text —
-    /// scoped to THIS report's own preview window (FindReportCompletionStatusElement;
-    /// see that method's own doc for why never any other Pioneer window) —
-    /// feeding whatever it reads through ReportCompletionStatus.Decide, the
-    /// pure decision this loop is a thin, build/run-unverifiable-on-this-Mac
+    /// scoped to THIS report's own preview window, with a logged fallback
+    /// to _mainWindow (FindReportCompletionStatusElement; see that
+    /// method's own doc for why never any OTHER Pioneer window) — feeding
+    /// whatever it reads through ReportCompletionStatus.Decide, the pure
+    /// decision this loop is a thin, build/run-unverifiable-on-this-Mac
     /// shim around (see that class's own doc). Logs every
     /// Generating/Completed/other transition with a UTC timestamp so a
     /// run's log shows exactly when the report actually finished, not just
@@ -2909,13 +2921,33 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// see WriteStatusElementDiagnosticDump) is written before returning
     /// false, so the real status control can be re-identified/re-tuned
     /// from the log alone.
+    ///
+    /// Reviewer round 7 re-review BLOCKING fix: _mainWindow is resolved
+    /// ONCE per BATCH (ReportsCoordinator.RunAsync calls FindMainWindow
+    /// once before its loop of up to 6 reports, never refreshed per
+    /// report) — so a "completed" reading reached only via the
+    /// _mainWindow fallback could be a stale leftover from a PRIOR
+    /// report's run still on screen, satisfying report N+1's very first
+    /// poll tick cold. A fallback Completed reading is now trusted (passed
+    /// to Decide as completedIsTrusted: true) ONLY once THIS call has
+    /// actually observed a Generating reading first (sawGeneratingThisRun,
+    /// from either window — a real report visibly starts to generate
+    /// before it finishes); until then it's treated exactly like "not
+    /// found yet" (KeepWaiting, then TimedOut — never Proceed), logged
+    /// once via loggedUntrustedFallbackCompleted. A Completed reading from
+    /// _previewWindowElement itself is always trusted, same as before —
+    /// that window is guaranteed fresh for this specific report.
     /// </summary>
     private async Task<bool> WaitForReportCompletionStatus(Action<string> log, CancellationToken ct)
     {
         var stopwatch = Stopwatch.StartNew();
         string? lastStatusText = null;
+        var lastCompletedIsTrusted = true;
         string? lastLoggedPhase = null;
+        string? lastLoggedFallbackText = null;
         var everFound = false;
+        var sawGeneratingThisRun = false;
+        var loggedUntrustedFallbackCompleted = false;
 
         log("Waiting for Pioneer's report-completion status (bottom-left) before saving...");
 
@@ -2923,11 +2955,34 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             ct.ThrowIfCancellationRequested();
 
-            var (element, text) = FindReportCompletionStatusElement(log);
+            var (element, text, fromMainWindowFallback) = FindReportCompletionStatusElement();
             if (element is not null)
             {
                 everFound = true;
                 lastStatusText = text;
+
+                // Reviewer round 7 re-review non-blocking fix: dedupe this
+                // line by matched TEXT (same idea as lastLoggedPhase below),
+                // not once per poll tick - it would otherwise repeat every
+                // ~250ms for up to 180s whenever the fallback is in play.
+                if (fromMainWindowFallback && text != lastLoggedFallbackText)
+                {
+                    log("  report-completion status matched in the PioneerRx main window (not the preview window) - falling back.");
+                    lastLoggedFallbackText = text;
+                }
+
+                if (ReportCompletionStatus.IsGenerating(text)) sawGeneratingThisRun = true;
+
+                lastCompletedIsTrusted = !fromMainWindowFallback || sawGeneratingThisRun;
+
+                if (fromMainWindowFallback
+                    && ReportCompletionStatus.IsCompleted(text)
+                    && !lastCompletedIsTrusted
+                    && !loggedUntrustedFallbackCompleted)
+                {
+                    log("  main-window 'completed' ignored until 'generating' observed this run.");
+                    loggedUntrustedFallbackCompleted = true;
+                }
 
                 var phase = ReportCompletionStatus.IsCompleted(text) ? "completed"
                     : ReportCompletionStatus.IsGenerating(text) ? "generating"
@@ -2939,7 +2994,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 }
             }
 
-            var decision = ReportCompletionStatus.Decide(lastStatusText, stopwatch.Elapsed, ReportCompletionStatusTimeout);
+            var decision = ReportCompletionStatus.Decide(lastStatusText, lastCompletedIsTrusted, stopwatch.Elapsed, ReportCompletionStatusTimeout);
 
             if (decision == ReportCompletionDecision.Proceed)
             {
@@ -2983,46 +3038,51 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// which is exactly the code (IsPreviewReady / the fallback path) that
     /// just (re)set _previewWindowElement/_previewWindowHandle for this
     /// specific report. Falls back to _mainWindow ONLY if the status text
-    /// isn't found in the preview window and IS found there instead
-    /// (logged, so it's visible which window actually matched) — never any
-    /// other Pioneer-owned window. Both searches are depth-capped
-    /// (ReportStatusSearchMaxDepth) rather than an unbounded
-    /// FindAllDescendants, since this runs on every ~250ms tick for up to
-    /// 180s (reviewer non-blocking fix).
+    /// isn't found in the preview window and IS found there instead —
+    /// never any other Pioneer-owned window. Both searches are depth- and
+    /// node-capped (ReportStatusSearchMaxDepth/ReportStatusSearchMaxNodes)
+    /// rather than an unbounded FindAllDescendants, since this runs on
+    /// every ~250ms tick for up to 180s (reviewer non-blocking fix).
+    ///
+    /// Reviewer round 7 re-review BLOCKING fix: _mainWindow is resolved
+    /// ONCE per BATCH (not refreshed per report — see
+    /// WaitForReportCompletionStatus's own doc), so returning a
+    /// fallback match no longer implies it's safe to Proceed on by
+    /// itself; the FromMainWindowFallback flag lets the caller apply its
+    /// own "only trust this once a Generating reading has been seen this
+    /// run" rule (ReportCompletionStatus.Decide's completedIsTrusted
+    /// overload) rather than this method logging/deciding that here.
     /// </summary>
-    private (AutomationElement? Element, string? Text) FindReportCompletionStatusElement(Action<string> log)
+    private (AutomationElement? Element, string? Text, bool FromMainWindowFallback) FindReportCompletionStatusElement()
     {
         if (_previewWindowElement is not null)
         {
             var previewMatch = FindStatusPhraseInWindow(_previewWindowElement, ReportStatusSearchMaxDepth);
-            if (previewMatch is { } found) return found;
+            if (previewMatch is { } found) return (found.Element, found.Text, false);
         }
 
         if (_mainWindow is not null)
         {
             var mainMatch = FindStatusPhraseInWindow(_mainWindow, ReportStatusSearchMaxDepth);
-            if (mainMatch is { } foundInMain)
-            {
-                log("  report-completion status matched in the PioneerRx main window (not the preview window) - falling back.");
-                return foundInMain;
-            }
+            if (mainMatch is { } foundInMain) return (foundInMain.Element, foundInMain.Text, true);
         }
 
-        return (null, null);
+        return (null, null, false);
     }
 
     /// <summary>
-    /// Depth-capped walk of <paramref name="root"/>'s Text/StatusBar
-    /// descendants, collecting every candidate reading and handing them to
-    /// ReportCompletionStatus.SelectStatusText — reviewer non-blocking fix:
-    /// a Completed reading always wins over a Generating one, regardless
-    /// of which one UIA happens to enumerate first, rather than this
-    /// method returning on whichever phrase it meets first.
+    /// Depth- and node-capped walk of <paramref name="root"/>'s Text/
+    /// StatusBar descendants, collecting every candidate reading and
+    /// handing them to ReportCompletionStatus.SelectStatusText — reviewer
+    /// non-blocking fix: a Completed reading always wins over a Generating
+    /// one, regardless of which one UIA happens to enumerate first, rather
+    /// than this method returning on whichever phrase it meets first.
     /// </summary>
     private static (AutomationElement Element, string Text)? FindStatusPhraseInWindow(AutomationElement root, int maxDepth)
     {
         var candidates = new List<(AutomationElement Element, string Text)>();
-        CollectStatusPhraseCandidates(root, 1, maxDepth, candidates);
+        var visitedNodes = 0;
+        CollectStatusPhraseCandidates(root, 1, maxDepth, candidates, ref visitedNodes);
         if (candidates.Count == 0) return null;
 
         var selectedText = ReportCompletionStatus.SelectStatusText(candidates.Select(c => c.Text));
@@ -3036,9 +3096,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return null;
     }
 
-    private static void CollectStatusPhraseCandidates(AutomationElement element, int depth, int maxDepth, List<(AutomationElement Element, string Text)> result)
+    /// <summary>Reviewer round 7 re-review non-blocking fix: <paramref name="visitedNodes"/> caps total nodes visited (ReportStatusSearchMaxNodes) in addition to the existing depth cap (<paramref name="maxDepth"/>) — this walk runs on every ~250ms poll tick for up to 180s, so a wide (not just deep) window tree still can't make a single tick expensive.</summary>
+    private static void CollectStatusPhraseCandidates(AutomationElement element, int depth, int maxDepth, List<(AutomationElement Element, string Text)> result, ref int visitedNodes)
     {
         if (depth > maxDepth) return;
+        if (visitedNodes >= ReportStatusSearchMaxNodes) return;
 
         AutomationElement[] children;
         try { children = element.FindAllChildren(); }
@@ -3046,6 +3108,9 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
         foreach (var child in children)
         {
+            if (visitedNodes >= ReportStatusSearchMaxNodes) return;
+            visitedNodes++;
+
             ControlType controlType;
             try { controlType = child.ControlType; } catch { controlType = default; }
 
@@ -3061,7 +3126,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 }
             }
 
-            CollectStatusPhraseCandidates(child, depth + 1, maxDepth, result);
+            CollectStatusPhraseCandidates(child, depth + 1, maxDepth, result, ref visitedNodes);
         }
     }
 

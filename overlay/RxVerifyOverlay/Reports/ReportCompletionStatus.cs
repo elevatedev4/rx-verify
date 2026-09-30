@@ -64,9 +64,32 @@ public static class ReportCompletionStatus
     /// the full timeout rather than silently proceeding — the caller must
     /// see an actual "completed" reading before it ever saves.
     /// </summary>
-    public static ReportCompletionDecision Decide(string? statusText, TimeSpan elapsed, TimeSpan timeout)
+    public static ReportCompletionDecision Decide(string? statusText, TimeSpan elapsed, TimeSpan timeout) =>
+        Decide(statusText, completedIsTrusted: true, elapsed, timeout);
+
+    /// <summary>
+    /// Round 7 reviewer re-review fix (PioneerReportDriver's _mainWindow
+    /// fallback): _mainWindow is resolved ONCE per BATCH
+    /// (ReportsCoordinator.RunAsync calls FindMainWindow once before its
+    /// loop of up to 6 reports, never refreshed per report) — so a
+    /// Completed reading reached only through that fallback (never through
+    /// the CURRENT report's own, guaranteed-fresh _previewWindowElement)
+    /// could just be a stale "The report has completed" leftover from a
+    /// PRIOR report still showing in the main window, not evidence this
+    /// one is actually done. <paramref name="completedIsTrusted"/> is the
+    /// caller's answer to "is this specific Completed reading trustworthy
+    /// right now" — false makes a Completed statusText behave exactly like
+    /// any other non-completed reading (KeepWaiting until
+    /// <paramref name="elapsed"/> reaches <paramref name="timeout"/>, then
+    /// TimedOut — never Proceed). The 3-arg overload above is the
+    /// always-trusted case (every reading reached through the current
+    /// report's own preview window, or any reading before this
+    /// distinction existed), kept as the default so every pre-existing
+    /// call/test keeps behaving exactly as before.
+    /// </summary>
+    public static ReportCompletionDecision Decide(string? statusText, bool completedIsTrusted, TimeSpan elapsed, TimeSpan timeout)
     {
-        if (IsCompleted(statusText)) return ReportCompletionDecision.Proceed;
+        if (completedIsTrusted && IsCompleted(statusText)) return ReportCompletionDecision.Proceed;
         if (elapsed >= timeout) return ReportCompletionDecision.TimedOut;
         return ReportCompletionDecision.KeepWaiting;
     }

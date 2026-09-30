@@ -128,6 +128,75 @@ public class ReportCompletionStatusTests
         Assert.Equal(ReportCompletionDecision.TimedOut, decision);
     }
 
+    // --- Decide(statusText, completedIsTrusted, elapsed, timeout) —
+    // reviewer round 7 re-review BLOCKING fix: PioneerReportDriver's
+    // _mainWindow fallback is resolved once per BATCH, not refreshed per
+    // report, so a Completed reading reached only through that fallback
+    // must not be trusted until a Generating reading has actually been
+    // observed THIS run (see PioneerReportDriver.WaitForReportCompletionStatus's
+    // own doc for the full story). These four cases are exactly the ones
+    // the reviewer asked for. ---
+
+    [Fact]
+    public void DecideKeepsWaitingOnFallbackCompletedWithoutGeneratingObservedYet()
+    {
+        // fallback-completed without generating -> KeepWaiting.
+        var decision = ReportCompletionStatus.Decide(
+            "The report has completed",
+            completedIsTrusted: false,
+            TimeSpan.FromSeconds(5),
+            Timeout);
+
+        Assert.Equal(ReportCompletionDecision.KeepWaiting, decision);
+    }
+
+    [Fact]
+    public void DecideProceedsOnFallbackCompletedAfterGeneratingWasObserved()
+    {
+        // fallback-completed after generating -> Proceed. Once the caller
+        // has seen a Generating reading this run, it passes
+        // completedIsTrusted: true for the fallback match too.
+        var decision = ReportCompletionStatus.Decide(
+            "The report has completed",
+            completedIsTrusted: true,
+            TimeSpan.FromSeconds(5),
+            Timeout);
+
+        Assert.Equal(ReportCompletionDecision.Proceed, decision);
+    }
+
+    [Fact]
+    public void DecideProceedsOnPreviewCompletedWithoutGeneratingObserved()
+    {
+        // preview-completed without generating -> Proceed. A Completed
+        // reading from the report's OWN preview window is always trusted
+        // (completedIsTrusted: true), independent of whether a Generating
+        // reading happened to be observed first - the preview window is
+        // never a stale leftover from a prior report.
+        var decision = ReportCompletionStatus.Decide(
+            "The report has completed",
+            completedIsTrusted: true,
+            TimeSpan.FromSeconds(1),
+            Timeout);
+
+        Assert.Equal(ReportCompletionDecision.Proceed, decision);
+    }
+
+    [Fact]
+    public void DecideTimesOutOnFallbackCompletedWithoutGeneratingObservedPastTimeout()
+    {
+        // fallback-completed without generating, past timeout -> TimedOut.
+        // An untrusted Completed reading never overrides the timeout -
+        // it's treated exactly like any other non-completed reading.
+        var decision = ReportCompletionStatus.Decide(
+            "The report has completed",
+            completedIsTrusted: false,
+            Timeout,
+            Timeout);
+
+        Assert.Equal(ReportCompletionDecision.TimedOut, decision);
+    }
+
     // --- SelectStatusText (reviewer round 7 non-blocking fix: prefer
     // "completed" over "generating" regardless of UIA enumeration order) ---
 
