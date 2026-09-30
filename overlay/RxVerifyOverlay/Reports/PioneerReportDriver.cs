@@ -62,6 +62,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
+    /// Round 7 (W-T92, Will 2026-09-30: "it needs to wait until it is run
+    /// ... not try to save the report until that has happened, otherwise
+    /// the report will save empty"). How long
+    /// WaitForReportCompletionStatus polls Pioneer's own bottom-left
+    /// report-generation status text (every PollInterval, ~250ms) for "the
+    /// report has completed" before aborting the save step — see
+    /// ReportCompletionStatus's own doc for the full decision. Deliberately
+    /// its own fixed timeout, independent of ReportTimeoutPlan.CalculateTimeout
+    /// (that one gates the PREVIEW WINDOW/toolbar appearing at all, via
+    /// IsPreviewReady, and is sized per-report off each report's own
+    /// MacroRunTime); this one gates the save step specifically, after the
+    /// preview window is already up, and applies identically to every
+    /// report that reaches it.
+    /// </summary>
+    private static readonly TimeSpan ReportCompletionStatusTimeout = TimeSpan.FromSeconds(180);
+
+    /// <summary>
     /// Round 2 fix (Will's first real run - foreground re-check used a
     /// single fixed 150ms sleep before giving up): how long
     /// EnsurePioneerForeground will keep polling after BringToForeground
@@ -111,6 +128,29 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     /// <summary>Same spirit as MaxDiagnosticDumpLines*2 elsewhere in this file - caps the raw-view walk itself well above what will actually be printed, so a huge grid can't make this best-effort walk slow.</summary>
     private const int MaxRowDiagnosticDumpNodes = 3000;
+
+    /// <summary>
+    /// Reviewer round 7 non-blocking fix: WaitForReportCompletionStatus's
+    /// FindReportCompletionStatusElement polls every ~250ms for up to 180s
+    /// - an unbounded FindAllDescendants over a whole window on every tick
+    /// (especially the _mainWindow fallback, the full ribbon window) would
+    /// be needlessly expensive over that many ticks. Same idea as
+    /// MaxDiagnosticDumpDepth/MaxRowDiagnosticDumpDepth elsewhere in this
+    /// file, sized like the deeper row-dump cap since a status/progress
+    /// label can plausibly sit several panes deep in either window.
+    /// </summary>
+    private const int ReportStatusSearchMaxDepth = 8;
+
+    /// <summary>
+    /// Reviewer round 7 re-review non-blocking fix: a total-node cap for
+    /// CollectStatusPhraseCandidates' walk, in addition to
+    /// ReportStatusSearchMaxDepth's depth cap — same "cap the walk, not
+    /// just its depth" idea as MaxRowDiagnosticDumpNodes, but a much
+    /// smaller number: that cap belongs to a one-time diagnostic dump,
+    /// while this walk runs every ~250ms for up to 180s, so a wide (not
+    /// just deep) window tree still can't make every poll tick expensive.
+    /// </summary>
+    private const int ReportStatusSearchMaxNodes = 400;
 
     /// <summary>
     /// Round 3 (GOAL brief fix 2b): "click once inside the grid (work-area
@@ -517,6 +557,30 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             }
 
             if (!previewReady) return ReportRunResult.Failed("Timed out waiting for the report preview", stopwatch.Elapsed);
+
+            // Round 7 (W-T92, Will 2026-09-30): the preview window/toolbar
+            // appearing (IsPreviewReady above) is not the same thing as
+            // the report actually finishing - never export/save until
+            // Pioneer's own bottom-left status text confirms "the report
+            // has completed". Shared here in RunFinancialReport so it
+            // applies to every enabled DateRange/AsOfDate report that
+            // reaches this F12 -> save path (see ReportCatalog.All),
+            // not just Customer A/R.
+            var reportCompleted = await WaitForReportCompletionStatus(log, ct).ConfigureAwait(false);
+            if (!reportCompleted)
+            {
+                // Reviewer round 7 non-blocking fix: best-effort close the
+                // stuck preview here too (same as the success path below) -
+                // never guaranteed (TryCloseWindowSafely is best-effort and
+                // ClosePreview clears _previewWindowElement/_previewWindowHandle
+                // either way), but it makes it less likely a window left
+                // open after THIS timeout is still around to confuse the
+                // NEXT report in the same batch - belt-and-braces on top of
+                // FindReportCompletionStatusElement's own per-report scoping fix.
+                log("Closing the stuck report preview before moving on...");
+                ClosePreview(log);
+                return ReportRunResult.Failed("Timed out waiting for the report to finish generating - never saved", stopwatch.Elapsed);
+            }
 
             if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
@@ -2831,6 +2895,325 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         _previewWindowElement = preview;
         _previewWindowHandle = SafeNativeHandle(preview);
         return _previewWindowHandle != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Round 7 (W-T92, Will 2026-09-30, verbatim: "when saving the report,
+    /// it needs to wait until it is run. The window will show 'Please wait
+    /// while the report is generated...' in the bottom left and then
+    /// change to 'The report has completed' when it is done. The app needs
+    /// to watch for this and not try to save the report until that has
+    /// happened, otherwise the report will save empty."). Polls every
+    /// PollInterval (~250ms) for Pioneer's own bottom-left status text —
+    /// scoped to THIS report's own preview window, with a logged fallback
+    /// to _mainWindow (FindReportCompletionStatusElement; see that
+    /// method's own doc for why never any OTHER Pioneer window) — feeding
+    /// whatever it reads through ReportCompletionStatus.Decide, the pure
+    /// decision this loop is a thin, build/run-unverifiable-on-this-Mac
+    /// shim around (see that class's own doc). Logs every
+    /// Generating/Completed/other transition with a UTC timestamp so a
+    /// run's log shows exactly when the report actually finished, not just
+    /// that it eventually did. Returns true only once Decide says Proceed;
+    /// false (never saves) on TimedOut, after logging the last status text
+    /// actually seen. If the status element is never found at all during
+    /// the wait, a one-time diagnostic dump of every Edit/Text/StatusBar
+    /// element's AutomationId/ClassName/ControlType (never a Name/value —
+    /// see WriteStatusElementDiagnosticDump) is written before returning
+    /// false, so the real status control can be re-identified/re-tuned
+    /// from the log alone.
+    ///
+    /// Reviewer round 7 re-review BLOCKING fix: _mainWindow is resolved
+    /// ONCE per BATCH (ReportsCoordinator.RunAsync calls FindMainWindow
+    /// once before its loop of up to 6 reports, never refreshed per
+    /// report) — so a "completed" reading reached only via the
+    /// _mainWindow fallback could be a stale leftover from a PRIOR
+    /// report's run still on screen, satisfying report N+1's very first
+    /// poll tick cold. A fallback Completed reading is now trusted (passed
+    /// to Decide as completedIsTrusted: true) ONLY once THIS call has
+    /// actually observed a Generating reading first (sawGeneratingThisRun,
+    /// from either window — a real report visibly starts to generate
+    /// before it finishes); until then it's treated exactly like "not
+    /// found yet" (KeepWaiting, then TimedOut — never Proceed), logged
+    /// once via loggedUntrustedFallbackCompleted. A Completed reading from
+    /// _previewWindowElement itself is always trusted, same as before —
+    /// that window is guaranteed fresh for this specific report.
+    /// </summary>
+    private async Task<bool> WaitForReportCompletionStatus(Action<string> log, CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        string? lastStatusText = null;
+        var lastCompletedIsTrusted = true;
+        string? lastLoggedPhase = null;
+        string? lastLoggedFallbackText = null;
+        var everFound = false;
+        var sawGeneratingThisRun = false;
+        var loggedUntrustedFallbackCompleted = false;
+
+        log("Waiting for Pioneer's report-completion status (bottom-left) before saving...");
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var (element, text, fromMainWindowFallback) = FindReportCompletionStatusElement();
+            if (element is not null)
+            {
+                everFound = true;
+                lastStatusText = text;
+
+                // Reviewer round 7 re-review non-blocking fix: dedupe this
+                // line by matched TEXT (same idea as lastLoggedPhase below),
+                // not once per poll tick - it would otherwise repeat every
+                // ~250ms for up to 180s whenever the fallback is in play.
+                if (fromMainWindowFallback && text != lastLoggedFallbackText)
+                {
+                    log("  report-completion status matched in the PioneerRx main window (not the preview window) - falling back.");
+                    lastLoggedFallbackText = text;
+                }
+
+                if (ReportCompletionStatus.IsGenerating(text)) sawGeneratingThisRun = true;
+
+                lastCompletedIsTrusted = !fromMainWindowFallback || sawGeneratingThisRun;
+
+                if (fromMainWindowFallback
+                    && ReportCompletionStatus.IsCompleted(text)
+                    && !lastCompletedIsTrusted
+                    && !loggedUntrustedFallbackCompleted)
+                {
+                    log("  main-window 'completed' ignored until 'generating' observed this run.");
+                    loggedUntrustedFallbackCompleted = true;
+                }
+
+                var phase = ReportCompletionStatus.IsCompleted(text) ? "completed"
+                    : ReportCompletionStatus.IsGenerating(text) ? "generating"
+                    : "other";
+                if (phase != lastLoggedPhase)
+                {
+                    log($"  report status ({DateTime.UtcNow:O}): {phase} - '{text}'");
+                    lastLoggedPhase = phase;
+                }
+            }
+
+            var decision = ReportCompletionStatus.Decide(lastStatusText, lastCompletedIsTrusted, stopwatch.Elapsed, ReportCompletionStatusTimeout);
+
+            if (decision == ReportCompletionDecision.Proceed)
+            {
+                log($"Report has completed (elapsed={stopwatch.Elapsed.TotalSeconds:0.0}s) - proceeding to save.");
+                return true;
+            }
+
+            if (decision == ReportCompletionDecision.TimedOut)
+            {
+                if (!everFound)
+                {
+                    log("Report-completion status element was never found - dumping status/editable elements once.");
+                    WriteStatusElementDiagnosticDump(log);
+                }
+
+                log($"Timed out after {ReportCompletionStatusTimeout.TotalSeconds:0}s waiting for the report to finish generating - last status text seen: '{lastStatusText ?? "<none>"}'. Not saving.");
+                return false;
+            }
+
+            await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>ControlTypes eligible for FindReportCompletionStatusElement's search and WriteStatusElementDiagnosticDump's fallback dump — a plain text/status-bar label is where Pioneer would expose this kind of transient message; restricted (not a full-tree walk) so this never accidentally matches an unrelated Edit field's current value.</summary>
+    private static readonly ControlType[] ReportStatusSearchControlTypes = { ControlType.Text, ControlType.StatusBar };
+
+    /// <summary>
+    /// Reviewer round 7 BLOCKING fix: this used to search EVERY Pioneer-
+    /// owned top-level window (EnumeratePioneerOwnedTopLevelWindows), so
+    /// report N's own preview window — left open by ClosePreview being
+    /// best-effort (TryCloseWindowSafely can leave a window open) and by
+    /// RunFinancialReport's failure paths never calling ClosePreview at
+    /// all — could still be showing "The report has completed" and
+    /// satisfy report N+1's very first 250ms poll tick, saving report
+    /// N+1 before it had even started generating (the exact "report will
+    /// save empty" bug this whole round exists to prevent — same class of
+    /// bug as the documented TryFindFallbackPreviewWindow fix). Scoped now
+    /// to _previewWindowElement, THIS report's own confirmed preview
+    /// window — reliably fresh by the time this is ever called: it's only
+    /// reachable after RunFinancialReport's previewReady gate passed,
+    /// which is exactly the code (IsPreviewReady / the fallback path) that
+    /// just (re)set _previewWindowElement/_previewWindowHandle for this
+    /// specific report. Falls back to _mainWindow ONLY if the status text
+    /// isn't found in the preview window and IS found there instead —
+    /// never any other Pioneer-owned window. Both searches are depth- and
+    /// node-capped (ReportStatusSearchMaxDepth/ReportStatusSearchMaxNodes)
+    /// rather than an unbounded FindAllDescendants, since this runs on
+    /// every ~250ms tick for up to 180s (reviewer non-blocking fix).
+    ///
+    /// Reviewer round 7 re-review BLOCKING fix: _mainWindow is resolved
+    /// ONCE per BATCH (not refreshed per report — see
+    /// WaitForReportCompletionStatus's own doc), so returning a
+    /// fallback match no longer implies it's safe to Proceed on by
+    /// itself; the FromMainWindowFallback flag lets the caller apply its
+    /// own "only trust this once a Generating reading has been seen this
+    /// run" rule (ReportCompletionStatus.Decide's completedIsTrusted
+    /// overload) rather than this method logging/deciding that here.
+    /// </summary>
+    private (AutomationElement? Element, string? Text, bool FromMainWindowFallback) FindReportCompletionStatusElement()
+    {
+        if (_previewWindowElement is not null)
+        {
+            var previewMatch = FindStatusPhraseInWindow(_previewWindowElement, ReportStatusSearchMaxDepth);
+            if (previewMatch is { } found) return (found.Element, found.Text, false);
+        }
+
+        if (_mainWindow is not null)
+        {
+            var mainMatch = FindStatusPhraseInWindow(_mainWindow, ReportStatusSearchMaxDepth);
+            if (mainMatch is { } foundInMain) return (foundInMain.Element, foundInMain.Text, true);
+        }
+
+        return (null, null, false);
+    }
+
+    /// <summary>
+    /// Depth- and node-capped walk of <paramref name="root"/>'s Text/
+    /// StatusBar descendants, collecting every candidate reading and
+    /// handing them to ReportCompletionStatus.SelectStatusText — reviewer
+    /// non-blocking fix: a Completed reading always wins over a Generating
+    /// one, regardless of which one UIA happens to enumerate first, rather
+    /// than this method returning on whichever phrase it meets first.
+    /// </summary>
+    private static (AutomationElement Element, string Text)? FindStatusPhraseInWindow(AutomationElement root, int maxDepth)
+    {
+        var candidates = new List<(AutomationElement Element, string Text)>();
+        var visitedNodes = 0;
+        CollectStatusPhraseCandidates(root, 1, maxDepth, candidates, ref visitedNodes);
+        if (candidates.Count == 0) return null;
+
+        var selectedText = ReportCompletionStatus.SelectStatusText(candidates.Select(c => c.Text));
+        if (selectedText is null) return null;
+
+        foreach (var candidate in candidates)
+        {
+            if (candidate.Text == selectedText) return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>Reviewer round 7 re-review non-blocking fix: <paramref name="visitedNodes"/> caps total nodes visited (ReportStatusSearchMaxNodes) in addition to the existing depth cap (<paramref name="maxDepth"/>) — this walk runs on every ~250ms poll tick for up to 180s, so a wide (not just deep) window tree still can't make a single tick expensive.</summary>
+    private static void CollectStatusPhraseCandidates(AutomationElement element, int depth, int maxDepth, List<(AutomationElement Element, string Text)> result, ref int visitedNodes)
+    {
+        if (depth > maxDepth) return;
+        if (visitedNodes >= ReportStatusSearchMaxNodes) return;
+
+        AutomationElement[] children;
+        try { children = element.FindAllChildren(); }
+        catch { return; }
+
+        foreach (var child in children)
+        {
+            if (visitedNodes >= ReportStatusSearchMaxNodes) return;
+            visitedNodes++;
+
+            ControlType controlType;
+            try { controlType = child.ControlType; } catch { controlType = default; }
+
+            if (Array.IndexOf(ReportStatusSearchControlTypes, controlType) >= 0)
+            {
+                string? name;
+                try { name = child.Name; } catch { name = null; }
+
+                if (!string.IsNullOrEmpty(name)
+                    && (ReportCompletionStatus.IsGenerating(name) || ReportCompletionStatus.IsCompleted(name)))
+                {
+                    result.Add((child, name));
+                }
+            }
+
+            CollectStatusPhraseCandidates(child, depth + 1, maxDepth, result, ref visitedNodes);
+        }
+    }
+
+    /// <summary>
+    /// Round 7 (W-T92): when WaitForReportCompletionStatus's search for the
+    /// bottom-left status text finds nothing at all, this walks every
+    /// Pioneer-owned top-level window's Edit/Text/StatusBar descendants
+    /// (depth-capped, same MaxDiagnosticDumpDepth/MaxDiagnosticDumpLines
+    /// limits as the other diagnostic dumps in this file) and logs ONLY
+    /// ControlType/AutomationId/ClassName for each — reuses
+    /// UiaDumpFormatter.FormatElementDump, which already redacts every
+    /// non-chrome-allowlisted ControlType's Name via UiaNameRedaction
+    /// (Edit/Text/StatusBar are never on that allowlist), so the real
+    /// status text is never written to the log by this path either. Kept
+    /// as its own method (not a reuse of WriteUiaDiagnosticDump) since it
+    /// filters to status/editable control types only, across every
+    /// Pioneer-owned top-level window, not just _mainWindow's own tree.
+    /// </summary>
+    private void WriteStatusElementDiagnosticDump(Action<string> log)
+    {
+        try
+        {
+            log("--- report-completion status element dump ---");
+
+            foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
+            {
+                log($"  window: '{MainWindowTitleRedaction.RedactIfNeeded(candidate.Title)}' class='{SafeClassName(window)}'");
+
+                var snapshots = CaptureStatusElementSnapshots(window, MaxDiagnosticDumpDepth);
+                foreach (var line in UiaDumpFormatter.FormatElementDump(snapshots, MaxDiagnosticDumpLines))
+                {
+                    log(line);
+                }
+            }
+
+            log("--- end report-completion status element dump ---");
+        }
+        catch (Exception ex)
+        {
+            log($"Diagnostics: report-completion status dump failed - {ex.Message}");
+        }
+    }
+
+    private static readonly HashSet<ControlType> StatusDiagnosticControlTypes = new()
+    {
+        ControlType.Edit, ControlType.Text, ControlType.StatusBar
+    };
+
+    private static List<UiaElementSnapshot> CaptureStatusElementSnapshots(AutomationElement root, int maxDepth)
+    {
+        var result = new List<UiaElementSnapshot>();
+        CaptureStatusElementsRecursive(root, 1, maxDepth, result);
+        return result;
+    }
+
+    private static void CaptureStatusElementsRecursive(AutomationElement element, int depth, int maxDepth, List<UiaElementSnapshot> result)
+    {
+        if (depth > maxDepth) return;
+        if (result.Count >= MaxDiagnosticDumpLines * 2) return;
+
+        AutomationElement[] children;
+        try { children = element.FindAllChildren(); }
+        catch { return; }
+
+        foreach (var child in children)
+        {
+            if (result.Count >= MaxDiagnosticDumpLines * 2) return;
+
+            ControlType controlType;
+            string controlTypeName;
+            try { controlType = child.ControlType; controlTypeName = controlType.ToString(); }
+            catch { controlType = default; controlTypeName = "<unknown>"; }
+
+            if (StatusDiagnosticControlTypes.Contains(controlType))
+            {
+                var name = SafeName(child);
+
+                string automationId;
+                try { automationId = child.AutomationId ?? string.Empty; } catch { automationId = string.Empty; }
+
+                var className = SafeClassName(child);
+
+                result.Add(new UiaElementSnapshot(controlTypeName, name, automationId, className, depth));
+            }
+
+            CaptureStatusElementsRecursive(child, depth + 1, maxDepth, result);
+        }
     }
 
     /// <summary>
