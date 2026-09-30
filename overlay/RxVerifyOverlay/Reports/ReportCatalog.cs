@@ -142,10 +142,17 @@ public static class ReportCatalog
             OutputFormat: ReportOutputFormat.Pdf,
             SaveName: "Customer A-R Control Balance",
             Enabled: true,
-            // Macro "Customer A/R Control Balance": <TAB><TAB>%start_date_text%<TAB><TAB>%date_text%<F12> — 2 leading tabs (popup does NOT open with Begin focused), 2 tabs between dates, 6s report_run_time.
-            TabsBetweenDates: 2,
+            // Round 6 correction (W-T92, Will 2026-09-29, verbatim: "you
+            // tabbed before entering the start date. Instead, you need to
+            // enter the start date, then tab to the end date field and
+            // enter that, then F12 to run the report"). The recorded
+            // macro's <TAB><TAB> leader was wrong for this popup — it
+            // opens with focus already in the Begin/start-date field, so
+            // 0 leading tabs and a single Tab between Begin and End is
+            // the actual sequence Will confirmed: %start_date_text%<TAB>%date_text%<F12>.
+            TabsBetweenDates: 1,
             MacroRunTime: TimeSpan.FromSeconds(6),
-            LeadingTabs: 2),
+            LeadingTabs: 0),
 
         new(
             Key: ThirdPartyAgedTrialBalanceKey,

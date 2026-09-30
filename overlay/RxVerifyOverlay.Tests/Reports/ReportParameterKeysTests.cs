@@ -64,15 +64,57 @@ public class ReportParameterKeysTests
     // --- ReportParameterKeyPlan.Build (Round 4: leading tabs, TypeText, trailing keys) ---
 
     [Fact]
-    public void DateRangeEntryWithTwoLeadingTabsSendsThemBeforeBothDates()
+    public void ControlBalanceEntryStartsWithBeginDateThenOneTabThenEndDateThenF12()
     {
-        // ArAgedTrialBalanceKey ("Customer A/R Control Balance") macro:
-        // <TAB><TAB>%start_date_text%<TAB><TAB>%date_text%<F12> - the
-        // popup does NOT open with Begin already focused for this report.
-        // W-T92 round 5: begin uses FormatBegin (4-digit year), end uses
-        // FormatEnd (2-digit year) - exactly the macro's two different
-        // date variables, not the same format twice.
+        // W-T92 round 6 correction (Will, 2026-09-29, verbatim: "you
+        // tabbed before entering the start date. Instead, you need to
+        // enter the start date, then tab to the end date field and enter
+        // that, then F12 to run the report."). The popup for THIS report
+        // opens with focus already in Begin/start-date - the originally
+        // recorded macro's <TAB><TAB> leader was wrong. ReportCatalog.cs
+        // now sets LeadingTabs: 0, TabsBetweenDates: 1 for
+        // ArAgedTrialBalanceKey, so the plan must be exactly: type begin
+        // date, one Tab, type end date, F12 - nothing before the first
+        // date, one Tab between dates. Begin uses FormatBegin (4-digit
+        // year), end uses FormatEnd (2-digit year).
         var entry = ReportCatalog.FindByKey(ReportCatalog.ArAgedTrialBalanceKey)!;
+        var begin = new DateTime(2026, 9, 1);
+        var end = new DateTime(2026, 9, 28);
+
+        var plan = ReportParameterKeyPlan.Build(entry, begin, end);
+
+        var expected = new[]
+        {
+            ReportParameterKeyAction.TypeText("09-01-2026"),
+            ReportParameterKeyAction.Tab(),
+            ReportParameterKeyAction.TypeText("09-28-26"),
+            ReportParameterKeyAction.F12(),
+        };
+
+        Assert.Equal(expected, plan);
+    }
+
+    [Fact]
+    public void DateRangeEntryWithTwoLeadingTabsAndTwoTabsBetweenDatesStillProducesThatSequence()
+    {
+        // The plan builder (ReportParameterKeyPlan.Build) is shared across
+        // every DateRange catalog entry - LeadingTabs/TabsBetweenDates are
+        // per-entry data, not per-report code paths. This proves the
+        // builder still honors LeadingTabs: 2 / TabsBetweenDates: 2 for
+        // whichever entry (if any) actually needs that shape, independent
+        // of ArAgedTrialBalanceKey's round 6 correction to 0/1 above - a
+        // synthetic entry stands in so this test doesn't depend on any
+        // particular catalog row keeping those old values.
+        var entry = new ReportCatalogEntry(
+            Key: "test-two-leading-two-between",
+            DisplayName: "Test Two Leading Two Between",
+            PioneerRowText: "Test Row",
+            ParameterKind: ReportParameterKind.DateRange,
+            OutputFormat: ReportOutputFormat.Pdf,
+            SaveName: "Test Save Name",
+            Enabled: true,
+            TabsBetweenDates: 2,
+            LeadingTabs: 2);
         var begin = new DateTime(2026, 9, 1);
         var end = new DateTime(2026, 9, 28);
 

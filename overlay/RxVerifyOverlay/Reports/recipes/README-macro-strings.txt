@@ -31,6 +31,21 @@ default path. A read-back mismatch gets exactly one retry via the OLD
 clipboard-paste path (Ctrl+A, Ctrl+V) on the same field; a second mismatch
 aborts the report without ever sending F12.
 
+W-T92 round 6 correction (Will, 2026-09-29, verbatim: "you tabbed before
+entering the start date. Instead, you need to enter the start date, then
+tab to the end date field and enter that, then F12 to run the report."):
+the "*** Customer A/R Control Balance ***" macro strings below still show
+the ORIGINAL recorded sequence — <TAB><TAB>%start_date_text%<TAB><TAB>
+%date_text%<F12> — which Will has since confirmed is wrong for this
+report's popup. In the real popup, focus is already in the Begin/
+start-date field when it opens, and only a single Tab separates Begin
+from End. ReportCatalog.cs's ArAgedTrialBalanceKey entry now overrides
+this to LeadingTabs: 0, TabsBetweenDates: 1 (actual sequence: type begin
+date, Tab, type end date, F12) rather than following the raw strings
+below verbatim. Do not "fix" the catalog entry back to match the raw
+macro text for this one report — the macro recording was the thing that
+was wrong.
+
 ---8<--- RAW STRINGS OUTPUT BELOW ---8<---
 
 Reports-EOM (new, in process)
