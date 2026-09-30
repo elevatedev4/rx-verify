@@ -130,6 +130,18 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private const int MaxRowDiagnosticDumpNodes = 3000;
 
     /// <summary>
+    /// Reviewer round 7 non-blocking fix: WaitForReportCompletionStatus's
+    /// FindReportCompletionStatusElement polls every ~250ms for up to 180s
+    /// - an unbounded FindAllDescendants over a whole window on every tick
+    /// (especially the _mainWindow fallback, the full ribbon window) would
+    /// be needlessly expensive over that many ticks. Same idea as
+    /// MaxDiagnosticDumpDepth/MaxRowDiagnosticDumpDepth elsewhere in this
+    /// file, sized like the deeper row-dump cap since a status/progress
+    /// label can plausibly sit several panes deep in either window.
+    /// </summary>
+    private const int ReportStatusSearchMaxDepth = 8;
+
+    /// <summary>
     /// Round 3 (GOAL brief fix 2b): "click once inside the grid (work-area
     /// pane rect, ~40% across, first data row)". Owner's screenshot: the
     /// grid starts roughly 130px below the WINDOW top at 100% scaling
@@ -544,7 +556,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             // reaches this F12 -> save path (see ReportCatalog.All),
             // not just Customer A/R.
             var reportCompleted = await WaitForReportCompletionStatus(log, ct).ConfigureAwait(false);
-            if (!reportCompleted) return ReportRunResult.Failed("Timed out waiting for the report to finish generating - never saved", stopwatch.Elapsed);
+            if (!reportCompleted)
+            {
+                // Reviewer round 7 non-blocking fix: best-effort close the
+                // stuck preview here too (same as the success path below) -
+                // never guaranteed (TryCloseWindowSafely is best-effort and
+                // ClosePreview clears _previewWindowElement/_previewWindowHandle
+                // either way), but it makes it less likely a window left
+                // open after THIS timeout is still around to confuse the
+                // NEXT report in the same batch - belt-and-braces on top of
+                // FindReportCompletionStatusElement's own per-report scoping fix.
+                log("Closing the stuck report preview before moving on...");
+                ClosePreview(log);
+                return ReportRunResult.Failed("Timed out waiting for the report to finish generating - never saved", stopwatch.Elapsed);
+            }
 
             if (!EnsurePioneerForegroundWithRecovery(log)) return ReportRunResult.Failed("Pioneer lost focus", stopwatch.Elapsed);
 
@@ -2868,22 +2893,22 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// change to 'The report has completed' when it is done. The app needs
     /// to watch for this and not try to save the report until that has
     /// happened, otherwise the report will save empty."). Polls every
-    /// PollInterval (~250ms) for Pioneer's own bottom-left status text
-    /// across every Pioneer-owned top-level window
-    /// (FindReportCompletionStatusElement), feeding whatever it reads
-    /// through ReportCompletionStatus.Decide — the pure decision this loop
-    /// is a thin, build/run-unverifiable-on-this-Mac shim around (see that
-    /// class's own doc). Logs every Generating/Completed/other transition
-    /// with a UTC timestamp so a run's log shows exactly when the report
-    /// actually finished, not just that it eventually did. Returns true
-    /// only once Decide says Proceed; false (never saves) on TimedOut,
-    /// after logging the last status text actually seen. If the status
-    /// element is never found at all during the wait, a one-time
-    /// diagnostic dump of every Edit/Text/StatusBar element's
-    /// AutomationId/ClassName/ControlType (never a Name/value — see
-    /// WriteStatusElementDiagnosticDump) is written before returning false,
-    /// so the real status control can be re-identified/re-tuned from the
-    /// log alone.
+    /// PollInterval (~250ms) for Pioneer's own bottom-left status text —
+    /// scoped to THIS report's own preview window (FindReportCompletionStatusElement;
+    /// see that method's own doc for why never any other Pioneer window) —
+    /// feeding whatever it reads through ReportCompletionStatus.Decide, the
+    /// pure decision this loop is a thin, build/run-unverifiable-on-this-Mac
+    /// shim around (see that class's own doc). Logs every
+    /// Generating/Completed/other transition with a UTC timestamp so a
+    /// run's log shows exactly when the report actually finished, not just
+    /// that it eventually did. Returns true only once Decide says Proceed;
+    /// false (never saves) on TimedOut, after logging the last status text
+    /// actually seen. If the status element is never found at all during
+    /// the wait, a one-time diagnostic dump of every Edit/Text/StatusBar
+    /// element's AutomationId/ClassName/ControlType (never a Name/value —
+    /// see WriteStatusElementDiagnosticDump) is written before returning
+    /// false, so the real status control can be re-identified/re-tuned
+    /// from the log alone.
     /// </summary>
     private async Task<bool> WaitForReportCompletionStatus(Action<string> log, CancellationToken ct)
     {
@@ -2898,7 +2923,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             ct.ThrowIfCancellationRequested();
 
-            var (element, text) = FindReportCompletionStatusElement();
+            var (element, text) = FindReportCompletionStatusElement(log);
             if (element is not null)
             {
                 everFound = true;
@@ -2942,50 +2967,102 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private static readonly ControlType[] ReportStatusSearchControlTypes = { ControlType.Text, ControlType.StatusBar };
 
     /// <summary>
-    /// Searches every Pioneer-owned top-level window's Text/StatusBar
-    /// descendants for Will's own bottom-left report-status phrases
-    /// (ReportCompletionStatus.GeneratingPhrase/CompletedPhrase) — Contains,
-    /// case-insensitive, since the live control may carry extra characters
-    /// around the phrase (a trailing ellipsis, a percentage, punctuation)
-    /// this driver has no confirmed UIA dump of yet. Returns the first
-    /// match's element plus its raw Name text — the ONE place this driver
-    /// logs that text directly (WaitForReportCompletionStatus): deliberately
-    /// allowed, since both phrases are fixed Pioneer UI labels, never a
-    /// screen VALUE/PHI.
+    /// Reviewer round 7 BLOCKING fix: this used to search EVERY Pioneer-
+    /// owned top-level window (EnumeratePioneerOwnedTopLevelWindows), so
+    /// report N's own preview window — left open by ClosePreview being
+    /// best-effort (TryCloseWindowSafely can leave a window open) and by
+    /// RunFinancialReport's failure paths never calling ClosePreview at
+    /// all — could still be showing "The report has completed" and
+    /// satisfy report N+1's very first 250ms poll tick, saving report
+    /// N+1 before it had even started generating (the exact "report will
+    /// save empty" bug this whole round exists to prevent — same class of
+    /// bug as the documented TryFindFallbackPreviewWindow fix). Scoped now
+    /// to _previewWindowElement, THIS report's own confirmed preview
+    /// window — reliably fresh by the time this is ever called: it's only
+    /// reachable after RunFinancialReport's previewReady gate passed,
+    /// which is exactly the code (IsPreviewReady / the fallback path) that
+    /// just (re)set _previewWindowElement/_previewWindowHandle for this
+    /// specific report. Falls back to _mainWindow ONLY if the status text
+    /// isn't found in the preview window and IS found there instead
+    /// (logged, so it's visible which window actually matched) — never any
+    /// other Pioneer-owned window. Both searches are depth-capped
+    /// (ReportStatusSearchMaxDepth) rather than an unbounded
+    /// FindAllDescendants, since this runs on every ~250ms tick for up to
+    /// 180s (reviewer non-blocking fix).
     /// </summary>
-    private (AutomationElement? Element, string? Text) FindReportCompletionStatusElement()
+    private (AutomationElement? Element, string? Text) FindReportCompletionStatusElement(Action<string> log)
     {
-        foreach (var (window, _) in EnumeratePioneerOwnedTopLevelWindows())
+        if (_previewWindowElement is not null)
         {
-            foreach (var controlType in ReportStatusSearchControlTypes)
+            var previewMatch = FindStatusPhraseInWindow(_previewWindowElement, ReportStatusSearchMaxDepth);
+            if (previewMatch is { } found) return found;
+        }
+
+        if (_mainWindow is not null)
+        {
+            var mainMatch = FindStatusPhraseInWindow(_mainWindow, ReportStatusSearchMaxDepth);
+            if (mainMatch is { } foundInMain)
             {
-                var match = FindStatusPhraseDescendant(window, controlType);
-                if (match is { } found) return found;
+                log("  report-completion status matched in the PioneerRx main window (not the preview window) - falling back.");
+                return foundInMain;
             }
         }
 
         return (null, null);
     }
 
-    private static (AutomationElement Element, string Text)? FindStatusPhraseDescendant(AutomationElement window, ControlType controlType)
+    /// <summary>
+    /// Depth-capped walk of <paramref name="root"/>'s Text/StatusBar
+    /// descendants, collecting every candidate reading and handing them to
+    /// ReportCompletionStatus.SelectStatusText — reviewer non-blocking fix:
+    /// a Completed reading always wins over a Generating one, regardless
+    /// of which one UIA happens to enumerate first, rather than this
+    /// method returning on whichever phrase it meets first.
+    /// </summary>
+    private static (AutomationElement Element, string Text)? FindStatusPhraseInWindow(AutomationElement root, int maxDepth)
     {
-        AutomationElement[] descendants;
-        try { descendants = window.FindAllDescendants(cf => cf.ByControlType(controlType)); }
-        catch { return null; }
+        var candidates = new List<(AutomationElement Element, string Text)>();
+        CollectStatusPhraseCandidates(root, 1, maxDepth, candidates);
+        if (candidates.Count == 0) return null;
 
-        foreach (var candidate in descendants)
+        var selectedText = ReportCompletionStatus.SelectStatusText(candidates.Select(c => c.Text));
+        if (selectedText is null) return null;
+
+        foreach (var candidate in candidates)
         {
-            string? name;
-            try { name = candidate.Name; } catch { continue; }
-            if (string.IsNullOrEmpty(name)) continue;
-
-            if (ReportCompletionStatus.IsGenerating(name) || ReportCompletionStatus.IsCompleted(name))
-            {
-                return (candidate, name);
-            }
+            if (candidate.Text == selectedText) return candidate;
         }
 
         return null;
+    }
+
+    private static void CollectStatusPhraseCandidates(AutomationElement element, int depth, int maxDepth, List<(AutomationElement Element, string Text)> result)
+    {
+        if (depth > maxDepth) return;
+
+        AutomationElement[] children;
+        try { children = element.FindAllChildren(); }
+        catch { return; }
+
+        foreach (var child in children)
+        {
+            ControlType controlType;
+            try { controlType = child.ControlType; } catch { controlType = default; }
+
+            if (Array.IndexOf(ReportStatusSearchControlTypes, controlType) >= 0)
+            {
+                string? name;
+                try { name = child.Name; } catch { name = null; }
+
+                if (!string.IsNullOrEmpty(name)
+                    && (ReportCompletionStatus.IsGenerating(name) || ReportCompletionStatus.IsCompleted(name)))
+                {
+                    result.Add((child, name));
+                }
+            }
+
+            CollectStatusPhraseCandidates(child, depth + 1, maxDepth, result);
+        }
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using RxVerifyOverlay.Reports;
 using Xunit;
 
@@ -125,5 +126,78 @@ public class ReportCompletionStatusTests
         var decision = ReportCompletionStatus.Decide("Something else entirely", Timeout, Timeout);
 
         Assert.Equal(ReportCompletionDecision.TimedOut, decision);
+    }
+
+    // --- SelectStatusText (reviewer round 7 non-blocking fix: prefer
+    // "completed" over "generating" regardless of UIA enumeration order) ---
+
+    [Fact]
+    public void SelectStatusTextPrefersCompletedEvenWhenGeneratingCameFirst()
+    {
+        var candidates = new[]
+        {
+            "Please wait while the report is generated...",
+            "The report has completed",
+        };
+
+        var selected = ReportCompletionStatus.SelectStatusText(candidates);
+
+        Assert.Equal("The report has completed", selected);
+    }
+
+    [Fact]
+    public void SelectStatusTextPrefersCompletedWhenItCameFirst()
+    {
+        var candidates = new[]
+        {
+            "The report has completed",
+            "Please wait while the report is generated...",
+        };
+
+        var selected = ReportCompletionStatus.SelectStatusText(candidates);
+
+        Assert.Equal("The report has completed", selected);
+    }
+
+    [Fact]
+    public void SelectStatusTextFallsBackToGeneratingWhenNoCompletedCandidateExists()
+    {
+        var candidates = new[]
+        {
+            "Something unrelated",
+            "Please wait while the report is generated...",
+        };
+
+        var selected = ReportCompletionStatus.SelectStatusText(candidates);
+
+        Assert.Equal("Please wait while the report is generated...", selected);
+    }
+
+    [Fact]
+    public void SelectStatusTextReturnsNullWhenNoCandidateMatchesEitherPhrase()
+    {
+        var candidates = new[] { "Something unrelated", "", null };
+
+        var selected = ReportCompletionStatus.SelectStatusText(candidates);
+
+        Assert.Null(selected);
+    }
+
+    [Fact]
+    public void SelectStatusTextReturnsNullForAnEmptyCandidateList()
+    {
+        var selected = ReportCompletionStatus.SelectStatusText(Array.Empty<string?>());
+
+        Assert.Null(selected);
+    }
+
+    [Fact]
+    public void SelectStatusTextIgnoresNullAndEmptyCandidatesMixedInWithRealOnes()
+    {
+        var candidates = new List<string?> { null, "", "Please wait while the report is generated..." };
+
+        var selected = ReportCompletionStatus.SelectStatusText(candidates);
+
+        Assert.Equal("Please wait while the report is generated...", selected);
     }
 }

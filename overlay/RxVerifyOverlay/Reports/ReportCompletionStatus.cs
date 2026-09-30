@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace RxVerifyOverlay.Reports;
 
@@ -68,5 +69,33 @@ public static class ReportCompletionStatus
         if (IsCompleted(statusText)) return ReportCompletionDecision.Proceed;
         if (elapsed >= timeout) return ReportCompletionDecision.TimedOut;
         return ReportCompletionDecision.KeepWaiting;
+    }
+
+    /// <summary>
+    /// Reviewer round 7 non-blocking fix (PioneerReportDriver.
+    /// FindStatusPhraseInWindow): a single poll of a live window can turn
+    /// up more than one Text/StatusBar descendant whose Name matches one
+    /// of the two phrases — a UIA tree offers no guarantee about which
+    /// order those come back in. A Completed reading must always win over
+    /// a Generating one regardless of enumeration order (a report that has
+    /// actually finished is never re-treated as "still generating" just
+    /// because some other element's stale text happened to be walked
+    /// first), so this scans <paramref name="candidateTexts"/> for the
+    /// first CompletedPhrase match before ever considering a Generating
+    /// one. Null if none of the candidates match either phrase — the
+    /// caller (WaitForReportCompletionStatus, via Decide) treats that the
+    /// same as "not found yet", never as "done".
+    /// </summary>
+    public static string? SelectStatusText(IEnumerable<string?> candidateTexts)
+    {
+        string? generatingFallback = null;
+
+        foreach (var candidate in candidateTexts)
+        {
+            if (IsCompleted(candidate)) return candidate;
+            if (generatingFallback is null && IsGenerating(candidate)) generatingFallback = candidate;
+        }
+
+        return generatingFallback;
     }
 }
