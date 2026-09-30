@@ -1,0 +1,7 @@
+{
+  "bucket": "elevatedev4-desktop-releases",
+  "region": "us-east-1",
+  "prefix": "releases/rx-verify",
+  "accessKeyId": "REPLACE_WITH_READ_ONLY_ACCESS_KEY_ID",
+  "secretAccessKey": "REPLACE_WITH_READ_ONLY_SECRET_ACCESS_KEY"
+}

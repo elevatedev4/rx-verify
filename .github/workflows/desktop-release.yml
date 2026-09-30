@@ -1,0 +1,131 @@
+name: Desktop release
+
+# Velopack installer channel (mirrors vaccine-assist's identical
+# desktop-release.yml). Builds a real Setup.exe with `vpk` and uploads it
+# (plus the delta/RELEASES feed) to the private S3 release bucket. Does
+# NOT modify build.yml — this is an ADDITIONAL channel; the existing
+# bootstrap-fresh.ps1 + shortcut flow is untouched by this workflow.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.0.0, no leading 'v')"
+        required: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Could not determine a version from the trigger (tag or workflow_dispatch input)."
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install engine dependencies
+        run: npm ci
+
+      - name: Build engine (npm run build)
+        run: npm run build
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore overlay
+        run: dotnet restore overlay/RxVerifyOverlay/RxVerifyOverlay.csproj
+
+      - name: Publish overlay
+        run: >
+          dotnet publish overlay/RxVerifyOverlay/RxVerifyOverlay.csproj
+          -c Release -r win-x64 --self-contained true -o publish
+
+      # The overlay shells to `node dist/cli.js --serve` and
+      # OverlaySettings.ResolveDefaultCliPath walks UP from
+      # AppContext.BaseDirectory looking for dist/cli.js — copying the
+      # engine's built dist/ next to the exe in the publish/install
+      # directory is what makes that auto-detection find it with no code
+      # change.
+      - name: Copy engine dist into publish output
+        shell: pwsh
+        run: Copy-Item -Recurse dist publish/dist
+
+      # REVIEWER FIX (blocking, feat/velopack-installer): the engine's data
+      # loaders (src/drug/index.ts's LocalNdcProvider, src/drug/rxnorm.ts,
+      # src/drug/catalog.ts) all resolve their *.json.gz files as
+      # path.join(<dir of the running JS file>, '..', '..', 'data', ...) —
+      # i.e. TWO levels above dist/cli.js, making data/ a SIBLING of dist/,
+      # never a child of it. Copying only dist/ (above) into publish/dist/
+      # makes publish/ itself that sibling level, so data/ has to land at
+      # publish/data — not publish/dist/data — for the installed
+      # %LocalAppData%\RxVerifyOverlay\current\ layout to match the
+      # checkout's <repoRoot>/data/ layout exactly. Without this, every
+      # installed copy's three loaders silently fall through to their
+      # EMPTY_DATASET/empty-index fallback (see each file's own try/catch)
+      # and every lookup becomes unknown_drug.
+      - name: Copy drug/NDC/RxNorm data into publish output
+        shell: pwsh
+        run: Copy-Item -Recurse data publish/data
+
+      - name: Verify data files were copied
+        shell: pwsh
+        run: |
+          $dataFiles = Get-ChildItem -Path publish/data -Filter "*.json.gz" -ErrorAction SilentlyContinue
+          if (-not $dataFiles -or $dataFiles.Count -eq 0) {
+            throw "publish/data contains no *.json.gz files — the drug/NDC/RxNorm datasets would be missing from every installed copy. Failing the job."
+          }
+          Write-Host "Found data files:"
+          $dataFiles | ForEach-Object { Write-Host " - $($_.Name)" }
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk
+
+      - name: Pack release
+        run: >
+          vpk pack --packId RxVerifyOverlay --packVersion ${{ steps.version.outputs.version }}
+          --packDir publish --mainExe RxVerifyOverlay.exe -o release
+
+      - name: Verify Setup.exe was produced
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem -Path release -Filter "*Setup.exe" -ErrorAction SilentlyContinue
+          if (-not $setup) {
+            throw "vpk pack did not produce a *Setup.exe in release/ — failing the job."
+          }
+          Write-Host "Found installer: $($setup.FullName)"
+
+      - name: Upload release to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DESKTOP_RELEASE_UPLOAD_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DESKTOP_RELEASE_UPLOAD_SECRET }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: aws s3 sync release/ s3://${{ secrets.DESKTOP_RELEASE_BUCKET }}/releases/rx-verify/
+
+      - name: Confirm RELEASES file is live
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DESKTOP_RELEASE_UPLOAD_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DESKTOP_RELEASE_UPLOAD_SECRET }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: aws s3 ls s3://${{ secrets.DESKTOP_RELEASE_BUCKET }}/releases/rx-verify/

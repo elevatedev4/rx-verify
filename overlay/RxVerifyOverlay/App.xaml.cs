@@ -2,6 +2,7 @@ using System.Windows;
 using RxVerifyOverlay.Models;
 using RxVerifyOverlay.Reports;
 using RxVerifyOverlay.Update;
+using RxVerifyOverlay.VelopackIntegration;
 
 namespace RxVerifyOverlay;
 
@@ -41,5 +42,17 @@ public partial class App : Application
         {
             _ = mainWindow.StartupCompleted();
         }
+
+        // Velopack installer channel: fire-and-forget, AFTER every other
+        // startup step above (including the display-mode branch and the
+        // existing Update/UpdateChecker.cs flow the MainWindow drives on
+        // its own timer), so a slow/failed network check can never delay
+        // window construction or the initial refresh. VelopackUpdater.
+        // CheckAndApplyAsync gates itself on UpdateManager.IsInstalled and
+        // no-ops entirely for this process when it wasn't installed by
+        // Setup.exe — see that class's own doc comment — so this call is a
+        // no-op for every existing bootstrap-fresh.ps1 + shortcut launch.
+        _ = VelopackUpdater.CheckAndApplyAsync(
+            message => ReportsLog.Append(message));
     }
 }

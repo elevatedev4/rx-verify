@@ -10,3 +10,8 @@ obj/
 # see scripts/build-catalog-data.ts's header). Only the derived
 # data/catalog-data.json.gz is ever committed.
 *.xlsx
+
+# Velopack installer channel: read-only S3 credentials for the desktop
+# update source. See overlay/RxVerifyOverlay/Velopack/release-source.example.json
+# for the committed placeholder version.
+overlay/RxVerifyOverlay/Velopack/release-source.json
