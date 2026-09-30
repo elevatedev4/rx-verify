@@ -111,15 +111,21 @@ public class ReportCatalogTests
     }
 
     // --- Round 4 (W-T92 round 4): LeadingTabs/TrailingKeys, one value per report's own macro line ---
+    // Round 6 correction (W-T92, Will 2026-09-29): ArAgedTrialBalanceKey
+    // ("Customer A/R Control Balance") is now 0, NOT its recorded macro
+    // line's value (2) - Will confirmed the popup opens with focus
+    // already in Begin/start-date, so this entry intentionally diverges
+    // from the raw macro strings (see ReportCatalog.cs's own comment and
+    // recipes/README-macro-strings.txt).
 
     [Theory]
-    [InlineData(ReportCatalog.ArAgedTrialBalanceKey, 2)]
+    [InlineData(ReportCatalog.ArAgedTrialBalanceKey, 0)]
     [InlineData(ReportCatalog.ThirdPartyAgedTrialBalanceKey, 0)]
     [InlineData(ReportCatalog.ThirdPartyControlBalanceKey, 0)]
     [InlineData(ReportCatalog.InventoryValuationKey, 0)]
     [InlineData(ReportCatalog.InventoryControlBalanceKey, 0)]
     [InlineData(ReportCatalog.SalesSummaryKey, 0)]
-    public void EveryEnabledFinancialReportHasALeadingTabsValueFromItsOwnMacroLine(string key, int expectedLeadingTabs)
+    public void EveryEnabledFinancialReportHasALeadingTabsValueFromItsOwnMacroLineExceptArControlBalance(string key, int expectedLeadingTabs)
     {
         var entry = ReportCatalog.FindByKey(key);
         Assert.NotNull(entry);
