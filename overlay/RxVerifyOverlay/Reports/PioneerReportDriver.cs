@@ -57,8 +57,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 {
     private const string PioneerProcessName = "PioneerPharmacy";
     private static readonly TimeSpan DefaultReportTimeout = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan DialogTimeout = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan SaveVerifyTimeout = TimeSpan.FromSeconds(15);
+    /// <summary>Round 8: how long SaveAsAndVerify polls for the Save As dialog after the export click.</summary>
+    private static readonly TimeSpan SaveAsDialogTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>Round 8 (was 15s): how long SaveAsAndVerify waits, after Save is pressed, for the dialog to close AND the file to exist with size &gt; 0.</summary>
+    private static readonly TimeSpan SaveVerifyTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>Round 8: how long an export-button Invoke is awaited before carrying on - UIA Invoke on a button that opens a MODAL dialog does not return until the dialog closes.</summary>
+    private static readonly TimeSpan ExportInvokeWait = TimeSpan.FromSeconds(3);
+
+    /// <summary>Round 8: how long ClosePreviewAndConfirm waits for the preview window to actually disappear after WM_CLOSE.</summary>
+    private static readonly TimeSpan PreviewCloseConfirmTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
@@ -276,6 +285,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     [DllImport("user32.dll")]
     private static extern int GetWindowTextLength(IntPtr hWnd);
+
+    // Round 8 (Save As): window text for the pure SaveAsDialogMatcher (titles
+    // of non-Pioneer windows are never logged, only their length), liveness
+    // check for the dialog/preview handle, and time-bounded cross-process
+    // WM_SETTEXT/WM_GETTEXT for the File name box (SMTO_ABORTIFHUNG so a hung
+    // dialog cannot hang this thread).
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+    private static extern IntPtr SendMessageTimeoutSetText(IntPtr hWnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+    private static extern IntPtr SendMessageTimeoutGetText(IntPtr hWnd, uint msg, IntPtr wParam, StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
@@ -589,10 +615,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             if (!InvokeExportButton(_previewWindowElement, "Export to PDF", "PDF", log)) return ReportRunResult.Failed("Could not find the PDF export button", stopwatch.Elapsed);
 
             var saved = await SaveAsAndVerify(item.OutputFilePath, log, ct).ConfigureAwait(false);
-            if (!saved) return ReportRunResult.Failed("Save As did not produce the expected file", stopwatch.Elapsed);
+            if (!saved)
+            {
+                // Round 8: a failed save must not leave the preview open to
+                // confuse the next report in the batch.
+                log(SaveAsCandidateLog.Prefix + "closing the report preview after the failed save...");
+                ClosePreviewAndConfirm(log);
+                return ReportRunResult.Failed("Save As did not produce the expected file", stopwatch.Elapsed);
+            }
 
             log("Closing report preview...");
-            ClosePreview(log);
+            if (!ClosePreviewAndConfirm(log))
+            {
+                log(SaveAsCandidateLog.Prefix + "WARNING - the report was saved but its preview window could not be confirmed closed.");
+            }
 
             return ReportRunResult.Saved(item.OutputFilePath, stopwatch.Elapsed);
         }
@@ -906,11 +942,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// window afterward and aborts the report rather than trust this
     /// blindly.
     /// </summary>
-    private static void BringToForeground(AutomationElement window)
+    private static void BringToForeground(AutomationElement window) => BringHandleToForeground(SafeNativeHandle(window));
+
+    private static void BringHandleToForeground(IntPtr handle)
     {
         try
         {
-            var handle = SafeNativeHandle(window);
             if (handle == IntPtr.Zero) return;
 
             if (IsIconic(handle))
@@ -2415,8 +2452,13 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// </summary>
     private bool InvokeExportButton(AutomationElement searchRoot, string primaryName, string toolTipContains, Action<string> log)
     {
+        // Round 8: never a plain SelectOrInvoke here - Invoke on an export
+        // button blocks until the Save As dialog it opens is closed, which
+        // hung the run silently at "Exporting to PDF..." with the dialog up.
+        void L(string message) => log(SaveAsCandidateLog.Prefix + message);
+
         var button = FindDescendantByName(searchRoot, primaryName);
-        if (button is not null && SelectOrInvoke(button)) return true;
+        if (button is not null && InvokeWithoutBlocking(button, $"export button '{primaryName}'", L)) return true;
 
         // Fallback: some toolbar buttons expose only an icon Name with the
         // real label as a ToolTip (see GOAL brief: "the PDF button's
@@ -2431,7 +2473,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 try { name = candidate.Name; } catch { continue; }
                 if (!string.IsNullOrEmpty(name) && name.Contains(toolTipContains, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (SelectOrInvoke(candidate)) return true;
+                    if (InvokeWithoutBlocking(candidate, $"export control matching '{toolTipContains}'", L)) return true;
                 }
             }
         }
@@ -3306,138 +3348,576 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     }
 
     // ------------------------------------------------------------------
-    // SAVE AS
+    // SAVE AS  (W-T92 round 8 rewrite - every step logs with a "save-as:" prefix)
     // ------------------------------------------------------------------
 
+    /// <summary>A verified Save As dialog: the top-level window, the File name edit inside it, and why it was chosen.</summary>
+    private sealed record SaveAsDialogMatch(IntPtr Handle, AutomationElement Window, AutomationElement FileNameField, SaveAsCandidate Candidate, SaveAsMatchTier Tier);
+
+    private const uint WM_SETTEXT = 0x000C;
+    private const uint WM_GETTEXT = 0x000D;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+    private const uint SendMessageTimeoutMs = 2000;
+
+    /// <summary>Cap on candidate lines in a "dialog not found" inventory so a crowded desktop cannot flood the run log.</summary>
+    private const int MaxSaveAsInventoryLines = 60;
+
     /// <summary>
-    /// Waits for a "Save As" dialog, sets its File name box to the FULL
-    /// <paramref name="fullPath"/>, presses Enter, answers an overwrite
-    /// prompt with Yes if one appears, then waits until the dialog is
-    /// gone AND the file exists on disk.
+    /// Round 8. Finds the Save As dialog, types the FULL path into its File
+    /// name box, presses Save, answers a replace prompt with Yes, then waits
+    /// until the dialog is closed AND the file exists with size &gt; 0. Every
+    /// wait is bounded (dialog: SaveAsDialogTimeout, save: SaveVerifyTimeout)
+    /// and every failure path logs a "save-as:" line saying exactly which
+    /// step stalled - never a silent hang. A dialog we opened but could not
+    /// finish is cancelled (WM_CLOSE to that exact handle) so it cannot wedge
+    /// the next report.
     /// </summary>
     private async Task<bool> SaveAsAndVerify(string fullPath, Action<string> log, CancellationToken ct)
     {
-        var dialogAppeared = await WaitUntilAsync(() => FindSaveAsDialog().Field is not null, DialogTimeout, ct).ConfigureAwait(false);
-        if (!dialogAppeared)
+        void L(string message) => log(SaveAsCandidateLog.Prefix + message);
+        var total = Stopwatch.StartNew();
+
+        if (!SaveAsPathBuilder.TryNormalize(fullPath, out var targetPath, out var pathProblem))
         {
-            log("Save As dialog did not appear.");
-            WriteUiaDiagnosticDump("Save As dialog", log);
+            L($"FAILED - {pathProblem}.");
             return false;
         }
 
-        var (fileNameField, saveAsHandle) = FindSaveAsDialog();
-        if (fileNameField is null)
-        {
-            log("Save As dialog appeared but its File name box could not be found.");
-            WriteUiaDiagnosticDump("Save As dialog file name box", log);
-            return false;
-        }
-
+        DateTime? preExistingWriteUtc = null;
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? ".");
-
-            if (fileNameField.Patterns.Value.IsSupported)
-            {
-                fileNameField.Patterns.Value.Pattern.SetValue(fullPath);
-            }
-            else
-            {
-                fileNameField.Focus();
-                Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
-                Keyboard.Type(fullPath);
-            }
-
-            // Review follow-up ("apply the same specific-window-handle rule
-            // anywhere else a keystroke could hit the main window
-            // unintentionally"): Enter is an untargeted keystroke - go
-            // straight to whatever the OS foreground window is. Re-verify
-            // that's still THIS SPECIFIC Save As window (by handle, not
-            // merely "some Pioneer-owned window") immediately before
-            // sending it, rather than assuming focus never moved between
-            // SetValue/Focus above and this line.
-            if (GetForegroundWindow() != saveAsHandle)
-            {
-                log("Save As dialog lost focus before Enter could be sent - aborting rather than risk it going to the wrong window.");
-                return false;
-            }
-
-            Keyboard.Type(VirtualKeyShort.RETURN);
-        }
-        catch (Exception ex)
-        {
-            log($"Could not fill in the Save As dialog: {ex.Message}");
-            return false;
-        }
-
-        // "If duplicate, overwrite" - answer any confirmation prompt with
-        // Yes (macro strings: "Confirm Save As"). Review fix (non-blocking
-        // item b): a Windows confirmation dialog is its OWN top-level
-        // window, not a descendant of _mainWindow - search every
-        // Pioneer-owned top-level window (never any other application's)
-        // for one that looks like a "Confirm"/"Save As"-titled prompt and
-        // press ITS "Yes" button. Best-effort/fail-safe as before - if
-        // none appears within a short window this is simply a no-op (no
-        // duplicate file, or Pioneer didn't ask).
-        await WaitUntilAsync(() =>
-        {
-            foreach (var (window, candidate) in EnumeratePioneerOwnedTopLevelWindows())
-            {
-                if (string.IsNullOrEmpty(candidate.Title)) continue;
-                if (!candidate.Title.Contains("Confirm", StringComparison.OrdinalIgnoreCase)
-                    && !candidate.Title.Contains("Save As", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var yesButton = FindDescendantByName(window, "Yes", ControlType.Button);
-                if (yesButton is not null)
-                {
-                    SelectOrInvoke(yesButton);
-                    return true;
-                }
-            }
-
-            return false;
-        }, TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
-
-        var savedFileExists = await WaitUntilAsync(() => File.Exists(fullPath), SaveVerifyTimeout, ct).ConfigureAwait(false);
-        if (!savedFileExists)
-        {
-            log($"Expected file was never found on disk: {fullPath}");
-            return false;
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Review fix (safety blocker 1): restricted to top-level windows
-    /// belonging to Pioneer's OWN process (SaveAsWindowSelector.Choose),
-    /// never "any window on the desktop whose title merely contains
-    /// 'Save As'" - a same-titled window from an unrelated application can
-    /// no longer receive Pioneer's output path + Enter.
-    /// </summary>
-    /// <summary>Returns both the File name edit field AND the dialog's own window handle — SaveAsAndVerify needs the handle to re-verify (by specific handle, not just process) that this exact dialog is still frontmost immediately before the untargeted Enter keystroke.</summary>
-    private (AutomationElement? Field, IntPtr WindowHandle) FindSaveAsDialog()
-    {
-        var owned = EnumeratePioneerOwnedTopLevelWindows();
-        var candidates = owned.Select(o => o.Candidate).ToList();
-        var chosenHandle = SaveAsWindowSelector.Choose(candidates, _pioneerProcessId, GetForegroundWindow());
-        if (chosenHandle is null) return (null, IntPtr.Zero);
-
-        var match = owned.FirstOrDefault(o => o.Candidate.Handle == chosenHandle.Value);
-        if (match.Window is null) return (null, IntPtr.Zero);
-
-        try
-        {
-            var editFields = match.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
-            var field = editFields.Length > 0 ? editFields[0] : null;
-            return (field, chosenHandle.Value);
+            if (File.Exists(targetPath)) preExistingWriteUtc = File.GetLastWriteTimeUtc(targetPath);
         }
         catch
         {
-            return (null, IntPtr.Zero);
+            // Best-effort - only used to tell a stale file from a fresh save.
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? ".");
+        }
+        catch (Exception ex)
+        {
+            L($"FAILED - could not create the output folder ({ex.GetType().Name}).");
+            return false;
+        }
+
+        L($"target='{targetPath}' (file already exists: {(preExistingWriteUtc is null ? "no" : "yes")}).");
+
+        // ---- step 1: find the dialog -----------------------------------
+        L($"step 1/5: waiting up to {SaveAsDialogTimeout.TotalSeconds:0}s for the Save As dialog (pioneer pid={_pioneerProcessId})...");
+        SaveAsDialogMatch? dialog;
+        var lastSeen = new List<SaveAsCandidate>();
+        var dialogWatch = Stopwatch.StartNew();
+        var nextProgress = TimeSpan.FromSeconds(5);
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            lastSeen = EnumerateAllTopLevelWindowsForSaveAs();
+            dialog = FindSaveAsDialog(lastSeen);
+            if (dialog is not null) break;
+            if (dialogWatch.Elapsed >= SaveAsDialogTimeout) break;
+
+            if (dialogWatch.Elapsed >= nextProgress)
+            {
+                L($"still waiting for the dialog ({dialogWatch.Elapsed.TotalSeconds:0}s)...");
+                nextProgress += TimeSpan.FromSeconds(5);
+            }
+
+            await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+        }
+
+        if (dialog is null)
+        {
+            L($"FAILED - no Pioneer-owned Save As dialog with a File name box appeared within {SaveAsDialogTimeout.TotalSeconds:0}s.");
+            LogSaveAsInventory(lastSeen, log);
+            return false;
+        }
+
+        L($"step 2/5: dialog found after {dialogWatch.Elapsed.TotalSeconds:0.0}s (tier={dialog.Tier}).");
+        log(SaveAsCandidateLog.Format(dialog.Candidate, _pioneerProcessId));
+
+        // ---- step 3: foreground + file name ------------------------------
+        if (GetForegroundWindow() != dialog.Handle)
+        {
+            BringHandleToForeground(dialog.Handle);
+            var foreground = WaitUntilSync(() => GetForegroundWindow() == dialog.Handle, ForegroundSettleTimeout, PollInterval);
+            L(foreground
+                ? "dialog brought to the foreground."
+                : "dialog is not the foreground window - using non-keyboard methods where possible.");
+        }
+
+        L("step 3/5: setting the File name box to the full path...");
+        if (!SetSaveAsFileName(dialog, targetPath, L))
+        {
+            L("FAILED - could not write the path into the File name box. Cancelling the dialog.");
+            CancelSaveAsDialog(dialog.Handle, log);
+            return false;
+        }
+
+        // ---- step 4: press Save -----------------------------------------
+        L("step 4/5: pressing Save...");
+        if (!PressSaveAsSave(dialog, L))
+        {
+            L("FAILED - could not press Save. Cancelling the dialog.");
+            CancelSaveAsDialog(dialog.Handle, log);
+            return false;
+        }
+
+        // ---- step 5: replace prompt, dialog closes, file lands -----------
+        var saveAsHandle = dialog.Handle;
+        L($"step 5/5: waiting up to {SaveVerifyTimeout.TotalSeconds:0}s for the dialog to close and the file to be written...");
+        var waitWatch = Stopwatch.StartNew();
+        var answeredPrompts = new HashSet<IntPtr>();
+        var state = SaveCompletionState.WaitingForDialogToClose;
+        SaveCompletionState? lastLoggedState = null;
+        long length = 0;
+        var dialogOpen = true;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            TryAnswerOverwritePrompt(saveAsHandle, answeredPrompts, L);
+
+            dialogOpen = IsWindow(saveAsHandle) && IsWindowVisible(saveAsHandle);
+
+            var exists = false;
+            length = 0;
+            try
+            {
+                var info = new FileInfo(targetPath);
+                if (info.Exists)
+                {
+                    exists = true;
+                    length = info.Length;
+
+                    // A file left over from an earlier run whose timestamp has not moved is not proof of a fresh save.
+                    if (preExistingWriteUtc is { } before && info.LastWriteTimeUtc == before) exists = false;
+                }
+            }
+            catch
+            {
+                // Transient lock/IO error - treated as "not there yet" for this tick.
+            }
+
+            state = SaveCompletion.Evaluate(dialogOpen, exists, length);
+            if (state != lastLoggedState)
+            {
+                L($"state={state} (t={waitWatch.Elapsed.TotalSeconds:0.0}s, file bytes={length}).");
+                lastLoggedState = state;
+            }
+
+            if (state == SaveCompletionState.Done)
+            {
+                L($"OK - saved {length} bytes to '{targetPath}' (save-as total {total.Elapsed.TotalSeconds:0.0}s).");
+                return true;
+            }
+
+            if (waitWatch.Elapsed >= SaveVerifyTimeout) break;
+
+            await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+        }
+
+        L($"FAILED - {SaveCompletion.DescribeTimeout(state)} after {SaveVerifyTimeout.TotalSeconds:0}s (path='{targetPath}').");
+        if (dialogOpen)
+        {
+            LogSaveAsInventory(EnumerateAllTopLevelWindowsForSaveAs(), log);
+            CancelSaveAsDialog(saveAsHandle, log);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Raw Win32 EnumWindows over EVERY top-level window (not just Pioneer's
+    /// pid): the Save As dialog may be owned by a Pioneer window yet live in
+    /// another process, and FlaUI's desktop-children list does not reliably
+    /// include owned dialogs. Titles are read into memory only so the pure
+    /// matcher can classify them; SaveAsCandidateLog decides what is logged.
+    /// </summary>
+    private static List<SaveAsCandidate> EnumerateAllTopLevelWindowsForSaveAs()
+    {
+        var result = new List<SaveAsCandidate>();
+
+        try
+        {
+            EnumWindows((hWnd, _) =>
+            {
+                try
+                {
+                    var visible = IsWindowVisible(hWnd);
+                    GetWindowThreadProcessId(hWnd, out var pid);
+
+                    var className = new StringBuilder(256);
+                    GetClassName(hWnd, className, className.Capacity);
+
+                    var title = string.Empty;
+                    var titleLength = GetWindowTextLength(hWnd);
+                    if (titleLength > 0)
+                    {
+                        var titleBuilder = new StringBuilder(titleLength + 2);
+                        GetWindowText(hWnd, titleBuilder, titleBuilder.Capacity);
+                        title = titleBuilder.ToString();
+                    }
+
+                    var owner = GetWindow(hWnd, GW_OWNER);
+                    uint ownerPid = 0;
+                    if (owner != IntPtr.Zero) GetWindowThreadProcessId(owner, out ownerPid);
+
+                    result.Add(new SaveAsCandidate(title, className.ToString(), (int)pid, hWnd, owner, (int)ownerPid, visible));
+                }
+                catch
+                {
+                    // Best-effort per window - one that cannot be inspected is skipped.
+                }
+
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            // Best-effort - an empty list just means the caller polls again.
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// First ranked Pioneer-owned candidate (SaveAsDialogMatcher.Rank:
+    /// pid-or-owner scoped, #32770 / Save|Export title) that actually
+    /// contains a File name box. Another application's "Save As" is never
+    /// ranked at all, so it can never be returned here.
+    /// </summary>
+    private SaveAsDialogMatch? FindSaveAsDialog(IReadOnlyList<SaveAsCandidate> all)
+    {
+        try
+        {
+            foreach (var candidate in SaveAsDialogMatcher.Rank(all, _pioneerProcessId, GetForegroundWindow()))
+            {
+                var window = ResolveNativeHandleToElement(candidate.Handle);
+                if (window is null) continue;
+
+                var field = FindSaveAsFileNameField(window);
+                if (field is null) continue;
+
+                return new SaveAsDialogMatch(candidate.Handle, window, field, candidate, SaveAsDialogMatcher.Classify(candidate, _pioneerProcessId));
+            }
+        }
+        catch
+        {
+            // Treated as "not found yet" - the caller keeps polling until its own deadline.
+        }
+
+        return null;
+    }
+
+    /// <summary>The File name Edit (or its ComboBox's inner Edit), picked by SaveAsFileNameFieldMatcher rather than "first Edit in the tree" (which can be the toolbar search box).</summary>
+    private static AutomationElement? FindSaveAsFileNameField(AutomationElement window)
+    {
+        try
+        {
+            var descendants = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit).Or(cf.ByControlType(ControlType.ComboBox)));
+            var snapshots = descendants
+                .Select(d => new SaveAsFieldCandidate(SafeControlTypeName(d), SafeAutomationId(d), SafeName(d), SafeClassName(d)))
+                .ToList();
+
+            var index = SaveAsFileNameFieldMatcher.ChooseIndex(snapshots);
+            if (index is null) return null;
+
+            var chosen = descendants[index.Value];
+            if (string.Equals(snapshots[index.Value].ControlType, "ComboBox", StringComparison.OrdinalIgnoreCase))
+            {
+                var inner = chosen.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
+                if (inner is not null) return inner;
+            }
+
+            return chosen;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string SafeControlTypeName(AutomationElement element)
+    {
+        try { return element.ControlType.ToString(); }
+        catch { return string.Empty; }
+    }
+
+    private static string SafeAutomationId(AutomationElement element)
+    {
+        try { return element.AutomationId ?? string.Empty; }
+        catch { return string.Empty; }
+    }
+
+    /// <summary>ValuePattern, else WM_SETTEXT, else focus + typed keys (only while the dialog is the foreground window). Each method is read back where possible and the next is tried when it did not stick.</summary>
+    private bool SetSaveAsFileName(SaveAsDialogMatch dialog, string path, Action<string> L)
+    {
+        var field = dialog.FileNameField;
+
+        try
+        {
+            if (field.Patterns.Value.IsSupported)
+            {
+                if (field.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault)
+                {
+                    L("File name box is read-only through ValuePattern.");
+                }
+                else
+                {
+                    field.Patterns.Value.Pattern.SetValue(path);
+                    var readBack = field.Patterns.Value.Pattern.Value.ValueOrDefault;
+                    if (SaveAsPathBuilder.TextMatches(readBack, path))
+                    {
+                        L("File name set via ValuePattern (read-back matched).");
+                        return true;
+                    }
+
+                    L($"ValuePattern SetValue did not stick (read-back length {readBack?.Length ?? 0}, expected {path.Length}).");
+                }
+            }
+            else
+            {
+                L("File name box does not support ValuePattern.");
+            }
+        }
+        catch (Exception ex)
+        {
+            L($"ValuePattern failed ({ex.GetType().Name}).");
+        }
+
+        var editHandle = SafeNativeHandle(field);
+        if (editHandle != IntPtr.Zero)
+        {
+            try
+            {
+                SendMessageTimeoutSetText(editHandle, WM_SETTEXT, IntPtr.Zero, path, SMTO_ABORTIFHUNG, SendMessageTimeoutMs, out _);
+
+                var buffer = new StringBuilder(path.Length + 32);
+                SendMessageTimeoutGetText(editHandle, WM_GETTEXT, (IntPtr)buffer.Capacity, buffer, SMTO_ABORTIFHUNG, SendMessageTimeoutMs, out _);
+                if (SaveAsPathBuilder.TextMatches(buffer.ToString(), path))
+                {
+                    L("File name set via WM_SETTEXT (read-back matched).");
+                    return true;
+                }
+
+                L($"WM_SETTEXT did not stick (read-back length {buffer.Length}, expected {path.Length}).");
+            }
+            catch (Exception ex)
+            {
+                L($"WM_SETTEXT failed ({ex.GetType().Name}).");
+            }
+        }
+        else
+        {
+            L("File name box has no native window handle - skipping WM_SETTEXT.");
+        }
+
+        // Keystroke fallback - never unless this exact dialog is foreground.
+        if (GetForegroundWindow() != dialog.Handle)
+        {
+            BringHandleToForeground(dialog.Handle);
+            WaitUntilSync(() => GetForegroundWindow() == dialog.Handle, ForegroundSettleTimeout, PollInterval);
+        }
+
+        if (GetForegroundWindow() != dialog.Handle)
+        {
+            L("dialog is not the foreground window - will not send keystrokes to type the path.");
+            return false;
+        }
+
+        try
+        {
+            field.Focus();
+
+            if (GetForegroundWindow() != dialog.Handle)
+            {
+                L("dialog lost the foreground after focusing the File name box - will not type.");
+                return false;
+            }
+
+            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
+            Keyboard.Type(path);
+            L("File name typed via keystrokes.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            L($"typing the file name failed ({ex.GetType().Name}).");
+            return false;
+        }
+    }
+
+    /// <summary>Save button (AutomationId "1" or name "Save"), invoked without blocking; else Enter - sent only while this exact dialog is the foreground window.</summary>
+    private bool PressSaveAsSave(SaveAsDialogMatch dialog, Action<string> L)
+    {
+        try
+        {
+            var buttons = dialog.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+            foreach (var button in buttons)
+            {
+                if (!SaveAsFileNameFieldMatcher.IsSaveButton("Button", SafeAutomationId(button), SafeName(button))) continue;
+
+                if (InvokeWithoutBlocking(button, "Save button", L))
+                {
+                    L("Save button invoked.");
+                    return true;
+                }
+
+                L("Save button found but invoking it failed - trying Enter.");
+                break;
+            }
+        }
+        catch (Exception ex)
+        {
+            L($"looking for the Save button failed ({ex.GetType().Name}) - trying Enter.");
+        }
+
+        if (GetForegroundWindow() != dialog.Handle)
+        {
+            BringHandleToForeground(dialog.Handle);
+            WaitUntilSync(() => GetForegroundWindow() == dialog.Handle, ForegroundSettleTimeout, PollInterval);
+        }
+
+        if (GetForegroundWindow() != dialog.Handle)
+        {
+            L("dialog is not the foreground window - will not send Enter.");
+            return false;
+        }
+
+        try
+        {
+            Keyboard.Type(VirtualKeyShort.RETURN);
+            L("Enter pressed (dialog was foreground).");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            L($"sending Enter failed ({ex.GetType().Name}).");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// "If duplicate, overwrite": answers a Pioneer-owned "already exists,
+    /// replace it?" prompt (other than the Save As dialog itself, class
+    /// #32770, recognised by SaveAsDialogMatcher.IsReplacePrompt) by pressing
+    /// its Yes button. Any other Pioneer dialog with a Yes button is logged
+    /// once and left alone.
+    /// </summary>
+    private void TryAnswerOverwritePrompt(IntPtr saveAsHandle, HashSet<IntPtr> handled, Action<string> L)
+    {
+        try
+        {
+            foreach (var candidate in EnumerateAllTopLevelWindowsForSaveAs())
+            {
+                if (handled.Contains(candidate.Handle)) continue;
+                if (!SaveAsDialogMatcher.IsPossibleOverwritePrompt(candidate, _pioneerProcessId, saveAsHandle)) continue;
+
+                var window = ResolveNativeHandleToElement(candidate.Handle);
+                if (window is null) continue;
+
+                var yes = FindDescendantByName(window, "Yes", ControlType.Button) ?? FindDescendantByName(window, "&Yes", ControlType.Button);
+                if (yes is null) continue;
+
+                var bodyTexts = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(SafeName).ToList();
+                if (!SaveAsDialogMatcher.IsReplacePrompt(candidate.Title, bodyTexts))
+                {
+                    L($"Pioneer dialog with a Yes button is not a replace prompt (class='{candidate.ClassName}', title='{SaveAsCandidateLog.TitleForLog(candidate, _pioneerProcessId)}') - leaving it alone.");
+                    handled.Add(candidate.Handle);
+                    continue;
+                }
+
+                L($"replace prompt found (class='{candidate.ClassName}', title='{SaveAsCandidateLog.TitleForLog(candidate, _pioneerProcessId)}') - answering Yes.");
+                InvokeWithoutBlocking(yes, "Yes button", L);
+                handled.Add(candidate.Handle);
+            }
+        }
+        catch
+        {
+            // Best-effort - if the prompt is still there at the deadline, the failure log lists it.
+        }
+    }
+
+    /// <summary>
+    /// UIA Invoke on a control that opens a MODAL dialog (the toolbar's
+    /// Export to PDF button!) does not return until that dialog is closed -
+    /// run on the thread pool and wait a bounded time. Returns true when it
+    /// completed successfully OR is still running after the wait (the modal
+    /// dialog is up, which is exactly what we want); false only when it
+    /// finished and reported failure. Never invoked twice.
+    /// </summary>
+    private static bool InvokeWithoutBlocking(AutomationElement element, string label, Action<string> L)
+    {
+        var task = Task.Run(() => SelectOrInvoke(element));
+
+        try
+        {
+            if (task.Wait(ExportInvokeWait)) return task.Result;
+        }
+        catch (Exception ex)
+        {
+            L($"{label}: invoke threw ({ex.GetType().Name}).");
+            return false;
+        }
+
+        L($"{label}: invoke still running after {ExportInvokeWait.TotalSeconds:0}s (a modal dialog is open - continuing without waiting for it).");
+        return true;
+    }
+
+    /// <summary>Cancels a Save As dialog we opened but could not finish (WM_CLOSE to that exact handle; Alt+F4 only if it is the foreground window and WM_CLOSE failed).</summary>
+    private void CancelSaveAsDialog(IntPtr handle, Action<string> log)
+    {
+        if (!IsWindow(handle) || !IsWindowVisible(handle)) return;
+        log(SaveAsCandidateLog.Prefix + "cancelling the Save As dialog so it cannot block the next report.");
+        TryCloseWindowSafely(handle, log, "the Save As dialog");
+    }
+
+    /// <summary>
+    /// Everything the next round needs when the dialog was not found / did
+    /// not finish: every top-level window (title, class, pid, owner,
+    /// visibility - titles of non-Pioneer windows by length only), then the
+    /// control ids inside up to three Pioneer-related standard dialogs
+    /// (control type / AutomationId / class only - no control names or values).
+    /// </summary>
+    private void LogSaveAsInventory(IReadOnlyList<SaveAsCandidate> all, Action<string> log)
+    {
+        var pioneerRelated = all.Count(c => SaveAsDialogMatcher.BelongsToPioneer(c, _pioneerProcessId));
+        log($"{SaveAsCandidateLog.Prefix}inventory: {all.Count} top-level windows, {pioneerRelated} Pioneer-related by pid/owner (pid={_pioneerProcessId}); listing up to {MaxSaveAsInventoryLines}, Pioneer-related first:");
+        foreach (var line in SaveAsCandidateLog.FormatAll(all, _pioneerProcessId, MaxSaveAsInventoryLines))
+        {
+            log(line);
+        }
+
+        var dialogs = all
+            .Where(c => c.IsVisible
+                        && SaveAsDialogMatcher.BelongsToPioneer(c, _pioneerProcessId)
+                        && SaveAsDialogMatcher.IsDialogClass(c.ClassName))
+            .Take(3);
+
+        foreach (var dialog in dialogs)
+        {
+            try
+            {
+                var window = ResolveNativeHandleToElement(dialog.Handle);
+                if (window is null) continue;
+
+                log($"{SaveAsCandidateLog.Prefix}  controls in 0x{dialog.Handle.ToInt64():X}:");
+                var controls = window.FindAllDescendants(cf =>
+                    cf.ByControlType(ControlType.Edit).Or(cf.ByControlType(ControlType.ComboBox)).Or(cf.ByControlType(ControlType.Button)));
+                foreach (var control in controls.Take(40))
+                {
+                    log($"{SaveAsCandidateLog.Prefix}    {SafeControlTypeName(control)} id='{SafeAutomationId(control)}' class='{SafeClassName(control)}' name_len={SafeName(control).Length}");
+                }
+            }
+            catch
+            {
+                // Best-effort diagnostics only.
+            }
         }
     }
 
@@ -3503,5 +3983,47 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
         _previewWindowElement = null;
         _previewWindowHandle = IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Round 8: ClosePreview (WM_CLOSE to the captured preview HWND, Alt+F4
+    /// only when that exact window is foreground) PLUS confirmation that the
+    /// window is really gone - polled for PreviewCloseConfirmTimeout, one
+    /// retry, then a logged candidate inventory if it is still open. Returns
+    /// true only when the preview is confirmed closed.
+    /// </summary>
+    private bool ClosePreviewAndConfirm(Action<string> log)
+    {
+        void L(string message) => log(SaveAsCandidateLog.Prefix + message);
+
+        var handle = _previewWindowHandle;
+        ClosePreview(log);
+
+        if (handle == IntPtr.Zero)
+        {
+            L("preview window handle unknown - nothing to close.");
+            return false;
+        }
+
+        bool IsGone() => !IsWindow(handle) || !IsWindowVisible(handle);
+
+        if (WaitUntilSync(IsGone, PreviewCloseConfirmTimeout, PollInterval))
+        {
+            L("report preview closed (confirmed).");
+            return true;
+        }
+
+        L($"report preview still open after {PreviewCloseConfirmTimeout.TotalSeconds:0}s - retrying the close once.");
+        TryCloseWindowSafely(handle, log, "the report preview window");
+
+        if (WaitUntilSync(IsGone, PreviewCloseConfirmTimeout, PollInterval))
+        {
+            L("report preview closed on retry (confirmed).");
+            return true;
+        }
+
+        L("report preview STILL open - leaving it. Windows now open:");
+        LogSaveAsInventory(EnumerateAllTopLevelWindowsForSaveAs(), log);
+        return false;
     }
 }
