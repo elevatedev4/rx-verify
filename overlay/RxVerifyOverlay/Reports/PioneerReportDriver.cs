@@ -3643,9 +3643,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 if (window is null) continue;
 
                 var field = FindSaveAsFileNameField(window);
-                if (field is null) continue;
+                var tier = SaveAsDialogMatcher.Classify(candidate, _pioneerProcessId);
+                var hasSaveButton = tier != SaveAsMatchTier.Strong && field is not null && HasSaveButton(window);
+                if (field is null || !SaveAsDialogMatcher.IsAcceptableDialog(tier, true, hasSaveButton)) continue;
 
-                return new SaveAsDialogMatch(candidate.Handle, window, field, candidate, SaveAsDialogMatcher.Classify(candidate, _pioneerProcessId));
+                return new SaveAsDialogMatch(candidate.Handle, window, field, candidate, tier);
             }
         }
         catch
@@ -3681,6 +3683,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         catch
         {
             return null;
+        }
+    }
+
+    private static bool HasSaveButton(AutomationElement window)
+    {
+        try
+        {
+            return window.FindAllDescendants(cf => cf.ByControlType(ControlType.Button))
+                .Any(b => SaveAsFileNameFieldMatcher.IsSaveButton("Button", SafeAutomationId(b), SafeName(b)));
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -3867,7 +3882,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 if (yes is null) continue;
 
                 var bodyTexts = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(SafeName).ToList();
-                if (!SaveAsDialogMatcher.IsReplacePrompt(candidate.Title, bodyTexts))
+                if (!SaveAsDialogMatcher.IsReplacePrompt(candidate, saveAsHandle, bodyTexts))
                 {
                     L($"Pioneer dialog with a Yes button is not a replace prompt (class='{candidate.ClassName}', title='{SaveAsCandidateLog.TitleForLog(candidate, _pioneerProcessId)}') - leaving it alone.");
                     handled.Add(candidate.Handle);

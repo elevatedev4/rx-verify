@@ -161,18 +161,57 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void ReplacePromptIsRecognisedByTitleOrBodyText()
+        public void ReplacePromptNeedsTheSaveAsTieAndReplaceText()
         {
-            Assert.True(SaveAsDialogMatcher.IsReplacePrompt("Confirm Save As", new string[0]));
-            Assert.True(SaveAsDialogMatcher.IsReplacePrompt("", new[] { "x.pdf already exists.", "Do you want to replace it?" }));
-            Assert.True(SaveAsDialogMatcher.IsReplacePrompt("Export", new[] { "Overwrite existing file?" }));
+            var saveAs = Window("Save As", handle: 100);
+            var ownedPrompt = Window("Question", handle: 200, owner: 100, ownerPid: PioneerPid);
+            var confirmPrompt = Window("Confirm Save As", handle: 201);
+            var replaceText = new[] { "x.pdf already exists.", "Do you want to replace it?" };
+
+            Assert.True(SaveAsDialogMatcher.IsReplacePrompt(ownedPrompt, saveAs.Handle, replaceText));
+            Assert.True(SaveAsDialogMatcher.IsReplacePrompt(confirmPrompt, saveAs.Handle, new[] { "Overwrite existing file?" }));
         }
 
         [Fact]
-        public void OtherYesNoQuestionsAreNotReplacePrompts()
+        public void TitleAloneIsNeverEnoughForYes()
         {
-            Assert.False(SaveAsDialogMatcher.IsReplacePrompt("Export", new[] { "Open the exported file now?" }));
-            Assert.False(SaveAsDialogMatcher.IsReplacePrompt(null, new string[0]));
+            var saveAs = Window("Save As", handle: 100);
+            var confirmPrompt = Window("Confirm Save As", handle: 201);
+
+            Assert.False(SaveAsDialogMatcher.IsReplacePrompt(confirmPrompt, saveAs.Handle, new string[0]));
+            Assert.False(SaveAsDialogMatcher.IsReplacePrompt(confirmPrompt, saveAs.Handle, new[] { "Save changes to this record?" }));
+        }
+
+        [Fact]
+        public void ConfirmSaveChangesNotOwnedBySaveAsIsNeverAnswered()
+        {
+            var saveAs = Window("Save As", handle: 100);
+            var confirmChanges = Window("Confirm Save Changes", handle: 202, owner: 7, ownerPid: PioneerPid);
+
+            Assert.False(SaveAsDialogMatcher.IsPossibleOverwritePrompt(confirmChanges, PioneerPid, saveAs.Handle));
+            Assert.False(SaveAsDialogMatcher.IsReplacePrompt(confirmChanges, saveAs.Handle, new[] { "Do you want to replace the existing note?" }));
+        }
+
+        [Fact]
+        public void OtherYesNoQuestionsOwnedBySaveAsAreNotReplacePrompts()
+        {
+            var saveAs = Window("Save As", handle: 100);
+            var ownedPrompt = Window("Export", handle: 203, owner: 100, ownerPid: PioneerPid);
+
+            Assert.False(SaveAsDialogMatcher.IsReplacePrompt(ownedPrompt, saveAs.Handle, new[] { "Open the exported file now?" }));
+        }
+
+        [Theory]
+        [InlineData(SaveAsMatchTier.Strong, true, false, true)]
+        [InlineData(SaveAsMatchTier.Strong, false, true, false)]
+        [InlineData(SaveAsMatchTier.DialogClass, true, true, true)]
+        [InlineData(SaveAsMatchTier.DialogClass, true, false, false)]
+        [InlineData(SaveAsMatchTier.TitleOnly, true, true, true)]
+        [InlineData(SaveAsMatchTier.TitleOnly, true, false, false)]
+        [InlineData(SaveAsMatchTier.None, true, true, false)]
+        public void NonStrongTiersAlsoNeedASaveButton(SaveAsMatchTier tier, bool hasField, bool hasSave, bool expected)
+        {
+            Assert.Equal(expected, SaveAsDialogMatcher.IsAcceptableDialog(tier, hasField, hasSave));
         }
     }
 

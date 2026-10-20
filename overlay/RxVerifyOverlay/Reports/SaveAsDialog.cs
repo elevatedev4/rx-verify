@@ -125,22 +125,42 @@ public static class SaveAsDialogMatcher
         if (!BelongsToPioneer(candidate, pioneerProcessId)) return false;
         if (!IsDialogClass(candidate.ClassName)) return false;
 
+        return IsTiedToSaveAs(candidate, saveAsHandle);
+    }
+
+    /// <summary>Owned by the Save As dialog, or titled exactly "Confirm Save As" (a looser "Confirm Save..." match would also hit e.g. "Confirm Save Changes").</summary>
+    public static bool IsTiedToSaveAs(SaveAsCandidate candidate, IntPtr saveAsHandle)
+    {
         var ownedBySaveAs = saveAsHandle != IntPtr.Zero && candidate.OwnerHandle == saveAsHandle;
-        var confirmSaveAsTitle = (candidate.Title ?? string.Empty).Contains("Confirm Save", StringComparison.OrdinalIgnoreCase);
-        return ownedBySaveAs || confirmSaveAsTitle;
+        var exactTitle = string.Equals((candidate.Title ?? string.Empty).Trim(), "Confirm Save As", StringComparison.OrdinalIgnoreCase);
+        return ownedBySaveAs || exactTitle;
     }
 
     /// <summary>
-    /// Whether a Pioneer-owned dialog is really the "already exists, replace
-    /// it?" prompt (answer Yes) rather than some other Yes/No question - e.g.
-    /// "open the exported file now?" must NOT be answered Yes. True when the
-    /// title is the standard "Confirm Save As", or any body text says
-    /// replace / overwrite / already exists.
+    /// Whether a candidate may be answered Yes: tied to the Save As dialog
+    /// (IsTiedToSaveAs) AND its body text says replace / overwrite / already
+    /// exists. Title alone is never enough. The caller additionally requires
+    /// a Yes button.
     /// </summary>
-    public static bool IsReplacePrompt(string? title, IEnumerable<string> bodyTexts)
-    {
-        if ((title ?? string.Empty).Contains("Confirm Save", StringComparison.OrdinalIgnoreCase)) return true;
+    public static bool IsReplacePrompt(SaveAsCandidate candidate, IntPtr saveAsHandle, IEnumerable<string> bodyTexts) =>
+        IsTiedToSaveAs(candidate, saveAsHandle) && BodySaysReplace(bodyTexts);
 
+    /// <summary>
+    /// Whether a window found by Rank may be treated as the Save As dialog
+    /// once its contents are known: it must contain an identified File name
+    /// box, and unless it is a Strong (#32770 + Save/Export title) match it
+    /// must also contain a Save button - so an unrelated Pioneer dialog that
+    /// merely has an Edit with id 1001 is never accepted.
+    /// </summary>
+    public static bool IsAcceptableDialog(SaveAsMatchTier tier, bool hasFileNameBox, bool hasSaveButton)
+    {
+        if (tier == SaveAsMatchTier.None || !hasFileNameBox) return false;
+        return tier == SaveAsMatchTier.Strong || hasSaveButton;
+    }
+
+    /// <summary>True when any body text says replace / overwrite / already exists.</summary>
+    public static bool BodySaysReplace(IEnumerable<string> bodyTexts)
+    {
         foreach (var text in bodyTexts)
         {
             if (string.IsNullOrEmpty(text)) continue;
