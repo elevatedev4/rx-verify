@@ -62,7 +62,7 @@ public static class ReportRunPlan
     {
         var stampDate = FileNameDate(entry.ParameterKind, begin, end);
         var extension = entry.OutputFormat == ReportOutputFormat.Xlsx ? "xlsx" : "pdf";
-        return $"{stampDate:MM-dd-yy}_{entry.SaveName}.{extension}";
+        return SaveAsPathBuilder.BuildFileName(stampDate, entry.SaveName, extension);
     }
 
     /// <summary>
