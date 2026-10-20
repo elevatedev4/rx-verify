@@ -87,7 +87,7 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void RankPutsTheForegroundDialogFirstThenStrongerTiers()
+        public void RankPutsStrongerTiersFirstThenTheForegroundWindow()
         {
             var weak = Window("Guardar como", handle: 1);
             var strong = Window("Save As", handle: 2);
@@ -96,7 +96,21 @@ public class SaveAsDialogTests
 
             var ranked = SaveAsDialogMatcher.Rank(new[] { weak, otherApp, strong, foregroundWeak }, PioneerPid, new IntPtr(3));
 
-            Assert.Equal(new long[] { 3, 2, 1 }, ranked.Select(c => c.Handle.ToInt64()).ToArray());
+            // Strong (2) beats a foreground DialogClass window (3); within DialogClass the foreground one (3) beats (1).
+            Assert.Equal(new long[] { 2, 3, 1 }, ranked.Select(c => c.Handle.ToInt64()).ToArray());
+        }
+
+        [Fact]
+        public void RankNeverIncludesExcludedMainWindowOrPreviewHandles()
+        {
+            var mainWindow = Window("Save As", handle: 50);
+            var preview = Window("Export", handle: 51);
+            var dialog = Window("Save As", handle: 52);
+
+            var ranked = SaveAsDialogMatcher.Rank(new[] { mainWindow, preview, dialog }, PioneerPid, new IntPtr(50),
+                new[] { new IntPtr(50), new IntPtr(51) });
+
+            Assert.Equal(new long[] { 52 }, ranked.Select(c => c.Handle.ToInt64()).ToArray());
         }
 
         [Fact]
@@ -129,6 +143,21 @@ public class SaveAsDialogTests
             Assert.True(SaveAsDialogMatcher.IsPossibleOverwritePrompt(prompt, PioneerPid, saveAs.Handle));
             Assert.False(SaveAsDialogMatcher.IsPossibleOverwritePrompt(otherAppPrompt, PioneerPid, saveAs.Handle));
             Assert.False(SaveAsDialogMatcher.IsPossibleOverwritePrompt(notADialog, PioneerPid, saveAs.Handle));
+        }
+
+        [Fact]
+        public void ReplacePromptMustBeOwnedByTheSaveAsDialogOrTitledConfirmSaveAs()
+        {
+            var saveAs = Window("Save As", handle: 100);
+            var unrelatedPrompt = Window("Patient lookup", handle: 210, owner: 7, ownerPid: PioneerPid);
+            var ownedElsewhere = Window("Question", handle: 211, owner: 999, ownerPid: PioneerPid);
+            var ownedBySaveAs = Window("Question", handle: 212, owner: 100, ownerPid: PioneerPid);
+            var confirmTitleNoOwner = Window("Confirm Save As", handle: 213);
+
+            Assert.False(SaveAsDialogMatcher.IsPossibleOverwritePrompt(unrelatedPrompt, PioneerPid, saveAs.Handle));
+            Assert.False(SaveAsDialogMatcher.IsPossibleOverwritePrompt(ownedElsewhere, PioneerPid, saveAs.Handle));
+            Assert.True(SaveAsDialogMatcher.IsPossibleOverwritePrompt(ownedBySaveAs, PioneerPid, saveAs.Handle));
+            Assert.True(SaveAsDialogMatcher.IsPossibleOverwritePrompt(confirmTitleNoOwner, PioneerPid, saveAs.Handle));
         }
 
         [Fact]
@@ -196,9 +225,19 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void LastResortIsAnyNonSearchEdit()
+        public void AnUnidentifiedEditIsNeverTheFileNameBox()
         {
-            Assert.Equal(0, SaveAsFileNameFieldMatcher.ChooseIndex(new[] { Edit("", "") }));
+            Assert.Null(SaveAsFileNameFieldMatcher.ChooseIndex(new[] { Edit("", ""), Edit("txtNotes", "Notes"), Combo("", "Payer") }));
+            Assert.Equal(0, SaveAsFileNameFieldMatcher.Score(Edit("", "")));
+        }
+
+        [Fact]
+        public void OnlyIdentifiedFileNameControlsReachTheMinimumScore()
+        {
+            Assert.True(SaveAsFileNameFieldMatcher.Score(Edit("1001")) >= SaveAsFileNameFieldMatcher.MinimumAcceptedScore);
+            Assert.True(SaveAsFileNameFieldMatcher.Score(Edit("", "File name:")) >= SaveAsFileNameFieldMatcher.MinimumAcceptedScore);
+            Assert.True(SaveAsFileNameFieldMatcher.Score(Combo("1148")) >= SaveAsFileNameFieldMatcher.MinimumAcceptedScore);
+            Assert.True(SaveAsFileNameFieldMatcher.Score(Combo("", "File name:")) >= SaveAsFileNameFieldMatcher.MinimumAcceptedScore);
         }
 
         [Fact]
@@ -358,6 +397,17 @@ public class SaveAsDialogTests
             var line = SaveAsCandidateLog.Format(Window("Rx 1234567 - Jane Doe", className: "WindowsForms10.Window.8.app.0"), PioneerPid);
 
             Assert.DoesNotContain("Jane", line);
+            Assert.Contains("title='[redacted]'", line);
+        }
+
+        [Theory]
+        [InlineData("Open Rx 123 - DOE, JOHN")]
+        [InlineData("Print Label - DOE, JANE")]
+        public void PioneerTitlesWithOpenOrPrintAreRedacted(string title)
+        {
+            var line = SaveAsCandidateLog.Format(Window(title, className: "WindowsForms10.Window.8.app.0"), PioneerPid);
+
+            Assert.DoesNotContain("DOE", line);
             Assert.Contains("title='[redacted]'", line);
         }
 

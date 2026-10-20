@@ -85,18 +85,27 @@ public static class SaveAsDialogMatcher
     }
 
     /// <summary>
-    /// Pioneer-owned candidates worth probing for a File name edit, best
-    /// first: the OS foreground window wins, then tier, then enumeration
-    /// (z-order) order. Never includes anything for which Classify says
-    /// None - in particular another application's "Save As" window.
+    /// Pioneer-owned candidates worth probing for a File name box, best
+    /// first: tier (Strong before DialogClass before TitleOnly), then the OS
+    /// foreground window, then enumeration (z-order) order. Never includes
+    /// anything Classify says None for (in particular another application's
+    /// "Save As"), nor any handle in <paramref name="excludedHandles"/> -
+    /// the caller passes Pioneer's main window and the report preview, which
+    /// must never be mistaken for the dialog. Every returned candidate
+    /// still has to prove itself by containing an identified File name box
+    /// (SaveAsFileNameFieldMatcher.MinimumAcceptedScore) before anything is
+    /// typed into it.
     /// </summary>
-    public static IReadOnlyList<SaveAsCandidate> Rank(IReadOnlyList<SaveAsCandidate> candidates, int pioneerProcessId, IntPtr foregroundHandle)
+    public static IReadOnlyList<SaveAsCandidate> Rank(
+        IReadOnlyList<SaveAsCandidate> candidates, int pioneerProcessId, IntPtr foregroundHandle,
+        IReadOnlyCollection<IntPtr>? excludedHandles = null)
     {
         return candidates
+            .Where(c => excludedHandles is null || !excludedHandles.Contains(c.Handle))
             .Select((candidate, index) => (candidate, index, tier: Classify(candidate, pioneerProcessId)))
             .Where(x => x.tier != SaveAsMatchTier.None)
-            .OrderBy(x => x.candidate.Handle == foregroundHandle && foregroundHandle != IntPtr.Zero ? 0 : 1)
-            .ThenBy(x => (int)x.tier)
+            .OrderBy(x => (int)x.tier)
+            .ThenBy(x => x.candidate.Handle == foregroundHandle && foregroundHandle != IntPtr.Zero ? 0 : 1)
             .ThenBy(x => x.index)
             .Select(x => x.candidate)
             .ToList();
@@ -104,16 +113,21 @@ public static class SaveAsDialogMatcher
 
     /// <summary>
     /// A Pioneer-owned standard dialog other than the Save As dialog
-    /// itself - the "already exists, replace it?" prompt shows up as
-    /// exactly this (title "Confirm Save As", class #32770). The caller
-    /// still requires a "Yes" button inside before pressing anything.
+    /// itself that is tied to it: OWNED by the Save As dialog, or titled
+    /// "Confirm Save As" (class #32770). An unrelated Pioneer prompt that
+    /// merely says "already exists" is never a candidate. The caller still
+    /// requires a "Yes" button and IsReplacePrompt before pressing anything.
     /// </summary>
     public static bool IsPossibleOverwritePrompt(SaveAsCandidate candidate, int pioneerProcessId, IntPtr saveAsHandle)
     {
         if (!candidate.IsVisible || candidate.Handle == IntPtr.Zero) return false;
         if (candidate.Handle == saveAsHandle) return false;
         if (!BelongsToPioneer(candidate, pioneerProcessId)) return false;
-        return IsDialogClass(candidate.ClassName);
+        if (!IsDialogClass(candidate.ClassName)) return false;
+
+        var ownedBySaveAs = saveAsHandle != IntPtr.Zero && candidate.OwnerHandle == saveAsHandle;
+        var confirmSaveAsTitle = (candidate.Title ?? string.Empty).Contains("Confirm Save", StringComparison.OrdinalIgnoreCase);
+        return ownedBySaveAs || confirmSaveAsTitle;
     }
 
     /// <summary>
@@ -185,11 +199,14 @@ public static class SaveAsFileNameFieldMatcher
         if (isCombo && id == "1148") return 80;
         if (isCombo && nameIsFileName) return 70;
 
-        // Last resort: an unnamed Edit that is not search/address. Only
-        // reached when the dialog exposes none of the identifying ids.
-        if (isEdit) return 10;
+        // No "last resort" for an unidentified Edit: typing a path into a
+        // control we cannot positively identify as the File name box is
+        // exactly how a non-Save-As Pioneer window could be written into.
         return 0;
     }
+
+    /// <summary>A control must score at least this (Edit 1001 / "File name" Edit / File name combo) to be treated as the File name box.</summary>
+    public const int MinimumAcceptedScore = 70;
 
     /// <summary>Index of the best candidate, or null when nothing scores above zero. Ties keep the earlier (document-order) candidate.</summary>
     public static int? ChooseIndex(IReadOnlyList<SaveAsFieldCandidate> candidates)
@@ -199,7 +216,7 @@ public static class SaveAsFileNameFieldMatcher
         for (var i = 0; i < candidates.Count; i++)
         {
             var score = Score(candidates[i]);
-            if (score > bestScore)
+            if (score >= MinimumAcceptedScore && score > bestScore)
             {
                 bestScore = score;
                 best = i;
@@ -339,7 +356,7 @@ public static class SaveAsCandidateLog
 
     private const int MaxLoggedTitleLength = 80;
 
-    private static readonly string[] SafeTitleWords = { "Save", "Export", "Confirm", "Open", "Print", "Replace" };
+    private static readonly string[] SafeTitleWords = { "Save", "Export", "Confirm", "Replace" };
 
     public static string TitleForLog(SaveAsCandidate candidate, int pioneerProcessId)
     {

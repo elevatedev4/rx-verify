@@ -66,6 +66,9 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 8: how long an export-button Invoke is awaited before carrying on - UIA Invoke on a button that opens a MODAL dialog does not return until the dialog closes.</summary>
     private static readonly TimeSpan ExportInvokeWait = TimeSpan.FromSeconds(3);
 
+    /// <summary>Round 8: how long CancelSaveAsDialog waits for a cancelled Save As dialog to actually go away before the caller moves on (e.g. to closing the preview).</summary>
+    private static readonly TimeSpan SaveAsCancelConfirmTimeout = TimeSpan.FromSeconds(3);
+
     /// <summary>Round 8: how long ClosePreviewAndConfirm waits for the preview window to actually disappear after WM_CLOSE.</summary>
     private static readonly TimeSpan PreviewCloseConfirmTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
@@ -2457,8 +2460,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         // hung the run silently at "Exporting to PDF..." with the dialog up.
         void L(string message) => log(SaveAsCandidateLog.Prefix + message);
 
+        var attempted = false;
+
         var button = FindDescendantByName(searchRoot, primaryName);
-        if (button is not null && InvokeWithoutBlocking(button, $"export button '{primaryName}'", L)) return true;
+        if (button is not null)
+        {
+            if (InvokeWithoutBlocking(button, $"export button '{primaryName}'", L)) return true;
+            attempted = true;
+        }
 
         // Fallback: some toolbar buttons expose only an icon Name with the
         // real label as a ToolTip (see GOAL brief: "the PDF button's
@@ -2473,7 +2482,16 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 try { name = candidate.Name; } catch { continue; }
                 if (!string.IsNullOrEmpty(name) && name.Contains(toolTipContains, StringComparison.OrdinalIgnoreCase))
                 {
+                    // Never a second click once one was attempted: the first
+                    // invoke may have thrown AFTER the dialog opened.
+                    if (attempted && FindSaveAsDialog(EnumerateAllTopLevelWindowsForSaveAs()) is not null)
+                    {
+                        L("Save As dialog is already open after the first export attempt - not clicking another export control.");
+                        return true;
+                    }
+
                     if (InvokeWithoutBlocking(candidate, $"export control matching '{toolTipContains}'", L)) return true;
+                    attempted = true;
                 }
             }
         }
@@ -3261,11 +3279,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>
     /// Enumerates top-level desktop windows belonging to Pioneer's own
     /// process (_pioneerProcessId, captured by FindMainWindow) — the
-    /// shared building block behind FindPreviewWindow, the Save As dialog
-    /// lookup (SaveAsWindowSelector.Choose), and the overwrite-confirm
-    /// prompt search, so none of those three ever consider a window
+    /// shared building block behind FindPreviewWindow and the
+    /// status-text/diagnostic searches, so none of them consider a window
     /// belonging to some other running application (review fix, safety
-    /// blocker 1's root cause).
+    /// blocker 1's root cause). The Save As dialog and its replace prompt
+    /// are found by the native-handle path instead
+    /// (EnumerateAllTopLevelWindowsForSaveAs + SaveAsDialogMatcher).
     /// </summary>
     private List<(AutomationElement Window, WindowCandidate Candidate)> EnumeratePioneerOwnedTopLevelWindows()
     {
@@ -3439,6 +3458,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         L($"step 2/5: dialog found after {dialogWatch.Elapsed.TotalSeconds:0.0}s (tier={dialog.Tier}).");
         log(SaveAsCandidateLog.Format(dialog.Candidate, _pioneerProcessId));
 
+        try
+        {
+            return await FinishSaveAsAsync(dialog, targetPath, preExistingWriteUtc, total, log, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Stop pressed mid-save: do not leave our Save As dialog open.
+            CancelSaveAsDialog(dialog.Handle, log);
+            throw;
+        }
+    }
+
+    /// <summary>Steps 3-5 of SaveAsAndVerify (file name, Save, wait for dialog close + file on disk) for an already-found dialog.</summary>
+    private async Task<bool> FinishSaveAsAsync(
+        SaveAsDialogMatch dialog, string targetPath, DateTime? preExistingWriteUtc, Stopwatch total, Action<string> log, CancellationToken ct)
+    {
+        void L(string message) => log(SaveAsCandidateLog.Prefix + message);
+
         // ---- step 3: foreground + file name ------------------------------
         if (GetForegroundWindow() != dialog.Handle)
         {
@@ -3595,7 +3632,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     {
         try
         {
-            foreach (var candidate in SaveAsDialogMatcher.Rank(all, _pioneerProcessId, GetForegroundWindow()))
+            // Pioneer's main window and the report preview can never be the Save As dialog.
+            var excluded = new List<IntPtr>();
+            if (_mainWindow is not null) excluded.Add(SafeNativeHandle(_mainWindow));
+            if (_previewWindowHandle != IntPtr.Zero) excluded.Add(_previewWindowHandle);
+
+            foreach (var candidate in SaveAsDialogMatcher.Rank(all, _pioneerProcessId, GetForegroundWindow(), excluded))
             {
                 var window = ResolveNativeHandleToElement(candidate.Handle);
                 if (window is null) continue;
@@ -3875,6 +3917,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         if (!IsWindow(handle) || !IsWindowVisible(handle)) return;
         log(SaveAsCandidateLog.Prefix + "cancelling the Save As dialog so it cannot block the next report.");
         TryCloseWindowSafely(handle, log, "the Save As dialog");
+
+        var closed = WaitUntilSync(() => !IsWindow(handle) || !IsWindowVisible(handle), SaveAsCancelConfirmTimeout, PollInterval);
+        log(SaveAsCandidateLog.Prefix + (closed
+            ? "Save As dialog closed (confirmed)."
+            : $"Save As dialog still open {SaveAsCancelConfirmTimeout.TotalSeconds:0}s after the cancel request."));
     }
 
     /// <summary>

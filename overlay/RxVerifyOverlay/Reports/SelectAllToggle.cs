@@ -6,7 +6,7 @@ namespace RxVerifyOverlay.Reports;
 /// Pure logic behind ReportsWindow's "Select all" / "Unselect all"
 /// toggle button (GOAL brief round 2, step 4) — kept UI-free so it's
 /// unit testable without WPF, same pattern as AutomationWindowSelection.cs's
-/// SaveAsWindowSelector/PreviewCloseDecision. ReportsWindow.xaml.cs is the
+/// PreviewCloseDecision. ReportsWindow.xaml.cs is the
 /// only caller: it projects its ObservableCollection&lt;ReportRowViewModel&gt;
 /// into (IsEnabled, IsSelected) tuples and applies the result back.
 ///
