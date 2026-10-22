@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Text;
 using RxVerifyOverlay.Ocr;
 
@@ -25,7 +26,7 @@ namespace RxVerifyOverlay.Integrated;
 /// </summary>
 public static class LoginWindowMonitor
 {
-    private const long CacheMs = 150;
+    private const long CacheMs = 400;
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -37,6 +38,17 @@ public static class LoginWindowMonitor
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    private const int DWMWA_CLOAKED = 14;
 
     private static readonly LoginGateState State = new();
     private static long _lastCheckTick = long.MinValue;
@@ -100,11 +112,16 @@ public static class LoginWindowMonitor
                 var length = GetWindowTextW(hWnd, buffer, buffer.Capacity);
                 if (length <= 0) return true;
 
-                if (LoginWindowGate.IsLoginTitle(buffer.ToString(0, Math.Min(length, buffer.Capacity))))
-                {
-                    found = true;
-                    return false; // stop enumerating
-                }
+                // Cheapest filter first: title match. Everything else
+                // (minimized, cloaked, owning process) is checked only for
+                // the rare window that already matched.
+                if (!LoginWindowGate.IsLoginTitle(buffer.ToString(0, Math.Min(length, buffer.Capacity)))) return true;
+
+                if (!LoginWindowGate.IsLoginWindowCandidate(isVisible: true, IsIconic(hWnd), IsCloaked(hWnd), "Logon to PioneerRx")) return true;
+                if (IsOwnedByExcludedProcess(hWnd)) return true;
+
+                found = true;
+                return false; // stop enumerating
             }
             catch
             {
@@ -117,5 +134,36 @@ public static class LoginWindowMonitor
         // stopped it early; a positive match is authoritative either way.
         if (found) return true;
         return ok ? false : (bool?)null;
+    }
+
+    /// <summary>DWMWA_CLOAKED != 0 means hidden by the shell (e.g. another virtual desktop). A failed query counts as NOT cloaked.</summary>
+    private static bool IsCloaked(IntPtr hWnd)
+    {
+        try
+        {
+            return DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>True for Rx Verify's own windows and browser/mail-client windows. Any lookup failure counts as NOT excluded, so a failure can never silently disable the feature.</summary>
+    private static bool IsOwnedByExcludedProcess(IntPtr hWnd)
+    {
+        try
+        {
+            GetWindowThreadProcessId(hWnd, out var pid);
+            if (pid == 0) return false;
+            if (pid == (uint)Environment.ProcessId) return true;
+
+            using var process = Process.GetProcessById((int)pid);
+            return LoginWindowGate.IsExcludedProcessName(process.ProcessName);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

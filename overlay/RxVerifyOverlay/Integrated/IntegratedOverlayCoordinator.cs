@@ -460,9 +460,13 @@ public sealed class IntegratedOverlayCoordinator
         // Restores itself on the next tick once the window is gone.
         // LoginWindowMonitor never throws and returns false (= shown) on
         // any detection failure, so this can never leave the overlay
-        // permanently hidden. Fallback-window bookkeeping is left alone.
+        // permanently hidden. The login window means PioneerRx exists, so
+        // the "Waiting for PioneerRx" fallback window is hidden too (only
+        // if this mechanism showed it); once login closes the normal
+        // decision below runs again and can bring it back.
         if (LoginWindowMonitor.IsLoginWindowVisible())
         {
+            ApplyFallbackDecision(FallbackSeparateWindowRule.Decide(isIntegratedMode: true, isPioneerAttached: true, _fallbackSeparateWindowShown));
             HideControlBoxIfShown();
             HideBoxesIfShown();
             return;

@@ -536,7 +536,11 @@ public sealed class OrderAssistCoordinator
 
         // A login window that appeared while this tick's OCR was in
         // flight must not get a highlight drawn over it.
-        if (Integrated.LoginWindowMonitor.IsLoginWindowVisible()) return;
+        if (Integrated.LoginWindowMonitor.IsLoginWindowVisible())
+        {
+            HideOverlayIfShown();
+            return;
+        }
 
         // HIGHLIGHT STABILITY (ROUND 2, W-T85 bug 3; ROUND 3 CLEAR-then-
         // confirm redesign — see HighlightStabilityPolicy's own doc for

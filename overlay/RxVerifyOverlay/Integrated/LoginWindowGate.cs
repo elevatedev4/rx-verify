@@ -42,6 +42,44 @@ public static class LoginWindowGate
     }
 
     /// <summary>
+    /// Processes whose windows never count as the PioneerRx login window
+    /// (a browser tab or mail subject can contain the phrase). Matched
+    /// case-insensitively, with or without ".exe". The PioneerRx process is
+    /// deliberately NOT required: an allow-list could silently disable the
+    /// feature if its process name differs.
+    /// </summary>
+    private static readonly string[] ExcludedProcessNames =
+    {
+        "chrome", "msedge", "firefox", "brave", "opera", "iexplore", "outlook",
+    };
+
+    /// <summary>True for browser/mail-client process names (see ExcludedProcessNames). Null/empty is NOT excluded.</summary>
+    public static bool IsExcludedProcessName(string? processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName)) return false;
+
+        var name = processName.Trim();
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+
+        foreach (var excluded in ExcludedProcessNames)
+        {
+            if (string.Equals(name, excluded, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// A window counts as "the login window is up" only when it is visible,
+    /// NOT minimized and NOT cloaked, and its title matches. A lingering
+    /// minimized/cloaked "Logon" window must not keep the overlay hidden.
+    /// (A failed cloak query is passed in as isCloaked: false.)
+    /// </summary>
+    public static bool IsLoginWindowCandidate(bool isVisible, bool isMinimized, bool isCloaked, string? title)
+    {
+        return isVisible && !isMinimized && !isCloaked && IsLoginTitle(title);
+    }
+
+    /// <summary>
     /// The overlay is hidden only on a positive detection. <c>null</c>
     /// means detection failed/unknown and must fall back to showing.
     /// </summary>

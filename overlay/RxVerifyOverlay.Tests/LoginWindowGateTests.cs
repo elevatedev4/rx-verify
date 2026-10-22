@@ -104,4 +104,44 @@ public class LoginWindowGateTests
         Assert.Equal(LoginGateTransition.Hide, state.Observe(true));
         Assert.True(state.IsHidden);
     }
+
+    [Theory]
+    [InlineData("chrome")]
+    [InlineData("Chrome")]
+    [InlineData("msedge.exe")]
+    [InlineData("firefox")]
+    [InlineData("brave")]
+    [InlineData("opera")]
+    [InlineData("iexplore")]
+    [InlineData("OUTLOOK.EXE")]
+    public void BrowserAndMailProcessesAreExcluded(string name)
+    {
+        Assert.True(LoginWindowGate.IsExcludedProcessName(name));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("PioneerRx")]
+    [InlineData("Pioneer.Client")]
+    [InlineData("chromeish")]
+    [InlineData("notepad")]
+    public void OtherOrUnknownProcessesAreNotExcluded(string? name)
+    {
+        // Unknown must never exclude: a failed lookup cannot disable the feature.
+        Assert.False(LoginWindowGate.IsExcludedProcessName(name));
+    }
+
+    [Fact]
+    public void CandidateRequiresVisibleNotMinimizedNotCloakedAndMatchingTitle()
+    {
+        const string login = "Logon to PioneerRx";
+
+        Assert.True(LoginWindowGate.IsLoginWindowCandidate(true, false, false, login));
+        Assert.False(LoginWindowGate.IsLoginWindowCandidate(false, false, false, login));
+        Assert.False(LoginWindowGate.IsLoginWindowCandidate(true, true, false, login)); // minimized
+        Assert.False(LoginWindowGate.IsLoginWindowCandidate(true, false, true, login)); // cloaked
+        Assert.False(LoginWindowGate.IsLoginWindowCandidate(true, false, false, "Notepad"));
+        Assert.False(LoginWindowGate.IsLoginWindowCandidate(true, false, false, null));
+    }
 }
