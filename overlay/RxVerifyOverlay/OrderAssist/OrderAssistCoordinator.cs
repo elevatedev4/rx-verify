@@ -369,6 +369,18 @@ public sealed class OrderAssistCoordinator
     {
         if (!_enabled) return;
 
+        // LOGIN SCREEN (Will, 2026-10-22): hide the Order Assist overlay
+        // while PioneerRx's "Logon to PioneerRx" window is visible; the
+        // next tick after it closes rescans from a clean slate. Never
+        // throws, false (= shown) on any detection failure.
+        if (Integrated.LoginWindowMonitor.IsLoginWindowVisible())
+        {
+            HideOverlayIfShown();
+            ResetHighlightStability();
+            _currentTargetHandle = IntPtr.Zero;
+            return;
+        }
+
         // REVIEW FIX (blocking): capture THIS tick's generation now, and
         // never mutate the overlay's visible state below without
         // re-confirming it's still current (see the final check below) —
@@ -521,6 +533,10 @@ public sealed class OrderAssistCoordinator
         // highlight the pharmacist may have already turned off, with no
         // future tick left to correct it.
         if (!TickGenerationGate.IsStillCurrent(tickGeneration, _generation)) return;
+
+        // A login window that appeared while this tick's OCR was in
+        // flight must not get a highlight drawn over it.
+        if (Integrated.LoginWindowMonitor.IsLoginWindowVisible()) return;
 
         // HIGHLIGHT STABILITY (ROUND 2, W-T85 bug 3; ROUND 3 CLEAR-then-
         // confirm redesign — see HighlightStabilityPolicy's own doc for

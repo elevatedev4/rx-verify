@@ -454,6 +454,20 @@ public sealed class IntegratedOverlayCoordinator
             return;
         }
 
+        // LOGIN SCREEN (Will, 2026-10-22): while PioneerRx's login window
+        // ("Logon to PioneerRx") is visible, hide EVERY integrated part
+        // (control box, boxes, and via HideAndResetHover the hover popup).
+        // Restores itself on the next tick once the window is gone.
+        // LoginWindowMonitor never throws and returns false (= shown) on
+        // any detection failure, so this can never leave the overlay
+        // permanently hidden. Fallback-window bookkeeping is left alone.
+        if (LoginWindowMonitor.IsLoginWindowVisible())
+        {
+            HideControlBoxIfShown();
+            HideBoxesIfShown();
+            return;
+        }
+
         // NARROW attach: a Pre-Check/Edit/New-Rx window specifically —
         // required for the boxes layer, which needs real field rects to
         // draw over (see FieldReader.ReadEnteredFieldRects). Unchanged
