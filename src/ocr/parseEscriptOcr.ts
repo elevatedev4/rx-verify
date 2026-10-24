@@ -1832,13 +1832,19 @@ function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
   }
 }
 
+/** Max header length (words with letters/digits) for a refill-approval cue row — a header, not a free-text note sentence. */
+const REFILL_CUE_MAX_WORDS = 5;
+/** How many rows below the cue row the "Total Fills" label may sit (same section). */
+const REFILL_CUE_MAX_ROWS_AFTER = 2;
+
 /**
- * True if ROW `line`, joined and normalized, holds BOTH a refill word
- * ("refill"/"refills") AND an approval/renewal/request word — the cue
- * row that marks a refill-approval/renewal-response section for the
- * label-less rescue below.
+ * True if ROW `line` looks like a refill-approval/renewal HEADER: at most
+ * REFILL_CUE_MAX_WORDS words, whose joined, normalized text holds BOTH a
+ * refill word ("refill"/"refills") AND an approval/renewal/request word.
+ * A longer row is a free-text note sentence, not a header.
  */
 function isRefillApprovalCueRow(line: OcrWord[]): boolean {
+  if (line.filter((w) => normalize(w.text)).length > REFILL_CUE_MAX_WORDS) return false;
   const joined = normalize(wordsToText(line));
   return joined.includes('refill') && (joined.includes('approv') || joined.includes('renew') || joined.includes('request'));
 }
@@ -1857,11 +1863,11 @@ function isRefillApprovalCueRow(line: OcrWord[]): boolean {
  * on `record`. Guards against false positives on a page that is not an
  * e-script at all (pricing/notes panels): the exact-shape tail-phrase
  * anchor is trusted as-is, but the looser "Total Fills" LABEL anchor is
- * accepted only when the page carries a cue ROW holding BOTH a refill
- * word and an approval/renewal/request word (a lone "approved"/"renewed"
- * elsewhere, e.g. a claim or insurance status, is not enough), and it
- * scans only that cue row and the rows AFTER it, never chrome (toolbar)
- * rows.
+ * accepted only when the page carries a short HEADER row (<= 5 words)
+ * holding BOTH a refill word and an approval/renewal/request word (a lone
+ * "approved"/"renewed" elsewhere, or a free-text note sentence, is not
+ * enough), and it scans only that cue row and the 2 rows AFTER it, never
+ * chrome (toolbar) rows.
  *
  * PHI: attaches NO neighbor rows or free text (refillsOcrRegionWords is
  * never set here, nor refillsLabelSeen) — with no labelled row on the
@@ -1874,9 +1880,11 @@ function recoverRefillsWithoutFieldLabels(lines: OcrWord[][], record: Prescripti
   try {
     let match = findTotalFillsPhraseValue(lines);
     if (match === undefined) {
-      const cueIdx = lines.findIndex(isRefillApprovalCueRow);
-      if (cueIdx !== -1) {
-        match = findTotalFillsLabelAnywhere(lines.slice(cueIdx).filter((line) => !isChromeLine(line)));
+      for (let cueIdx = 0; cueIdx < lines.length && match === undefined; cueIdx++) {
+        if (!isRefillApprovalCueRow(lines[cueIdx] as OcrWord[])) continue;
+        match = findTotalFillsLabelAnywhere(
+          lines.slice(cueIdx, cueIdx + 1 + REFILL_CUE_MAX_ROWS_AFTER).filter((line) => !isChromeLine(line))
+        );
       }
     }
     if (match === undefined) return;

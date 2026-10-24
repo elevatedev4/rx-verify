@@ -3231,6 +3231,40 @@ describe('refills rescue when NO row starts with a recognized field label (refil
     expect(compareRefills(record.refills, '4', record.refillsFromTotalFills).status).toBe('green');
   });
 
+  it('a free-text note sentence ("pt requested refill, approved by Dr") is not a header cue, even with a later "Total Fills 5" row', () => {
+    const record = parseEscriptOcr(
+      flatten([
+        row(0, ['pt', 'requested', 'refill,', 'approved', 'by', 'Dr']),
+        row(30, ['Status', 'Total', 'Fills', '5'])
+      ])
+    );
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it('genuine header with "Total Fills 5" 1 and 2 rows below gives 4 refills (green)', () => {
+    for (const gap of [0, 1]) {
+      const rows = [row(0, ['Refill', 'Request', '-', 'Approve', '/', 'Deny'])];
+      for (let i = 0; i < gap; i++) rows.push(row(30 + i * 30, ['Status', 'Pending']));
+      rows.push(row(30 + gap * 30, ['Status', 'Pending', 'Total', 'Fills', '5']));
+      const record = parseEscriptOcr(flatten(rows));
+
+      expect(record.refills).toBe('5');
+      expect(compareRefills(record.refills, '4', record.refillsFromTotalFills).status).toBe('green');
+    }
+  });
+
+  it('same header but "Total Fills" 4+ rows below it extracts nothing', () => {
+    const rows = [row(0, ['Refill', 'Request', '-', 'Approve', '/', 'Deny'])];
+    for (let i = 0; i < 3; i++) rows.push(row(30 + i * 30, ['Status', 'Pending']));
+    rows.push(row(120, ['Status', 'Pending', 'Total', 'Fills', '5']));
+    const record = parseEscriptOcr(flatten(rows));
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
   it('a cue row AFTER the "Total Fills" row does not count (only the cue row and rows below it are scanned)', () => {
     const record = parseEscriptOcr(
       flatten([row(0, ['Status', 'Pending', 'Total', 'Fills', '5']), row(30, ['Refill', 'Request', '-', 'Approve', '/', 'Deny'])])
