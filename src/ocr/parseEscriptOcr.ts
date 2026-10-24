@@ -1833,6 +1833,17 @@ function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
 }
 
 /**
+ * True if ROW `line`, joined and normalized, holds BOTH a refill word
+ * ("refill"/"refills") AND an approval/renewal/request word — the cue
+ * row that marks a refill-approval/renewal-response section for the
+ * label-less rescue below.
+ */
+function isRefillApprovalCueRow(line: OcrWord[]): boolean {
+  const joined = normalize(wordsToText(line));
+  return joined.includes('refill') && (joined.includes('approv') || joined.includes('renew') || joined.includes('request'));
+}
+
+/**
  * Early-exit rescue (field reports 2026-09-22 .. 2026-10-22, refill-
  * approval document, missReason=no-refills-text-found): when NO row on the
  * page starts with a recognized field label, parseEscriptOcr used to
@@ -1846,21 +1857,27 @@ function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
  * on `record`. Guards against false positives on a page that is not an
  * e-script at all (pricing/notes panels): the exact-shape tail-phrase
  * anchor is trusted as-is, but the looser "Total Fills" LABEL anchor is
- * accepted only when the page also carries a refill-request/approval/
- * renewal cue, and it never scans chrome (toolbar) rows.
+ * accepted only when the page carries a cue ROW holding BOTH a refill
+ * word and an approval/renewal/request word (a lone "approved"/"renewed"
+ * elsewhere, e.g. a claim or insurance status, is not enough), and it
+ * scans only that cue row and the rows AFTER it, never chrome (toolbar)
+ * rows.
  *
  * PHI: attaches NO neighbor rows or free text (refillsOcrRegionWords is
- * never set here) — with no labelled row on the page the usual row-level
- * patient/prescriber exclusion cannot fire, so only the matched label's
- * own words are recorded as refillsLabelSeen. Both anchors only ever
+ * never set here, nor refillsLabelSeen) — with no labelled row on the
+ * page the usual row-level patient/prescriber exclusion cannot fire, so
+ * no page text is recorded at all. Both anchors only ever
  * return a parseable number, so a match always resolves. Never throws.
  */
 function recoverRefillsWithoutFieldLabels(lines: OcrWord[][], record: PrescriptionRecord): void {
   record.refillsMissReason = 'no-refills-text-found';
   try {
     let match = findTotalFillsPhraseValue(lines);
-    if (match === undefined && lines.some(isApprovalRenewalRowShaped)) {
-      match = findTotalFillsLabelAnywhere(lines.filter((line) => !isChromeLine(line)));
+    if (match === undefined) {
+      const cueIdx = lines.findIndex(isRefillApprovalCueRow);
+      if (cueIdx !== -1) {
+        match = findTotalFillsLabelAnywhere(lines.slice(cueIdx).filter((line) => !isChromeLine(line)));
+      }
     }
     if (match === undefined) return;
     const parsed = parseRefills(match.value);

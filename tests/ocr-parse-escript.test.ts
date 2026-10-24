@@ -3193,6 +3193,53 @@ describe('refills rescue when NO row starts with a recognized field label (refil
     expect(record.refillsMissReason).toBe('no-refills-text-found');
   });
 
+  it('a lone "Insurance approved" row plus a "Total Fills 5" pricing row extracts nothing', () => {
+    const record = parseEscriptOcr(flatten([row(0, ['Insurance', 'approved']), row(30, ['Rebate', '3.00', 'Total', 'Fills', '5'])]));
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it('"Claim Approved by plan" plus "Total Fills 5 Rebate 3.00" extracts nothing', () => {
+    const record = parseEscriptOcr(
+      flatten([row(0, ['Claim', 'Approved', 'by', 'plan']), row(30, ['Status', 'Total', 'Fills', '5', 'Rebate', '3.00'])])
+    );
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it('"Rx renewed last week" plus "Total Fills 7" extracts nothing', () => {
+    const record = parseEscriptOcr(
+      flatten([row(0, ['Rx', 'renewed', 'last', 'week']), row(30, ['Status', 'Total', 'Fills', '7'])])
+    );
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it('a genuine refill-request layout ("Refill Request - Approve / Deny" then a LATER "Total Fills 5" row) gives 4 refills, green', () => {
+    const record = parseEscriptOcr(
+      flatten([
+        row(0, ['Refill', 'Request', '-', 'Approve', '/', 'Deny']),
+        row(30, ['Status', 'Pending', 'Total', 'Fills', '5'])
+      ])
+    );
+
+    expect(record.refills).toBe('5');
+    expect(record.refillsFromTotalFills).toBe(true);
+    expect(compareRefills(record.refills, '4', record.refillsFromTotalFills).status).toBe('green');
+  });
+
+  it('a cue row AFTER the "Total Fills" row does not count (only the cue row and rows below it are scanned)', () => {
+    const record = parseEscriptOcr(
+      flatten([row(0, ['Status', 'Pending', 'Total', 'Fills', '5']), row(30, ['Refill', 'Request', '-', 'Approve', '/', 'Deny'])])
+    );
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
   it('a Total Fills label with no readable number on an approval page resolves nothing and attaches NO proof rows', () => {
     const ocr = flatten([
       row(0, ['Refill', 'Request', 'Approved']),
