@@ -1832,6 +1832,62 @@ function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
   }
 }
 
+/**
+ * Early-exit rescue (field reports 2026-09-22 .. 2026-10-22, refill-
+ * approval document, missReason=no-refills-text-found): when NO row on the
+ * page starts with a recognized field label, parseEscriptOcr used to
+ * return immediately — before the two labelless/"anywhere" refills
+ * anchors (findTotalFillsPhraseValue, findTotalFillsLabelAnywhere) ever
+ * ran, so a "Total Fills: N" sharing a row with other summary text (or a
+ * bare "N (including this fill)" tail) was invisible on exactly the
+ * pages where every other label is also missing. Runs ONLY those two
+ * anchors over the full line set and touches NOTHING but the refills
+ * fields on `record` — every other field stays unset, as before. When
+ * neither anchor yields a number the record still carries
+ * 'no-refills-text-found' (unchanged reason) plus, when any "fill"-shaped
+ * row exists, the same PHI-filtered refillsOcrRegionWords proof an
+ * ordinary miss carries. Never throws.
+ */
+function recoverRefillsWithoutFieldLabels(lines: OcrWord[][], record: PrescriptionRecord): void {
+  record.refillsMissReason = 'no-refills-text-found';
+  let match: RefillsAnchorMatch | undefined;
+  let viaLabel = false;
+  try {
+    match = findTotalFillsPhraseValue(lines);
+    if (match === undefined) {
+      match = findTotalFillsLabelAnywhere(lines);
+      viaLabel = match !== undefined;
+    }
+  } catch {
+    record.refillsMissReason = 'internal-error:label-anywhere-anchor';
+    return;
+  }
+  if (match !== undefined) {
+    const parsed = parseRefills(match.value);
+    if (parsed) {
+      record.refills = parsed.value;
+      // Both anchors resolve as the 'totalfills' canonical in the main
+      // flow; the explicit tail phrase, when the anchor read one, wins.
+      const isTotalFills = match.isTotalFillsPhrase ?? parsed.isTotalFillsPhrase ?? true;
+      if (isTotalFills) record.refillsFromTotalFills = true;
+      delete record.refillsMissReason;
+      return;
+    }
+    record.refillsMissReason = 'validation-failed:not-numeric';
+  }
+  try {
+    const anchorKeys = match ? new Set(match.matchedLine.map(ocrWordKey)) : undefined;
+    const regionWords = buildRefillsOcrRegionWords(lines, {}, anchorKeys);
+    if (regionWords.length > 0) record.refillsOcrRegionWords = regionWords;
+    if (viaLabel && match?.label) {
+      const { start, consumed } = match.label;
+      record.refillsLabelSeen = wordsToText(match.matchedLine.slice(start, start + consumed + 6));
+    }
+  } catch {
+    // Best-effort diagnostic only.
+  }
+}
+
 // ---------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------
@@ -1873,7 +1929,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     if (firstLabelIdx === -1) {
       // Nothing recognizable as ANY field label anywhere on the page —
       // certainly nothing refills-shaped either.
-      record.refillsMissReason = 'no-refills-text-found';
+      recoverRefillsWithoutFieldLabels(lines, record);
       return record;
     }
     lines = lines.slice(firstLabelIdx);

@@ -3104,3 +3104,90 @@ describe('refillsLabelSeen / ocrLineCount diagnostics (branch brief item 2)', ()
     expect(record.ocrLineCount).toBeUndefined();
   });
 });
+
+// Field reports 2026-09-22 .. 2026-10-22 (refill-approval document,
+// missReason=no-refills-text-found, nothing captured): when NO row on the
+// page starts with a recognized field label, the parser returned before
+// the two "anywhere" refills anchors could run. SYNTHETIC rows reproduce
+// only the structure (no row starts with a known label; the Total Fills
+// text sits mid-row or as a bare tail phrase).
+describe('refills rescue when NO row starts with a recognized field label (refill-approval summary pages)', () => {
+  it('finds a mid-row "Total Fills: N" and applies the N-1 total-fills rule', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(30, ['Status', 'Approved', 'Total', 'Fills:', '4'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsFromTotalFills).toBe(true);
+    expect(record.refillsMissReason).toBeUndefined();
+    expect(compareRefills(record.refills, '3', record.refillsFromTotalFills).status).toBe('green');
+  });
+
+  it('tolerates a garbled mid-row "Total Fills" label with a descriptive parenthetical before the number', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(30, ['Status', 'Approved', 'Tota1', 'Fi11s', '(renewal:', 'total', 'incl.', 'current):', '2'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('2');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('finds a bare "N (including this fill)" tail with no label text anywhere on the page', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(30, ['Status', 'Approved', '3', '(including', 'this', 'fill)'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('3');
+    expect(record.refillsFromTotalFills).toBe(true);
+  });
+
+  it('"(additional refills)" tail means the stated count is the refill count as-is (no N-1)', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(30, ['Status', 'Approved', 'Total', 'Fills:', '2', '(additional', 'refills)'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('2');
+    expect(record.refillsFromTotalFills).toBeUndefined();
+  });
+
+  it('touches nothing but the refills fields: no other field is invented from a label-less page', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(30, ['Status', 'Approved', 'Total', 'Fills:', '4'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(Object.keys(record).sort()).toEqual(['refills', 'refillsFromTotalFills']);
+  });
+
+  it('a label-less free-text page that merely mentions "refill" and a number does NOT fabricate a refills value', () => {
+    const ocr = flatten([
+      row(0, ['called', 'pharmacy', 'wants', 'refill', 'in', '2', 'days']),
+      row(30, ['will', 'pick', 'up', 'next', 'week'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it('still reports no-refills-text-found (with the PHI-filtered proof rows) when a "Total Fills" label has no readable number', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(30, ['Status', 'Approved', 'Total', 'Fills:'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+    expect(record.refillsOcrRegionWords?.length ?? 0).toBeGreaterThan(0);
+  });
+});
