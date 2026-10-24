@@ -1186,8 +1186,8 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
         Status = verdict.Status,
         Explanation = verdict.Explanation,
         ReasonCode = verdict.ReasonCode,
-        SourceValue = verdict.SourceValue ?? "(not provided)",
-        EnteredValue = verdict.EnteredValue ?? "(not provided)",
+        SourceValue = verdict.SourceValue ?? AutoDiagnosticPolicy.NotProvidedPlaceholder,
+        EnteredValue = verdict.EnteredValue ?? AutoDiagnosticPolicy.NotProvidedPlaceholder,
         // INTEGRATED MODE — see _lastEnteredRects doc. Not present
         // (rather than default) when this field's rect wasn't captured
         // this refresh.
