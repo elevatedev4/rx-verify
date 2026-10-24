@@ -30,15 +30,15 @@ public class AutoDiagnosticPolicyDebounceTests
         AutoDiagnosticRateLimitState? state = null;
 
         var (firstReport, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, state, Now, contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, state, Now, contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(firstReport);
 
         var (secondReport, stateAfterSecond, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, stateAfterFirst, Now.AddSeconds(10), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, stateAfterFirst, Now.AddSeconds(10), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(secondReport); // only 2 consecutive misses so far
 
         var (thirdReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, stateAfterSecond, Now.AddSeconds(12), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, stateAfterSecond, Now.AddSeconds(12), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.True(thirdReport); // 3rd consecutive miss, already 12s since the first
     }
 
@@ -51,26 +51,26 @@ public class AutoDiagnosticPolicyDebounceTests
         AutoDiagnosticRateLimitState? state = null;
 
         var (r1, s1, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, state, Now, contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, state, Now, contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(r1);
 
         var (r2, s2, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, s1, Now.AddSeconds(1), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, s1, Now.AddSeconds(1), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(r2);
 
         // 3rd consecutive miss — count threshold met, but only 2s have
         // passed since the first miss, so the persistence gate still
         // blocks it.
         var (r3, s3, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, s2, Now.AddSeconds(2), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, s2, Now.AddSeconds(2), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(r3);
 
         var (r4, s4, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, s3, Now.AddSeconds(4.9), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, s3, Now.AddSeconds(4.9), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(r4); // still under 5s
 
         var (r5, _, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, s4, Now.AddSeconds(5), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, s4, Now.AddSeconds(5), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
         Assert.True(r5); // exactly 5s since the first miss, and well past 3 consecutive misses
     }
 
@@ -86,7 +86,7 @@ public class AutoDiagnosticPolicyDebounceTests
         };
 
         var (shouldReportOnGreen, afterGreen, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.Green, true, false, false, seeded, Now, contextKey, contextKey);
+            RefillsBoxRenderState.Green, true, false, false, seeded, Now, contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReportOnGreen);
         Assert.Null(afterGreen.Streak);
@@ -96,7 +96,7 @@ public class AutoDiagnosticPolicyDebounceTests
         // because the old (now-cleared) streak had already satisfied the
         // debounce thresholds.
         var (shouldReportAfterReset, _, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, afterGreen, Now.AddSeconds(1), contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, false, afterGreen, Now.AddSeconds(1), contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReportAfterReset);
     }
@@ -115,7 +115,7 @@ public class AutoDiagnosticPolicyDebounceTests
         // pharmacist working through a stack of Rxs that all verify
         // clean, nothing ever left an in-progress streak behind).
         var (shouldReport, updated, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.Green, true, false, false, null, Now, contextKey, contextKey);
+            RefillsBoxRenderState.Green, true, false, false, null, Now, contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReport);
         Assert.False(stateChanged); // nothing to persist — the caller should skip Save() entirely
@@ -132,7 +132,7 @@ public class AutoDiagnosticPolicyDebounceTests
         };
 
         var (shouldReport, updated, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.Green, true, false, false, seeded, Now, contextKey, contextKey);
+            RefillsBoxRenderState.Green, true, false, false, seeded, Now, contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReport);
         Assert.True(stateChanged); // the streak WAS cleared — the caller must Save() this once
@@ -152,7 +152,7 @@ public class AutoDiagnosticPolicyDebounceTests
         };
 
         var (shouldReport, updated, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, true, seeded, Now, contextKey, contextKey);
+            RefillsBoxRenderState.NotProvided, true, false, true, seeded, Now, contextKey, contextKey, isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReport);
         Assert.NotNull(updated.Streak);
@@ -186,16 +186,16 @@ public class AutoDiagnosticPolicyDebounceTests
         AutoDiagnosticRateLimitState? state = null;
 
         (_, state, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, state, t0, null, fallbackContext);
+            RefillsBoxRenderState.NotProvided, true, false, false, state, t0, null, fallbackContext, isEscriptScreen: true, hasEscriptContent: true);
         (_, state, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, state, t0.AddSeconds(3), null, fallbackContext);
+            RefillsBoxRenderState.NotProvided, true, false, false, state, t0.AddSeconds(3), null, fallbackContext, isEscriptScreen: true, hasEscriptContent: true);
 
         var (thirdShouldReport, stateAfterThird, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, state, t0.AddSeconds(6), null, fallbackContext);
+            RefillsBoxRenderState.NotProvided, true, false, false, state, t0.AddSeconds(6), null, fallbackContext, isEscriptScreen: true, hasEscriptContent: true);
         Assert.True(thirdShouldReport);
 
         var (fourthShouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
-            RefillsBoxRenderState.NotProvided, true, false, false, stateAfterThird, t0.AddMinutes(1), null, fallbackContext);
+            RefillsBoxRenderState.NotProvided, true, false, false, stateAfterThird, t0.AddMinutes(1), null, fallbackContext, isEscriptScreen: true, hasEscriptContent: true);
         Assert.False(fourthShouldReport); // same fallback context, same rolling day -> suppressed by the daily cap
     }
 }

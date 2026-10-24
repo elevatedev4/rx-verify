@@ -97,7 +97,7 @@ public class AutoDiagnosticPolicyTests
     {
         var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(shouldReport);
     }
@@ -107,7 +107,7 @@ public class AutoDiagnosticPolicyTests
     {
         var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.Green, hasFillWords: true, isApproval: true, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReport);
     }
@@ -117,7 +117,7 @@ public class AutoDiagnosticPolicyTests
     {
         var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: false, isApproval: false, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(shouldReport);
     }
@@ -127,7 +127,7 @@ public class AutoDiagnosticPolicyTests
     {
         var (shouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.UnparseableQuantity, hasFillWords: false, isApproval: true, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(shouldReport);
     }
@@ -137,11 +137,11 @@ public class AutoDiagnosticPolicyTests
     {
         var (firstShouldReport, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         var (secondShouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(2), rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(2), rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(firstShouldReport);
         Assert.False(secondShouldReport);
@@ -152,11 +152,11 @@ public class AutoDiagnosticPolicyTests
     {
         var (_, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         var (shouldReportNextDay, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(25), rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddHours(25), rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(shouldReportNextDay);
     }
@@ -166,7 +166,7 @@ public class AutoDiagnosticPolicyTests
     {
         var (_, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001");
+            rateLimitState: SeedSatisfiedStreak("RX-1001", Now), nowUtc: Now, rxNumber: "RX-1001", contextKey: "RX-1001", isEscriptScreen: true, hasEscriptContent: true);
 
         // RX-2002 is a DIFFERENT context, so it needs its own satisfied
         // streak seeded before this call — a fresh context always starts
@@ -181,7 +181,7 @@ public class AutoDiagnosticPolicyTests
 
         var (shouldReportOther, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(5), rxNumber: "RX-2002", contextKey: "RX-2002");
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(5), rxNumber: "RX-2002", contextKey: "RX-2002", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(shouldReportOther);
     }
@@ -206,7 +206,7 @@ public class AutoDiagnosticPolicyTests
 
             var (shouldReport, updated, _) = AutoDiagnosticPolicy.ShouldReport(
                 RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-                rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber);
+                rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber, isEscriptScreen: true, hasEscriptContent: true);
             state = updated;
             if (shouldReport) reportedCount++;
         }
@@ -222,7 +222,7 @@ public class AutoDiagnosticPolicyTests
 
         var (sixthShouldReport, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: state, nowUtc: Now.AddMinutes(6), rxNumber: "RX-5", contextKey: "RX-5");
+            rateLimitState: state, nowUtc: Now.AddMinutes(6), rxNumber: "RX-5", contextKey: "RX-5", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.False(sixthShouldReport);
     }
@@ -245,7 +245,7 @@ public class AutoDiagnosticPolicyTests
 
             var (_, updated, _) = AutoDiagnosticPolicy.ShouldReport(
                 RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-                rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber);
+                rateLimitState: seeded, nowUtc: now, rxNumber: rxNumber, contextKey: rxNumber, isEscriptScreen: true, hasEscriptContent: true);
             state = updated;
         }
 
@@ -259,7 +259,7 @@ public class AutoDiagnosticPolicyTests
 
         var (shouldReportLater, _, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: state, nowUtc: later, rxNumber: "RX-99", contextKey: "RX-99");
+            rateLimitState: state, nowUtc: later, rxNumber: "RX-99", contextKey: "RX-99", isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(shouldReportLater);
     }
@@ -276,11 +276,11 @@ public class AutoDiagnosticPolicyTests
 
         var (first, stateAfterFirst, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: SeedSatisfiedStreak(fallbackContext, Now), nowUtc: Now, rxNumber: null, contextKey: fallbackContext);
+            rateLimitState: SeedSatisfiedStreak(fallbackContext, Now), nowUtc: Now, rxNumber: null, contextKey: fallbackContext, isEscriptScreen: true, hasEscriptContent: true);
 
         var (second, stateAfterSecond, _) = AutoDiagnosticPolicy.ShouldReport(
             RefillsBoxRenderState.NotProvided, hasFillWords: true, isApproval: false, isBusyScreen: false,
-            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(1), rxNumber: null, contextKey: fallbackContext);
+            rateLimitState: stateAfterFirst, nowUtc: Now.AddMinutes(1), rxNumber: null, contextKey: fallbackContext, isEscriptScreen: true, hasEscriptContent: true);
 
         Assert.True(first);
         Assert.False(second); // same fallback context, same day -> suppressed

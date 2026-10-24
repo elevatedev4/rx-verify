@@ -861,11 +861,14 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             var hasFillWords = ocrWords.Any(w => AutoDiagnosticPolicy.IsFillWord(w.Text));
             var isApproval = ocrWords.Any(w => ApprovalWordRegex.IsMatch(w.Text));
             var isEscriptScreen = EscriptMarkerDetector.ContainsMarker(ocrWords);
+            var coreFieldsRead = AutoDiagnosticPolicy.CountCoreFieldsRead(
+                Categories.SelectMany(c => c.Rows).Select(r => (r.FieldKey, (string?)r.SourceValue)));
+            var hasEscriptContent = coreFieldsRead >= AutoDiagnosticPolicy.MinCoreFieldsRead;
 
             var contextKey = AutoDiagnosticPolicy.GetContextKey(CurrentVerdictsRxIdentity, _lastRxWindowTitle, window.ScreenMode);
             _cachedRateLimitState ??= AutoDiagnosticStateStore.Load();
             var (shouldReport, updatedState, stateChanged) = AutoDiagnosticPolicy.ShouldReport(
-                renderState, hasFillWords, isApproval, isBusyScreen, _cachedRateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity, contextKey, isEscriptScreen);
+                renderState, hasFillWords, isApproval, isBusyScreen, _cachedRateLimitState, DateTime.UtcNow, CurrentVerdictsRxIdentity, contextKey, isEscriptScreen, hasEscriptContent);
             _cachedRateLimitState = updatedState; // cheap, in-memory — keep regardless of whether disk needs writing
             if (stateChanged) AutoDiagnosticStateStore.Save(updatedState);
 
@@ -874,7 +877,7 @@ public sealed class OverlayViewModel : INotifyPropertyChanged
             // posture as every other [TAG]-prefixed OcrLogger.LogTiming
             // line in this file (e.g. "[PRECHECK-GATE]" above).
             OcrLogger.LogTiming(
-                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} isBusyScreen={isBusyScreen} isEscriptScreen={isEscriptScreen} streak={updatedState.Streak?.ConsecutiveMisses ?? 0} stateChanged={stateChanged} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
+                $"[AUTO-DIAGNOSTIC] refills boxState={renderState} hasFillWords={hasFillWords} isApproval={isApproval} isBusyScreen={isBusyScreen} isEscriptScreen={isEscriptScreen} coreFieldsRead={coreFieldsRead} hasEscriptContent={hasEscriptContent} streak={updatedState.Streak?.ConsecutiveMisses ?? 0} stateChanged={stateChanged} missReason={RefillsMissReason ?? "none"} reported={shouldReport}");
 
             if (!shouldReport) return;
 

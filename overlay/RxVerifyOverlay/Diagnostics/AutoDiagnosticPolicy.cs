@@ -116,6 +116,48 @@ public static class AutoDiagnosticPolicy
         "unparseable_quantity"
     };
 
+    /// <summary>Minimum number of CoreContentFieldKeys that must have been read (non-empty source value) for a scan to count as an eScript content pane — see LooksLikeEscriptContent.</summary>
+    public const int MinCoreFieldsRead = 2;
+
+    /// <summary>The verdict-row field keys (FieldOrder.Fields) whose source side is read from the eScript content pane itself: drug, quantity, prescriber (name), written date. Deliberately excludes refills (the field under test), patient fields, sig and DAW.</summary>
+    public static readonly IReadOnlySet<string> CoreContentFieldKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "drug",
+        "quantity",
+        "prescriberName",
+        "dateWritten"
+    };
+
+    /// <summary>The text OverlayViewModel.BuildRow puts in a row's SourceValue when the engine returned none — a value that is not a read.</summary>
+    public const string NotProvidedPlaceholder = "(not provided)";
+
+    /// <summary>
+    /// How many of CoreContentFieldKeys have a real (non-blank, not the
+    /// "(not provided)" placeholder) source value in `rows` — counts only,
+    /// the values themselves are never inspected beyond emptiness or
+    /// logged. Each key counts at most once.
+    /// </summary>
+    public static int CountCoreFieldsRead(IEnumerable<(string FieldKey, string? SourceValue)> rows) =>
+        rows.Where(r => CoreContentFieldKeys.Contains(r.FieldKey) && IsRealSourceValue(r.SourceValue))
+            .Select(r => r.FieldKey)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+    /// <summary>
+    /// True when the engine actually read eScript content-pane fields for
+    /// this scan: at least MinCoreFieldsRead of CoreContentFieldKeys
+    /// (drug, quantity, prescriberName, dateWritten) have a non-empty
+    /// source value. False means "not a prescription content pane"
+    /// (notes, pricing, ...) — a missing refill count there is not a bug.
+    /// Pure, no WPF — directly unit-testable.
+    /// </summary>
+    public static bool LooksLikeEscriptContent(IEnumerable<(string FieldKey, string? SourceValue)> rows) =>
+        CountCoreFieldsRead(rows) >= MinCoreFieldsRead;
+
+    private static bool IsRealSourceValue(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !string.Equals(value.Trim(), NotProvidedPlaceholder, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// Classifies the refills row's current tick into one of
     /// RefillsBoxRenderState's 5 states — see that enum's own doc for what
@@ -165,20 +207,27 @@ public static class AutoDiagnosticPolicy
     /// only the routine hourly-bookkeeping prune still runs, same as
     /// every other early-return branch below.
     ///
-    /// Screen-kind gate (2026-10-24, W-Q8 "ignore screens that aren't
-    /// prescriptions"): `isEscriptScreen` is EscriptMarkerDetector.
-    /// ContainsMarker over the scan's OCR words — the SAME existing
-    /// "Escript" tab-label detection OcrSourceUsability already gates the
-    /// engine compare with. When false (notes, pricing, or any other
-    /// screen without an eScript marker) a missing/unreadable refill
-    /// count is not a bug, so nothing is reported. Like a busy-screen
-    /// scan it is checked right after the busy-screen branch, but unlike
-    /// busy it RESETS the debounce streak: a scan of a different kind of
-    /// screen interrupts "consecutive" misses, so notes/pricing scans can
-    /// never pre-load a streak that an eScript scan of the same Rx then
-    /// completes. The remaining gates are unchanged. Defaults to true
-    /// (existing callers/tests that pre-date this gate keep their
-    /// behaviour); the production caller always passes the real value.
+    /// Screen-kind gates (2026-10-24, W-Q8 "ignore screens that aren't
+    /// prescriptions"), BOTH required — this method only ever decides the
+    /// refill-unreadable report (the one and only auto-report kind), so
+    /// there is no other kind for them to affect:
+    ///   - `isEscriptScreen` = EscriptMarkerDetector.ContainsMarker over
+    ///     the scan's OCR words (the existing "Escript" tab-label check).
+    ///     Defense in depth: OcrSourceUsability already stops marker-less
+    ///     captures upstream.
+    ///   - `hasEscriptContent` = LooksLikeEscriptContent over the scan's
+    ///     verdict rows (at least MinCoreFieldsRead of the core eScript
+    ///     fields actually read). The "Escript" tab label stays visible
+    ///     on the Rx window's notes/pricing tabs, so the marker alone
+    ///     cannot tell those apart from the real eScript content pane;
+    ///     this can.
+    /// If EITHER is false nothing is reported (no budget consumed) and
+    /// the debounce streak is RESET: a scan of a different kind of screen
+    /// interrupts "consecutive" misses, so notes/pricing scans can never
+    /// pre-load a streak that an eScript scan of the same Rx then
+    /// completes. Checked right after the busy-screen branch (busy still
+    /// wins and leaves the streak untouched). The remaining gates are
+    /// unchanged.
     ///
     /// Gate 1 — must actually be uncoloured (see IsUncoloured); a
     /// Green/Red refills box is working correctly and is never reported.
@@ -229,7 +278,8 @@ public static class AutoDiagnosticPolicy
         DateTime nowUtc,
         string? rxNumber,
         string contextKey,
-        bool isEscriptScreen = true)
+        bool isEscriptScreen,
+        bool hasEscriptContent)
     {
         var state = Clone(rateLimitState);
 
@@ -248,9 +298,9 @@ public static class AutoDiagnosticPolicy
         // and every cap completely untouched (see class doc above).
         if (isBusyScreen) return Result(false);
 
-        // Not an eScript screen (no "Escript" marker): never report, and
-        // break any in-progress streak — see the screen-kind gate doc above.
-        if (!isEscriptScreen)
+        // Not an eScript content screen: never report, and break any
+        // in-progress streak — see the screen-kind gates doc above.
+        if (!isEscriptScreen || !hasEscriptContent)
         {
             state.Streak = null;
             return Result(false);
