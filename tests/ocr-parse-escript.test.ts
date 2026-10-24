@@ -3168,18 +3168,32 @@ describe('refills rescue when NO row starts with a recognized field label (refil
     expect(Object.keys(record).sort()).toEqual(['refills', 'refillsFromTotalFills']);
   });
 
-  it('a label-less free-text page that merely mentions "refill" and a number does NOT fabricate a refills value', () => {
+  it('a label-less free-text notes page (names, drug text, "refill") fabricates no value and attaches NO proof rows', () => {
     const ocr = flatten([
-      row(0, ['called', 'pharmacy', 'wants', 'refill', 'in', '2', 'days']),
-      row(30, ['will', 'pick', 'up', 'next', 'week'])
+      row(0, ['Zzyx', 'Testperson', 'called', 'about', 'her', 'drugname', '10mg', 'wants', 'refill', 'in', '2', 'days']),
+      row(30, ['lives', 'on', 'Fakeway', 'Street', 'son', 'Quincy', 'picks', 'up', 'next', 'week'])
     ]);
     const record = parseEscriptOcr(ocr);
 
     expect(record.refills).toBeUndefined();
     expect(record.refillsMissReason).toBe('no-refills-text-found');
+    expect(record.refillsOcrRegionWords).toBeUndefined();
+    expect(Object.keys(record).sort()).toEqual(['refillsMissReason']);
   });
 
-  it('still reports no-refills-text-found (with the PHI-filtered proof rows) when a "Total Fills" label has no readable number', () => {
+  it('a pricing-panel row with "Total Fills 5" mid-row (a Rebate figure beside it) and no approval cue extracts nothing', () => {
+    const ocr = flatten([
+      row(0, ['RPh:', 'Testuser', 'Filled:', '1/1', 'Rebate:', '3.00']),
+      row(30, ['Rebate', '3.00', 'Total', 'Fills', '5'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBeUndefined();
+    expect(record.refillsFromTotalFills).toBeUndefined();
+    expect(record.refillsMissReason).toBe('no-refills-text-found');
+  });
+
+  it('a Total Fills label with no readable number on an approval page resolves nothing and attaches NO proof rows', () => {
     const ocr = flatten([
       row(0, ['Refill', 'Request', 'Approved']),
       row(30, ['Status', 'Approved', 'Total', 'Fills:'])
@@ -3188,6 +3202,20 @@ describe('refills rescue when NO row starts with a recognized field label (refil
 
     expect(record.refills).toBeUndefined();
     expect(record.refillsMissReason).toBe('no-refills-text-found');
-    expect(record.refillsOcrRegionWords?.length ?? 0).toBeGreaterThan(0);
+    expect(record.refillsOcrRegionWords).toBeUndefined();
+    expect(Object.keys(record).sort()).toEqual(['refillsMissReason']);
+  });
+
+  it('a resolved approval page attaches no proof rows or neighbor text (only refills fields set)', () => {
+    const ocr = flatten([
+      row(0, ['Refill', 'Request', 'Approved']),
+      row(15, ['Zzyx', 'Testperson', 'drugname', '10mg', 'Fakeway', 'Street']),
+      row(30, ['Status', 'Approved', 'Total', 'Fills:', '4'])
+    ]);
+    const record = parseEscriptOcr(ocr);
+
+    expect(record.refills).toBe('4');
+    expect(record.refillsOcrRegionWords).toBeUndefined();
+    expect(record.refillsLabelSeen).toBeUndefined();
   });
 });

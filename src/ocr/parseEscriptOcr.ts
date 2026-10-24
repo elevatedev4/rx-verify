@@ -1840,51 +1840,39 @@ function appendOcrDiagnosticsLog(entries: FieldDiagnostic[]): void {
  * anchors (findTotalFillsPhraseValue, findTotalFillsLabelAnywhere) ever
  * ran, so a "Total Fills: N" sharing a row with other summary text (or a
  * bare "N (including this fill)" tail) was invisible on exactly the
- * pages where every other label is also missing. Runs ONLY those two
- * anchors over the full line set and touches NOTHING but the refills
- * fields on `record` — every other field stays unset, as before. When
- * neither anchor yields a number the record still carries
- * 'no-refills-text-found' (unchanged reason) plus, when any "fill"-shaped
- * row exists, the same PHI-filtered refillsOcrRegionWords proof an
- * ordinary miss carries. Never throws.
+ * pages where every other label is also missing.
+ *
+ * Runs ONLY those two anchors and touches NOTHING but the refills fields
+ * on `record`. Guards against false positives on a page that is not an
+ * e-script at all (pricing/notes panels): the exact-shape tail-phrase
+ * anchor is trusted as-is, but the looser "Total Fills" LABEL anchor is
+ * accepted only when the page also carries a refill-request/approval/
+ * renewal cue, and it never scans chrome (toolbar) rows.
+ *
+ * PHI: attaches NO neighbor rows or free text (refillsOcrRegionWords is
+ * never set here) — with no labelled row on the page the usual row-level
+ * patient/prescriber exclusion cannot fire, so only the matched label's
+ * own words are recorded as refillsLabelSeen. Both anchors only ever
+ * return a parseable number, so a match always resolves. Never throws.
  */
 function recoverRefillsWithoutFieldLabels(lines: OcrWord[][], record: PrescriptionRecord): void {
   record.refillsMissReason = 'no-refills-text-found';
-  let match: RefillsAnchorMatch | undefined;
-  let viaLabel = false;
   try {
-    match = findTotalFillsPhraseValue(lines);
-    if (match === undefined) {
-      match = findTotalFillsLabelAnywhere(lines);
-      viaLabel = match !== undefined;
+    let match = findTotalFillsPhraseValue(lines);
+    if (match === undefined && lines.some(isApprovalRenewalRowShaped)) {
+      match = findTotalFillsLabelAnywhere(lines.filter((line) => !isChromeLine(line)));
     }
+    if (match === undefined) return;
+    const parsed = parseRefills(match.value);
+    if (!parsed) return;
+    record.refills = parsed.value;
+    // Both anchors resolve as the 'totalfills' canonical in the main
+    // flow; the explicit tail phrase, when the anchor read one, wins.
+    const isTotalFills = match.isTotalFillsPhrase ?? parsed.isTotalFillsPhrase ?? true;
+    if (isTotalFills) record.refillsFromTotalFills = true;
+    delete record.refillsMissReason;
   } catch {
     record.refillsMissReason = 'internal-error:label-anywhere-anchor';
-    return;
-  }
-  if (match !== undefined) {
-    const parsed = parseRefills(match.value);
-    if (parsed) {
-      record.refills = parsed.value;
-      // Both anchors resolve as the 'totalfills' canonical in the main
-      // flow; the explicit tail phrase, when the anchor read one, wins.
-      const isTotalFills = match.isTotalFillsPhrase ?? parsed.isTotalFillsPhrase ?? true;
-      if (isTotalFills) record.refillsFromTotalFills = true;
-      delete record.refillsMissReason;
-      return;
-    }
-    record.refillsMissReason = 'validation-failed:not-numeric';
-  }
-  try {
-    const anchorKeys = match ? new Set(match.matchedLine.map(ocrWordKey)) : undefined;
-    const regionWords = buildRefillsOcrRegionWords(lines, {}, anchorKeys);
-    if (regionWords.length > 0) record.refillsOcrRegionWords = regionWords;
-    if (viaLabel && match?.label) {
-      const { start, consumed } = match.label;
-      record.refillsLabelSeen = wordsToText(match.matchedLine.slice(start, start + consumed + 6));
-    }
-  } catch {
-    // Best-effort diagnostic only.
   }
 }
 
