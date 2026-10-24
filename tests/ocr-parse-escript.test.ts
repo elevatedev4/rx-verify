@@ -258,7 +258,7 @@ describe('parseEscriptOcr', () => {
       // must NOT end up glued into the parsed street/zip.
       row(440, ['200', 'OAK', 'AVE', 'FAKETOWN,', 'KS', '660001111', '5380389']),
       // "spr <SPI digits>" bleed (defect #3, item 3 as literally observed).
-      row(460, ['(555)', '555-0199', 'spr', '1526938475001']),
+      row(460, ['(555)', '555-0199', 'spr', '1523141592653']),
       row(480, ['03/03/2026']),
       // Dashed NDC (defect #1) — v1 missed this entirely.
       row(500, ['00168-0203-60']),
@@ -296,7 +296,7 @@ describe('parseEscriptOcr', () => {
       zip: '66000'
     });
     expect(record.prescriber?.npi).toBe('1234567890');
-    // NOT "(555) 555-0199 spr 1526938475001".
+    // NOT "(555) 555-0199 spr 1523141592653".
     expect(record.prescriber?.phone).toBe('(555) 555-0199');
     expect(record.dateWritten).toBe('03/03/2026');
     // Dashed NDC recognized (bare-digit or dashed both acceptable; we
@@ -2013,7 +2013,7 @@ describe('parseEscriptOcr', () => {
   });
 
   // Round 5, Fix 2 (live report, W-T-round5): a real capture showed
-  // prescriber.address = "1811 Westbrook Dr, Ste 102" with NO city/state/
+  // prescriber.address = "1400 Sample Way, Ste 102" with NO city/state/
   // zip line, on a clinic that parses fine (city line included) on other
   // captures of the SAME clinic. Root cause: on this capture "Location:"
   // has no inline value (a label-only row) — the street address only
@@ -2038,16 +2038,16 @@ describe('parseEscriptOcr', () => {
     // The street value, as its own leftover row — this is what Pass B
     // pairs to the 'location' label by column.
     const streetValueRow: OcrWord[] = [
-      { text: '1811', x: 120, y: 227, w: 32, h: 11 },
-      { text: 'Westbrook', x: 160, y: 227, w: 68, h: 11 },
-      { text: 'Dr,', x: 260, y: 227, w: 22, h: 11 },
+      { text: '1400', x: 120, y: 227, w: 32, h: 11 },
+      { text: 'Sample', x: 160, y: 227, w: 68, h: 11 },
+      { text: 'Way,', x: 260, y: 227, w: 22, h: 11 },
       { text: 'Ste', x: 290, y: 227, w: 26, h: 11 },
       { text: '102', x: 330, y: 227, w: 26, h: 11 }
     ];
     // Wrapped city/state/zip continuation, same left-x column as the
     // street row, one row below it — still unclaimed by anything else.
     const cityContinuationRow: OcrWord[] = [
-      { text: 'Lawrence,', x: 120, y: 247, w: 62, h: 12 },
+      { text: 'Testville,', x: 120, y: 247, w: 62, h: 12 },
       { text: 'KS', x: 210, y: 247, w: 18, h: 10 },
       { text: '66049', x: 240, y: 247, w: 38, h: 10 }
     ];
@@ -2061,22 +2061,22 @@ describe('parseEscriptOcr', () => {
     const record = parseEscriptOcr(ocr);
 
     expect(record.prescriber?.address).toEqual({
-      street: '1811 Westbrook Dr, Ste 102',
-      city: 'Lawrence',
+      street: '1400 Sample Way, Ste 102',
+      city: 'Testville',
       state: 'KS',
       zip: '66049'
     });
     expect(record.prescriber?.phone).toBe('(555) 555-4488');
   });
 
-  describe('prescriber name label decoy (defect #5, live-test bug: source prescriberName resolved to "Order Nurnt*r: 770415Q8Q")', () => {
+  describe('prescriber name label decoy (defect #5, live-test bug: source prescriberName resolved to "Order Nurnt*r: 880326Q7Q")', () => {
     // SYNTHETIC — coordinates copied verbatim from a real owner OCR
     // word-position dump; the prescriber's own name is fabricated (not
     // reused verbatim from the live report) per this repo's
     // synthetic-data-only discipline. Root cause: the page has TWO
     // lines that both fuzzy-match the 'prescriber' label — the real
     // "Prescriber:" row (label+name inline, y=186) and a mangled footer
-    // line, "Prescr'ber Order Nurnt*r: 770415Q8Q" (a garbled
+    // line, "Prescr'ber Order Nurnt*r: 880326Q7Q" (a garbled
     // "Prescriber Order Number:", y=630), whose leading word alone
     // fuzzy-matches 'prescriber' under the existing edit-distance
     // threshold. Lines are walked top-to-bottom, so without a fix the
@@ -2095,7 +2095,7 @@ describe('parseEscriptOcr', () => {
       { text: "Prescr'ber", x: 24, y: 630, w: 70, h: 10 },
       { text: 'Order', x: 100, y: 630, w: 40, h: 10 },
       { text: "Nurnt*r:", x: 145, y: 630, w: 60, h: 10 },
-      { text: '770415Q8Q', x: 210, y: 630, w: 70, h: 10 }
+      { text: '880326Q7Q', x: 210, y: 630, w: 70, h: 10 }
     ];
 
     it('resolves the REAL name even with the decoy footer also present, and never stores the order number', () => {
@@ -2348,11 +2348,11 @@ describe('parseEscriptOcr', () => {
     });
   });
 
-  describe('address city-segmentation (defect #7a/#7b, live-test bug: on-screen line "808 E 1250 Road Lawrence KS66047" displayed as stopping at the city)', () => {
+  describe('address city-segmentation (defect #7a/#7b, live-test bug: on-screen line "612 E 1500 Road Testville KS66049" displayed as stopping at the city)', () => {
     // SYNTHETIC — geometry mirrors the real owner capture (patient
     // Address: label @ (51,116)). Ground truth confirmed from the OCR
-    // word dump: the left-column value tokens are EXACTLY five ("808"
-    // "E" "1250" "Road" "Lawrence") and then nothing until the far
+    // word dump: the left-column value tokens are EXACTLY five ("612"
+    // "E" "1500" "Road" "Testville") and then nothing until the far
     // right-column phone tokens — OCR never emitted a state/ZIP token in
     // this capture at all, so it is not recoverable by parsing; this
     // describe block is about the THREE downstream weaknesses that
@@ -2423,9 +2423,9 @@ describe('parseEscriptOcr', () => {
     it('acceptance (3): glued "KS66614" (comma before it, prescriber-row live example) parses into city/state/zip and the full compare works', () => {
       const locationRow: OcrWord[] = [
         { text: 'Location:', x: 55, y: 207, w: 50, h: 10 },
-        { text: '808', x: 120, y: 207, w: 30, h: 11 },
+        { text: '612', x: 120, y: 207, w: 30, h: 11 },
         { text: 'E', x: 155, y: 207, w: 12, h: 11 },
-        { text: '1250', x: 172, y: 207, w: 30, h: 11 },
+        { text: '1500', x: 172, y: 207, w: 30, h: 11 },
         { text: 'Road', x: 207, y: 207, w: 35, h: 11 },
         { text: 'Topeka,', x: 121, y: 227, w: 55, h: 11 },
         { text: 'KS66614', x: 174, y: 227, w: 70, h: 11 }
@@ -2434,14 +2434,14 @@ describe('parseEscriptOcr', () => {
       const record = parseEscriptOcr(ocr);
 
       expect(record.prescriber?.address).toEqual({
-        street: '808 E 1250 Road',
+        street: '612 E 1500 Road',
         city: 'Topeka',
         state: 'KS',
         zip: '66614'
       });
 
       const result = compareAddresses(record.prescriber?.address, {
-        street: '808 E 1250 Road',
+        street: '612 E 1500 Road',
         city: 'Topeka',
         state: 'KS',
         zip: '66614'

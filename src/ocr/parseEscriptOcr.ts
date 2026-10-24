@@ -170,9 +170,9 @@ const NOISE_TRIM_KEYS = new Set<LabelKey>(['patient', 'prescriber', 'phone']);
 /**
  * Field keys whose value is a PERSON'S NAME (branch brief defect #5,
  * live-test bug: verdict showed source prescriberName = "Order Nurnt*r:
- * 770415Q8Q"). Root cause: the page had a second, unrelated line that
+ * 880326Q7Q"). Root cause: the page had a second, unrelated line that
  * ALSO fuzzy-matches the 'prescriber' label — a mangled footer, "Prescr'
- * ber Order Nurnt*r: 770415Q8Q" (a garbled "Prescriber Order Number:"),
+ * ber Order Nurnt*r: 880326Q7Q" (a garbled "Prescriber Order Number:"),
  * sitting well below the real "Prescriber:" row. Every OTHER key in this
  * module keeps the documented "last-encountered-row wins" overwrite
  * semantics (see the refills doc above), and since lines are walked
@@ -200,8 +200,8 @@ const NAME_FIELDS = new Set<LabelKey>(['patient', 'prescriber']);
  * True if `text` is implausible as a person's name — see NAME_FIELDS
  * doc. Either tripwire alone disqualifies:
  *  - a run of 6+ consecutive digits (an order/ID number's own shape —
- *    the live-test decoy's "770415Q8Q" trips this via its embedded
- *    "770415" run);
+ *    the live-test decoy's "880326Q7Q" trips this via its embedded
+ *    "880326" run);
  *  - more than 40% of all (non-whitespace) characters are digits
  *    overall.
  * Deliberately conservative in the OTHER direction: a real name
@@ -701,7 +701,7 @@ function findLabelAt(words: OcrWord[], start: number): LabelMatch | null {
  * token or another recognized field label starts — the fix for branch
  * brief defect #3 ("noise bleeds into text values"): e.g. prescriber name
  * "Demo, Dana Agent name" -> "Demo, Dana", or prescriber phone
- * "(555) 555-0199 spr 1526938475001" -> "(555) 555-0199" (the "spr" OCR
+ * "(555) 555-0199 spr 1523141592653" -> "(555) 555-0199" (the "spr" OCR
  * mangle fuzzy-matches the "SPI" ignore-label). Only applied to
  * NOISE_TRIM_KEYS fields — see that const's doc for why address/location
  * are handled separately.
@@ -756,9 +756,9 @@ function isChromeLine(line: OcrWord[]): boolean {
  * trailing "<state><zip>" shape doubles as this field's PRIMARY format
  * anchor (branch brief item 2, "ZIP/state for addresses") — note ZIP
  * here already tolerates a GLUED state+zip token with zero separator
- * ("KS66047") via the `\s*` between the state and ZIP capture groups
+ * ("KS66049") via the `\s*` between the state and ZIP capture groups
  * below, needing no extra handling (branch brief defect #7a — verified
- * this already parses "KS66047"/"KS66614"-style tokens correctly).
+ * this already parses "KS66049"/"KS66614"-style tokens correctly).
  *
  * FALLBACK (branch brief defect #7b, live-test bug: an address line that
  * stops at the city — OCR simply never emitted a state/ZIP token in that
@@ -2326,7 +2326,7 @@ export function parseEscriptOcr(ocr: OcrWord[] | null | undefined): Prescription
     // `raw.location` was only ever set at this point when Pass A had
     // already resolved the location's own row INLINE (label + street
     // value on the same physical OCR row). A live capture showed
-    // prescriber.address = "1811 Westbrook Dr, Ste 102" with NO city/
+    // prescriber.address = "1400 Sample Way, Ste 102" with NO city/
     // state/zip line at all, on a clinic that parses fine (city line
     // included) on other captures — traced to this exact gap: on that
     // capture "Location:" only resolved via PASS B's block-column

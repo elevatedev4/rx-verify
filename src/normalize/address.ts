@@ -61,13 +61,13 @@ const UNIT_DESIGNATORS = [
 ];
 
 /**
- * Field report (2026-08-13): source "4000 Cambridge St Level 2 Kansas,
- * City, KS 66160" vs entered "4000 Cambridge St Kansas City, KS 66160" —
- * a stray OCR comma inside a multi-word city name ("Kansas, City" instead
- * of "Kansas City"). Commas are replaced with a SPACE (never simply
+ * Field report (2026-08-13): source "4000 Example St Level 2 Sample,
+ * Falls, KS 66100" vs entered "4000 Example St Sample Falls, KS 66100" —
+ * a stray OCR comma inside a multi-word city name ("Sample, Falls" instead
+ * of "Sample Falls"). Commas are replaced with a SPACE (never simply
  * deleted) so a comma with no surrounding whitespace on either side
- * ("Kansas,City") still splits into two tokens instead of gluing them
- * into one ("kansascity") — deletion alone would silently fuse two real
+ * ("Sample,Falls") still splits into two tokens instead of gluing them
+ * into one ("samplefalls") — deletion alone would silently fuse two real
  * words together, which is exactly the kind of token-comparison mismatch
  * this fix exists to prevent. Periods are left as plain deletion,
  * unchanged from before this fix — periods routinely appear as part of a
@@ -884,7 +884,7 @@ export function compareAddresses(
   const zipDiffers = componentDiffers(srcZip, entZip);
 
   // DEFECT #7c (live-test bug: an OCR-read address that stops at the
-  // city — "808 E 1250 Road Lawrence", no state/ZIP recognized in that
+  // city — "612 E 1500 Road Testville", no state/ZIP recognized in that
   // capture at all — compared against a fully-populated entered address
   // and landed address_differs). OCR routinely drops the tail of an
   // address line; that is not evidence the address is actually
@@ -935,9 +935,9 @@ export function compareAddresses(
     partialSourceExplanation = `Street and city match; source did not provide ${missingParts.join('/')}.`;
   }
 
-  // Field report (2026-08-17), owner-confirmed: source "1811 Wakarusa Dr,
-  // Ste 102" (street + suite only) vs entered "1811 Wakarusa Dr Ste 102
-  // Lawrence, KS 66047" went YELLOW address_differs — "The source has two
+  // Field report (2026-08-17), owner-confirmed: source "1400 Sample Way,
+  // Ste 102" (street + suite only) vs entered "1400 Sample Way Ste 102
+  // Testville, KS 66049" went YELLOW address_differs — "The source has two
   // lines for the address, not one line. The app failed to read the
   // second line." Same root cause as defect #7c above (OCR/UIA capture
   // stops after the street line), just a step further: here the source
