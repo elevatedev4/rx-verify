@@ -165,6 +165,21 @@ public static class AutoDiagnosticPolicy
     /// only the routine hourly-bookkeeping prune still runs, same as
     /// every other early-return branch below.
     ///
+    /// Screen-kind gate (2026-10-24, W-Q8 "ignore screens that aren't
+    /// prescriptions"): `isEscriptScreen` is EscriptMarkerDetector.
+    /// ContainsMarker over the scan's OCR words — the SAME existing
+    /// "Escript" tab-label detection OcrSourceUsability already gates the
+    /// engine compare with. When false (notes, pricing, or any other
+    /// screen without an eScript marker) a missing/unreadable refill
+    /// count is not a bug, so nothing is reported. Like a busy-screen
+    /// scan it is checked right after the busy-screen branch, but unlike
+    /// busy it RESETS the debounce streak: a scan of a different kind of
+    /// screen interrupts "consecutive" misses, so notes/pricing scans can
+    /// never pre-load a streak that an eScript scan of the same Rx then
+    /// completes. The remaining gates are unchanged. Defaults to true
+    /// (existing callers/tests that pre-date this gate keep their
+    /// behaviour); the production caller always passes the real value.
+    ///
     /// Gate 1 — must actually be uncoloured (see IsUncoloured); a
     /// Green/Red refills box is working correctly and is never reported.
     /// A coloured result, OR a scan for a DIFFERENT contextKey than the
@@ -213,7 +228,8 @@ public static class AutoDiagnosticPolicy
         AutoDiagnosticRateLimitState? rateLimitState,
         DateTime nowUtc,
         string? rxNumber,
-        string contextKey)
+        string contextKey,
+        bool isEscriptScreen = true)
     {
         var state = Clone(rateLimitState);
 
@@ -231,6 +247,14 @@ public static class AutoDiagnosticPolicy
         // Busy-screen scan: no information either way — leave the streak
         // and every cap completely untouched (see class doc above).
         if (isBusyScreen) return Result(false);
+
+        // Not an eScript screen (no "Escript" marker): never report, and
+        // break any in-progress streak — see the screen-kind gate doc above.
+        if (!isEscriptScreen)
+        {
+            state.Streak = null;
+            return Result(false);
+        }
 
         var isUncoloured = IsUncoloured(refillsState);
 
