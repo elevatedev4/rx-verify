@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -453,25 +454,29 @@ public sealed class OrderAssistCoordinator
             await Task.Delay(CaptureSettleDelayMs, cts.Token);
         }
 
+        var stageStopwatch = Stopwatch.StartNew();
         using var bitmap = EscriptImageCapture.CaptureRegion(target.Value.Bounds);
+        var captureMs = stageStopwatch.ElapsedMilliseconds;
 
-        // ROUND 3 (repeat complaint — see Ocr/RowHighlightColorDetector's
-        // own ROOT CAUSE doc: round 2's blue-only detector is replaced by a
-        // hue-agnostic one covering any genuinely colored row fill, not
-        // just one specific unverified blue). Binarizes any highlighted
-        // row band to normal dark-text-on-white contrast BEFORE OCR ever
-        // sees it, for BOTH target kinds (a no-op when no highlighted band
-        // is present this tick) — fixes the Catalog Substitution
-        // blue-first-row skip, a McKesson-yellow-flagged row skip, AND
-        // (same mechanism) a Create Recommended Orders row put into the
-        // same kind of selection/focus highlight while its Order Quantity
-        // cell is being edited. Logging is best-effort and throttled the
-        // same "log on change" way as every other diagnostic in this class
-        // — see LogSelectionBandsIfChanged.
+        // TEXT-ONLY ROW READING (Will: "It should only be looking at the
+        // text and ignore all colors so that it doesnt miss rows"):
+        // rewrites every non-plain-background region to dark-on-white by
+        // local text/background contrast -- no color gate, no hue or
+        // fill-width assumption -- and leaves plain white rows untouched.
+        // See OrderAssist/Ocr/LocalContrastNormalizer for the algorithm and
+        // for why this is not the reverted round-6 unconditional
+        // binarization. Applies to BOTH target kinds (catalog selection
+        // blue, McKesson yellow, in-edit qty rows on Create Recommended
+        // Orders). Logging is best-effort and throttled "log on change".
+        stageStopwatch.Restart();
         var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap);
+        var normalizeMs = stageStopwatch.ElapsedMilliseconds;
         LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
 
+        stageStopwatch.Restart();
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
+        var ocrMs = stageStopwatch.ElapsedMilliseconds;
+        LogTickTimingThrottled(target.Value.Kind, captureMs, normalizeMs, ocrMs);
 
         var scale = DpiScaleFor(target.Value.Handle);
 
@@ -792,6 +797,34 @@ public sealed class OrderAssistCoordinator
     /// still-unresolved capture doesn't re-log every tick, but a
     /// DIFFERENT bad capture (different bands) does.
     /// </summary>
+    /// <summary>Milliseconds between throttled per-stage timing lines (see LogTickTimingThrottled).</summary>
+    private const long TimingLogIntervalMs = 10_000;
+
+    /// <summary>A tick whose measured stages total more than this is always logged.</summary>
+    private const long SlowTickLogThresholdMs = 1_500;
+
+    private long _lastTimingLogTick = long.MinValue;
+
+    /// <summary>
+    /// Per-stage cost of one capture / normalize / OCR pass, so a field
+    /// report on speed carries numbers instead of an impression (the
+    /// normalize stage is the one this branch changed). Millisecond counts
+    /// only -- no OCR text, no titles. Throttled: the first tick, then at
+    /// most one line per <see cref="TimingLogIntervalMs"/>, plus every slow
+    /// tick (over <see cref="SlowTickLogThresholdMs"/>), so a 500 ms timer
+    /// cannot flood OcrLogger's size-capped file.
+    /// </summary>
+    private void LogTickTimingThrottled(OrderAssistWindowKind kind, long captureMs, long normalizeMs, long ocrMs)
+    {
+        var totalMs = captureMs + normalizeMs + ocrMs;
+        var now = Environment.TickCount64;
+        var due = _lastTimingLogTick == long.MinValue || now - _lastTimingLogTick >= TimingLogIntervalMs || now < _lastTimingLogTick;
+        if (!due && totalMs <= SlowTickLogThresholdMs) return;
+
+        _lastTimingLogTick = now;
+        OcrLogger.LogTiming($"OrderAssist[{kind}]: tick timing capture={captureMs}ms normalize={normalizeMs}ms ocr={ocrMs}ms total={totalMs}ms");
+    }
+
     /// <summary>
     /// ROUND 2 (W-T85 bug 2), ROUND 3 GENERALIZED — best-effort, throttled
     /// diagnostic for RowHighlightNormalizer's own bitmap preprocessing
@@ -845,7 +878,7 @@ public sealed class OrderAssistCoordinator
 
         OcrLogger.LogTiming(bands.Count == 0
             ? $"OrderAssist[{kind}]: row-highlight normalizer found 0 bands this tick"
-            : $"OrderAssist[{kind}]: row-highlight normalizer binarized {bands.Count} band(s) this tick: [{signature}]");
+            : $"OrderAssist[{kind}]: row-highlight normalizer rewrote {bands.Count} row band(s) to local-contrast this tick: [{signature}]");
 
         if (rejectedCandidates.Count > 0)
         {

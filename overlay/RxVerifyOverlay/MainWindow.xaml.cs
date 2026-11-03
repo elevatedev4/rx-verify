@@ -121,6 +121,13 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     private readonly OrderAssist.OrderAssistCoordinator _orderAssistCoordinator;
 
     /// <summary>
+    /// AUTO ORDER MODE — edge-triggered Order/Verify switching driven by
+    /// whether any Pioneer order screen is on the desktop. See
+    /// OrderAssist/Windows/AutoOrderModeRule and ApplyAutoOrderMode.
+    /// </summary>
+    private readonly OrderAssist.Windows.AutoOrderModeRule _autoOrderModeRule = new();
+
+    /// <summary>
     /// Branch feat/reports-mode: the ONE Reports/ReportsWindow.xaml.cs
     /// instance for this process — see OpenOrFocusReportsWindow's own
     /// doc for the singleton lifecycle (created lazily on first "Mode:
@@ -313,7 +320,10 @@ public partial class MainWindow : Window, IOverlayVisibilityController
         _orderAssistCoordinator = new OrderAssist.OrderAssistCoordinator(_settings);
         _integratedOverlay.OrderAssistToggleRequested += (_, enabled) =>
         {
+            // A manual dropdown pick always wins and is persisted as the
+            // pharmacist's choice (clears any pending auto-switch override).
             _settings.OrderAssistEnabled = enabled;
+            _settings.OrderAssistPersistedOverride = null;
             _settings.Save();
             _orderAssistCoordinator.SetEnabled(enabled);
         };
@@ -470,6 +480,62 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     }
 
     /// <summary>
+    /// AUTO ORDER MODE (Will: "change to order mode automatically when on
+    /// the Create Recommended Order screen and Recommended order screens,
+    /// then change back to Verify when it's not"). Runs at the head of every
+    /// integrated tick (same always-on precedent as the login-window
+    /// check). OrderScreenMonitor takes a fresh sample at most every 400 ms
+    /// and AutoOrderModeRule turns samples into appear/disappear EDGES, so a
+    /// manual dropdown choice between edges is never fought.
+    ///
+    /// Only in Integrated display mode (the Mode dropdown lives on the
+    /// integrated control box), and never while the Reports window is open.
+    ///
+    /// The flip is applied exactly like a dropdown pick (settings flag +
+    /// OrderAssistCoordinator.SetEnabled + SyncToggles so the control box
+    /// swaps panels and its dropdown immediately; UpdateControlBox's
+    /// per-tick reconcile would also catch it within ~250 ms) but is NOT
+    /// saved: OrderAssistPersistedOverride keeps the pharmacist's own last
+    /// choice as what any incidental Save() writes, so a restart never
+    /// resumes in an auto-chosen mode. Logs the edge as a boolean sentence;
+    /// window titles can carry patient data and are never logged.
+    /// Never throws.
+    /// </summary>
+    private void ApplyAutoOrderMode()
+    {
+        try
+        {
+            if (_settings.DisplayMode != DisplayMode.Integrated) return;
+            if (!OrderAssist.Windows.OrderScreenMonitor.TrySample(out var screenPresent)) return;
+
+            var action = _autoOrderModeRule.Observe(screenPresent, _settings.OrderAssistEnabled, suspended: _reportsWindow is not null);
+            if (action == OrderAssist.Windows.AutoOrderModeAction.None) return;
+
+            var toOrder = action == OrderAssist.Windows.AutoOrderModeAction.SwitchToOrder;
+            if (toOrder)
+            {
+                // Remember what the pharmacist had (Verify) as the value to persist.
+                _settings.OrderAssistPersistedOverride = _settings.OrderAssistEnabled;
+            }
+            else
+            {
+                // Back to the pharmacist-visible Verify state: live == persisted again.
+                _settings.OrderAssistPersistedOverride = null;
+            }
+
+            _settings.OrderAssistEnabled = toOrder;
+            _orderAssistCoordinator.SetEnabled(toOrder);
+            _integratedOverlay.SyncToggles();
+
+            OcrLogger.LogTiming($"[AUTO-MODE] order screen {(toOrder ? "appeared" : "closed")}: switched to {(toOrder ? "Order" : "Verify")} mode (not persisted)");
+        }
+        catch (Exception)
+        {
+            // Best-effort: a failure here must never break the integrated tick.
+        }
+    }
+
+    /// <summary>
     /// REVIEW FIX: wraps _integratedOverlay.Tick() the same way
     /// SafeRefreshAsync/SafeWatchAsync wrap their own OverlayViewModel
     /// calls — belt-and-suspenders on top of Tick()'s own internal
@@ -482,6 +548,8 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     /// </summary>
     private void SafeTickIntegratedOverlay()
     {
+        ApplyAutoOrderMode();
+
         try
         {
             _integratedOverlay.Tick();

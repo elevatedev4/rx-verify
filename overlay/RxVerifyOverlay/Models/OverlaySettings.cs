@@ -143,6 +143,19 @@ public sealed class OverlaySettings
     /// </summary>
     public bool OrderAssistEnabled { get; set; }
 
+    /// <summary>
+    /// AUTO ORDER MODE (MainWindow.ApplyAutoOrderMode): when the app flips
+    /// <see cref="OrderAssistEnabled"/> itself because an order screen
+    /// appeared or closed, that flip is NOT meant to survive a restart --
+    /// any unrelated <see cref="Save"/> while it is in effect (changing the
+    /// method or display toggle, say) would otherwise persist "Order" and
+    /// relaunch the pharmacist into a mode with no Verify boxes. While this
+    /// is non-null, Save writes it instead of the live value. Null means
+    /// "the live value IS the pharmacist's choice". Never serialized.
+    /// </summary>
+    [JsonIgnore]
+    public bool? OrderAssistPersistedOverride { get; set; }
+
     private static string SettingsFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "settings.json");
 
@@ -170,8 +183,22 @@ public sealed class OverlaySettings
     {
         var dir = Path.GetDirectoryName(SettingsFilePath)!;
         Directory.CreateDirectory(dir);
-        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(SettingsFilePath, json);
+        File.WriteAllText(SettingsFilePath, ToJsonForSave());
+    }
+
+    /// <summary>The JSON <see cref="Save"/> writes. Applies <see cref="OrderAssistPersistedOverride"/> for the duration of serialization only; the live value is restored before returning. Exposed for tests (no file I/O).</summary>
+    public string ToJsonForSave()
+    {
+        var live = OrderAssistEnabled;
+        if (OrderAssistPersistedOverride is { } persisted) OrderAssistEnabled = persisted;
+        try
+        {
+            return JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+        }
+        finally
+        {
+            OrderAssistEnabled = live;
+        }
     }
 
     /// <summary>
