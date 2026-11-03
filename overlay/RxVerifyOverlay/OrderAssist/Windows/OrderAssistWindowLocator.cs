@@ -156,7 +156,7 @@ public static class OrderAssistWindowLocator
     }
 
     /// <summary>Same check/pattern as Integrated/IntegratedOverlayCoordinator.cs IsOwnedByPioneerRx, but CACHED by pid (see PidIsPioneerCache's doc) since this now runs once per visible top-level window on the desktop, not once per tick.</summary>
-    private static bool IsOwnedByPioneerRxProcess(IntPtr hwnd)
+    internal static bool IsOwnedByPioneerRxProcess(IntPtr hwnd)
     {
         GetWindowThreadProcessId(hwnd, out var processId);
 

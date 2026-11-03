@@ -143,6 +143,53 @@ public sealed class OverlaySettings
     /// </summary>
     public bool OrderAssistEnabled { get; set; }
 
+    /// <summary>
+    /// AUTO ORDER MODE (MainWindow.ApplyAutoOrderMode): when the app flips
+    /// <see cref="OrderAssistEnabled"/> itself because an order screen
+    /// appeared or closed, that flip is NOT meant to survive a restart --
+    /// any unrelated <see cref="Save"/> while it is in effect (changing the
+    /// method or display toggle, say) would otherwise persist "Order" and
+    /// relaunch the pharmacist into a mode with no Verify boxes. While this
+    /// is non-null, Save writes it instead of the live value. Null means
+    /// "the live value IS the pharmacist's choice". Never serialized.
+    /// </summary>
+    [JsonIgnore]
+    public bool? OrderAssistPersistedOverride { get; set; }
+
+    /// <summary>
+    /// Records an AUTOMATIC Order/Verify switch (MainWindow.ApplyAutoOrderMode)
+    /// and returns true when the caller must <see cref="Save"/> now.
+    ///   - toOrder: the live flag goes true, but what gets persisted stays the
+    ///     pharmacist's own choice (the pre-switch value) via the override.
+    ///   - back to Verify: live goes false, the override clears, and the caller
+    ///     SAVES -- so a previously manual "Order" (persisted true) cannot
+    ///     survive an auto-revert and relaunch the app in Order mode with the
+    ///     Verify boxes hidden. The app therefore only starts in Order if the
+    ///     last MANUAL pick was Order and no auto-revert happened after it.
+    /// </summary>
+    public bool ApplyAutoOrderModeSwitch(bool toOrder)
+    {
+        if (toOrder)
+        {
+            OrderAssistPersistedOverride = OrderAssistEnabled;
+            OrderAssistEnabled = true;
+            return false;
+        }
+
+        OrderAssistPersistedOverride = null;
+        OrderAssistEnabled = false;
+        return true;
+    }
+
+    /// <summary>
+    /// Runtime fallback for the Order Assist row-reading pre-processing:
+    /// "local" (default) = LocalContrastNormalizer, "legacy" = the previous
+    /// chroma-gate binarizer. Edit this one line in
+    /// %AppData%\RxVerifyOverlay\settings.json (restart the app) to revert
+    /// without a redeploy. See OrderAssist/Ocr/RowNormalizerModes.
+    /// </summary>
+    public string OrderAssistRowNormalizer { get; set; } = "local";
+
     private static string SettingsFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "settings.json");
 
@@ -170,8 +217,22 @@ public sealed class OverlaySettings
     {
         var dir = Path.GetDirectoryName(SettingsFilePath)!;
         Directory.CreateDirectory(dir);
-        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(SettingsFilePath, json);
+        File.WriteAllText(SettingsFilePath, ToJsonForSave());
+    }
+
+    /// <summary>The JSON <see cref="Save"/> writes. Applies <see cref="OrderAssistPersistedOverride"/> for the duration of serialization only; the live value is restored before returning. Exposed for tests (no file I/O).</summary>
+    public string ToJsonForSave()
+    {
+        var live = OrderAssistEnabled;
+        if (OrderAssistPersistedOverride is { } persisted) OrderAssistEnabled = persisted;
+        try
+        {
+            return JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+        }
+        finally
+        {
+            OrderAssistEnabled = live;
+        }
     }
 
     /// <summary>
