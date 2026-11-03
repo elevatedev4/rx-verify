@@ -183,8 +183,10 @@ public sealed class OverlaySettings
 
     /// <summary>
     /// Runtime fallback for the Order Assist row-reading pre-processing:
-    /// "local" (default) = LocalContrastNormalizer, "legacy" = the previous
-    /// chroma-gate binarizer. Edit this one line in
+    /// "local" (default) = LocalContrastNormalizer on Create Recommended
+    /// Orders and the previous chroma-gate binarizer on the Catalog
+    /// Substitution window; "legacy" = previous binarizer everywhere;
+    /// "local-all" = LocalContrastNormalizer on both windows. Edit this one line in
     /// %AppData%\RxVerifyOverlay\settings.json (restart the app) to revert
     /// without a redeploy. See OrderAssist/Ocr/RowNormalizerModes.
     /// </summary>
