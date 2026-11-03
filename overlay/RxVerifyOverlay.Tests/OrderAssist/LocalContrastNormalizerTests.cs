@@ -67,12 +67,11 @@ public class LocalContrastNormalizerTests
                     Set(x, y, c);
         }
 
-        /// <summary>Draws digits 7 px apart; returns the solid core pixels. Anti-aliased halo on the 4-neighbours.</summary>
-        public List<(int X, int Y)> Text(int x, int y, string s, (byte R, byte G, byte B) color)
+        /// <summary>Draws glyphs (7 px advance x scale); returns the solid core pixels (every scale x scale block). Anti-aliased halo on the 4-neighbours.</summary>
+        public List<(int X, int Y)> Text(int x, int y, string s, (byte R, byte G, byte B) color, int scale = 1)
         {
             var cores = new List<(int X, int Y)>();
             var coreSet = new HashSet<(int, int)>();
-            var before = (byte[])Buf.Clone();
 
             for (var ci = 0; ci < s.Length; ci++)
             {
@@ -80,28 +79,32 @@ public class LocalContrastNormalizerTests
                 for (var gy = 0; gy < g.Length; gy++)
                     for (var gx = 0; gx < g[gy].Length; gx++)
                         if (g[gy][gx] == '1')
-                        {
-                            var px = x + ci * 7 + gx;
-                            var py = y + gy;
-                            Set(px, py, color);
-                            cores.Add((px, py));
-                            coreSet.Add((px, py));
-                        }
+                            for (var sy = 0; sy < scale; sy++)
+                                for (var sx = 0; sx < scale; sx++)
+                                {
+                                    var px = x + ci * 7 * scale + gx * scale + sx;
+                                    var py = y + gy * scale + sy;
+                                    cores.Add((px, py));
+                                    coreSet.Add((px, py));
+                                }
             }
 
+            // Halo: computed from the still-unpainted background, written after the cores.
+            var halo = new Dictionary<(int, int), (byte R, byte G, byte B)>();
             foreach (var (px, py) in cores)
             {
                 foreach (var (dx, dy) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
                 {
                     var qx = px + dx;
                     var qy = py + dy;
-                    if (coreSet.Contains((qx, qy)) || qx < 0 || qy < 0 || qx >= Width || qy >= Height) continue;
-                    var p = qy * Stride + qx * 4;
-                    Buf[p] = Mix(before[p], color.B);
-                    Buf[p + 1] = Mix(before[p + 1], color.G);
-                    Buf[p + 2] = Mix(before[p + 2], color.R);
+                    if (coreSet.Contains((qx, qy)) || halo.ContainsKey((qx, qy)) || qx < 0 || qy < 0 || qx >= Width || qy >= Height) continue;
+                    var bg = Get(qx, qy);
+                    halo[(qx, qy)] = (Mix(bg.R, color.R), Mix(bg.G, color.G), Mix(bg.B, color.B));
                 }
             }
+
+            foreach (var (px, py) in cores) Set(px, py, color);
+            foreach (var kv in halo) Set(kv.Key.Item1, kv.Key.Item2, kv.Value);
 
             return cores;
         }
@@ -109,8 +112,9 @@ public class LocalContrastNormalizerTests
         private static byte Mix(byte bg, byte fg) => (byte)Math.Round(bg * 0.65 + fg * 0.35);
     }
 
+    /// <summary>Most scenarios below are entirely one colored row, which the production safety valve (60% of pixels) would rightly discard; the valve has its own tests.</summary>
     private static LocalContrastNormalizer.Result Run(Img img) =>
-        LocalContrastNormalizer.Normalize(img.Buf, img.Width, img.Height, img.Stride);
+        LocalContrastNormalizer.Normalize(img.Buf, img.Width, img.Height, img.Stride, maxChangedFraction: 1.0);
 
     private static int Gray(Img img, int x, int y) => img.Get(x, y).R;
 
@@ -377,7 +381,7 @@ public class LocalContrastNormalizerTests
 
         Assert.Equal(0, flat[0 * W + 50]);
         Assert.Equal(0, flat[10 * W + 30]);
-        Assert.Equal(1, flat[5 * W + 100]); // ordinary fill pixel is background
+        Assert.NotEqual(0, flat[5 * W + 100]); // ordinary fill pixel is background
     }
 
     [Theory]
@@ -403,6 +407,164 @@ public class LocalContrastNormalizerTests
 
         Assert.Equal(0, result.ChangedPixels);
         Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void ScaledGlyphsOnPaleTintKeepTheirStrokes(int scale)
+    {
+        // 2x / 3x glyphs have solid bars 2-3 px thick and up to 15 px wide.
+        // They must not be classified as background and whited out.
+        var img = new Img(W, 14 * scale + 24, (255, 255, 179));
+        var cores = img.Text(10, 12, "E8", Black, scale);
+
+        Run(img);
+
+        AssertCoreIsDark(img, cores);
+        AssertRegionIsWhite(img, 0, 0, W, 8);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void ScaledWhiteGlyphsOnDarkFillKeepTheirStrokes(int scale)
+    {
+        var img = new Img(W, 14 * scale + 24, (49, 106, 197));
+        var cores = img.Text(10, 12, "E8", White, scale);
+
+        Run(img);
+
+        AssertCoreIsDark(img, cores);
+        AssertRegionIsWhite(img, 0, 0, W, 8);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void ScaledGlyphsOnPlainWhiteAreUntouched(int scale)
+    {
+        var img = new Img(W, 14 * scale + 24, White);
+        img.Text(10, 12, "E8", Black, scale);
+        var before = (byte[])img.Buf.Clone();
+
+        Assert.Equal(0, Run(img).ChangedPixels);
+        Assert.Equal(before, img.Buf);
+    }
+
+    [Theory]
+    [InlineData(14)]
+    [InlineData(15)]
+    [InlineData(16)]
+    public void TightAlternatingWhiteAndBlueRowsEachReadAgainstTheirOwnBackground(int rowHeight)
+    {
+        const int rows = 6;
+        var img = new Img(W, rowHeight * rows, White);
+        var blueCores = new List<(int X, int Y)>();
+        var whiteCores = new List<(int X, int Y)>();
+        for (var r = 0; r < rows; r++)
+        {
+            var top = r * rowHeight;
+            var textY = top + (rowHeight - 7) / 2;
+            if (r % 2 == 1)
+            {
+                img.Fill(0, top, W, top + rowHeight, (49, 106, 197));
+                blueCores.AddRange(img.Text(10, textY, "1235", White));
+            }
+            else
+            {
+                whiteCores.AddRange(img.Text(10, textY, "1235", Black));
+            }
+        }
+        var before = (byte[])img.Buf.Clone();
+
+        Run(img);
+
+        AssertCoreIsDark(img, blueCores);
+
+        // A white row must never reference the neighbouring blue row: its
+        // text pixels are byte-for-byte what they were.
+        foreach (var (x, y) in whiteCores)
+            Assert.Equal(PixelBytes(before, img.Stride, x, y), PixelBytes(img.Buf, img.Stride, x, y));
+    }
+
+    [Fact]
+    public void SafetyValveDiscardsARewriteThatWouldChangeMostOfTheCapture()
+    {
+        var img = new Img(W, H, (255, 255, 179)); // the whole capture is one tinted fill
+        img.Text(10, 7, "1235", Black);
+        var before = (byte[])img.Buf.Clone();
+
+        var result = LocalContrastNormalizer.Normalize(img.Buf, img.Width, img.Height, img.Stride);
+
+        Assert.True(result.Discarded);
+        Assert.Equal(0, result.ChangedPixels);
+        Assert.True(result.WouldChangePixels > W * H * LocalContrastNormalizer.MaxChangedFraction);
+        Assert.Equal(before, img.Buf); // original bitmap left intact
+    }
+
+    [Fact]
+    public void SafetyValveLetsANormalScreenWithAFewColoredRowsThrough()
+    {
+        var img = new Img(W, H * 5, White);
+        img.Fill(0, H * 2, W, H * 3, (255, 255, 179)); // 20% of the capture
+        var cores = img.Text(10, H * 2 + 7, "1235", Black);
+
+        var result = LocalContrastNormalizer.Normalize(img.Buf, img.Width, img.Height, img.Stride);
+
+        Assert.False(result.Discarded);
+        Assert.True(result.ChangedPixels > 0);
+        AssertCoreIsDark(img, cores);
+    }
+
+    [Fact]
+    public void ReusedWorkspaceDoesNotLeakStateBetweenDifferentlySizedCaptures()
+    {
+        var big = new Img(400, 100, White);
+        big.Fill(0, 30, 400, 60, (255, 255, 179));
+        big.Text(10, 37, "1235", Black);
+        Assert.True(Run(big).ChangedPixels > 0);
+
+        var plainSmall = new Img(W, H, White);
+        plainSmall.Text(10, 7, "1235", Black);
+        Assert.Equal(0, Run(plainSmall).ChangedPixels);
+
+        var coloredSmall = new Img(W, H, (255, 255, 179));
+        var cores = coloredSmall.Text(10, 7, "1235", Black);
+        Run(coloredSmall);
+        AssertCoreIsDark(coloredSmall, cores);
+    }
+
+    [Fact]
+    public void ColoredFullHdCaptureNormalizesWithinAGenerousBudget()
+    {
+        // Realistic path: a 1080p window with every 4th table row tinted
+        // (about 25% of the capture), so the rewrite runs end to end.
+        var img = new Img(1920, 1080, White);
+        const int rowH = 22;
+        var tintedCores = new List<(int X, int Y)>();
+        for (var r = 0; r * rowH + rowH <= 1080; r++)
+        {
+            var top = r * rowH;
+            if (r % 4 == 1)
+            {
+                img.Fill(0, top, 1920, top + rowH, (255, 255, 179));
+                tintedCores.AddRange(img.Text(40, top + 7, "1235", Black));
+            }
+            else
+            {
+                img.Text(40, top + 7, "1235", Black);
+            }
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = LocalContrastNormalizer.Normalize(img.Buf, img.Width, img.Height, img.Stride);
+        sw.Stop();
+
+        Assert.False(result.Discarded);
+        Assert.True(result.ChangedPixels > 0);
+        AssertCoreIsDark(img, tintedCores);
+        Assert.True(sw.ElapsedMilliseconds < 5000, $"took {sw.ElapsedMilliseconds} ms");
     }
 
     private static (byte, byte, byte) PixelBytes(byte[] buf, int stride, int x, int y)

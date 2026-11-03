@@ -5,50 +5,48 @@ using System.Text;
 namespace RxVerifyOverlay.OrderAssist.Windows;
 
 /// <summary>
-/// Always-on, cheap "is any Pioneer order screen on the desktop" probe for
-/// automatic Order/Verify switching. Same shape and precedent as
-/// Integrated/LoginWindowMonitor: EnumWindows, cheapest filters first
-/// (visible, then title prefix, only then the cached PioneerRx-process
-/// check, minimized and cloaked), a 400 ms cache, UI-thread only (no
-/// locking), every P/Invoke guarded. Unlike OrderAssistWindowLocator.Scan
-/// this runs regardless of Order mode (Scan runs only while Order mode is
-/// enabled), which is the whole point: it is what turns Order mode ON.
+/// Always-on, cheap "is the pharmacist on a Pioneer order screen" probe for
+/// automatic Order/Verify switching. Same precedent as
+/// Integrated/LoginWindowMonitor (400 ms cache, UI-thread only so no locking,
+/// every P/Invoke guarded) but FOREGROUND-based: one GetForegroundWindow plus,
+/// only when the foreground window is a PioneerRx window, its title and its
+/// root owner's title. See OrderScreenForegroundRule for the semantics
+/// (a stale order window behind the main window does not count; clicking
+/// this overlay or another app is "no information"). Runs regardless of Order
+/// mode -- OrderAssistWindowLocator.Scan only runs while Order mode is on,
+/// and this is what turns it on.
 ///
-/// PHI: titles can carry patient data. They are compared in
-/// OrderAssistWindowClassifier.IsOrderScreenTitle and dropped; nothing
-/// here stores or logs a title (the host logs booleans only).
+/// PHI: titles can carry patient data. They are compared and dropped; nothing
+/// here stores or logs a title.
 /// </summary>
 public static class OrderScreenMonitor
 {
     private const long CacheMs = 400;
 
-    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    /// <summary>GA_ROOTOWNER: the owner-chain root of a window (a dialog's owning top-level window).</summary>
+    private const uint GA_ROOTOWNER = 3;
 
     [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hWnd);
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
 
     [DllImport("user32.dll")]
-    private static extern bool IsIconic(IntPtr hWnd);
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out int pvAttribute, int cbAttribute);
-
-    private const int DWMWA_CLOAKED = 14;
 
     private static long _lastCheckTick = long.MinValue;
 
     /// <summary>
     /// Takes a fresh sample if the 400 ms cache has expired. Returns true
     /// (and sets <paramref name="screenPresent"/>) only for a FRESH sample;
-    /// false means "cached, nothing new" so the caller's edge/debounce
-    /// logic is never fed the same observation twice. Never throws.
-    /// <paramref name="screenPresent"/> is null when detection failed.
+    /// false means "cached, nothing new" so the caller's edge/debounce logic
+    /// is never fed the same observation twice. Never throws.
+    /// <paramref name="screenPresent"/> is null when there is no information
+    /// (see OrderScreenForegroundRule).
     /// </summary>
     public static bool TrySample(out bool? screenPresent)
     {
@@ -80,50 +78,36 @@ public static class OrderScreenMonitor
 
     private static bool? Detect()
     {
-        var found = false;
-        var buffer = new StringBuilder(256);
+        var foreground = GetForegroundWindow();
+        if (foreground == IntPtr.Zero) return OrderScreenForegroundRule.Evaluate(ForegroundOwner.Unknown, null, null);
 
-        var ok = EnumWindows((hWnd, _) =>
+        GetWindowThreadProcessId(foreground, out var pid);
+        if (pid == (uint)Environment.ProcessId) return OrderScreenForegroundRule.Evaluate(ForegroundOwner.OverlayProcess, null, null);
+
+        if (!OrderAssistWindowLocator.IsOwnedByPioneerRxProcess(foreground))
         {
-            try
-            {
-                if (!IsWindowVisible(hWnd)) return true;
+            return OrderScreenForegroundRule.Evaluate(ForegroundOwner.OtherApp, null, null);
+        }
 
-                buffer.Clear();
-                var length = GetWindowTextW(hWnd, buffer, buffer.Capacity);
-                if (length <= 0) return true;
+        var foregroundTitle = ReadTitle(foreground);
+        string? rootOwnerTitle = null;
+        var root = GetAncestor(foreground, GA_ROOTOWNER);
+        if (root != IntPtr.Zero && root != foreground) rootOwnerTitle = ReadTitle(root);
 
-                // Title first (cheap, no process lookup); the rest only for
-                // the rare window that already matched.
-                if (!OrderAssistWindowClassifier.IsOrderScreenTitle(buffer.ToString(0, Math.Min(length, buffer.Capacity)))) return true;
-                if (IsIconic(hWnd) || IsCloaked(hWnd)) return true;
-                if (!OrderAssistWindowLocator.IsOwnedByPioneerRxProcess(hWnd)) return true;
-
-                found = true;
-                return false; // stop enumerating
-            }
-            catch
-            {
-                // skip this window, keep enumerating
-            }
-            return true;
-        }, IntPtr.Zero);
-
-        // EnumWindows returns false both on failure and when the callback
-        // stopped it early; a positive match is authoritative either way.
-        if (found) return true;
-        return ok ? false : (bool?)null;
+        return OrderScreenForegroundRule.Evaluate(ForegroundOwner.PioneerRx, foregroundTitle, rootOwnerTitle);
     }
 
-    private static bool IsCloaked(IntPtr hWnd)
+    private static string? ReadTitle(IntPtr hWnd)
     {
         try
         {
-            return DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
+            var buffer = new StringBuilder(256);
+            var length = GetWindowTextW(hWnd, buffer, buffer.Capacity);
+            return length <= 0 ? null : buffer.ToString(0, Math.Min(length, buffer.Capacity));
         }
         catch
         {
-            return false;
+            return null;
         }
     }
 }

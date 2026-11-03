@@ -120,21 +120,59 @@ public class AutoOrderModeRuleTests
     }
 
     [Fact]
-    public void SuspendedForReportsNeverReturnsAnAction()
+    public void SuspendedForReportsIgnoresSamplesCompletely()
     {
         var rule = new AutoOrderModeRule();
         Assert.Equal(AutoOrderModeAction.None, rule.Observe(true, Verify, suspended: true));
-        Assert.True(rule.ScreenPresent);
-        Assert.Equal(AutoOrderModeAction.None, ConfirmAbsent(rule, Order, suspended: true));
-        Assert.False(rule.ScreenPresent);
+        Assert.False(rule.ScreenPresent); // nothing consumed
+        for (var i = 0; i < 5; i++)
+        {
+            Assert.Equal(AutoOrderModeAction.None, rule.Observe(false, Order, suspended: true));
+        }
     }
 
     [Fact]
-    public void ScreenThatAppearedWhileSuspendedIsNotAnEdgeAfterResuming()
+    public void ScreenThatAppearedWhileSuspendedSwitchesToOrderOnceResumed()
     {
+        // The screen is still up when Reports closes: it is the active screen, so Order.
         var rule = new AutoOrderModeRule();
         rule.Observe(true, Verify, suspended: true);
-        Assert.Equal(AutoOrderModeAction.None, rule.Observe(true, Verify, suspended: false));
+        Assert.Equal(AutoOrderModeAction.SwitchToOrder, rule.Observe(true, Verify, suspended: false));
+    }
+
+    [Fact]
+    public void OrderScreenClosedWhileReportsWasOpenRevertsToVerifyAfterReportsCloses()
+    {
+        var rule = new AutoOrderModeRule();
+
+        // Order screen opens -> auto Order.
+        Assert.Equal(AutoOrderModeAction.SwitchToOrder, rule.Observe(true, Verify, suspended: false));
+        Assert.True(rule.AutoSwitched);
+
+        // Reports opens; the order screen closes during it. Nothing happens, and nothing is lost.
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.Equal(AutoOrderModeAction.None, rule.Observe(false, Order, suspended: true));
+        }
+        Assert.True(rule.ScreenPresent);
+
+        // Reports closes: the falling edge is confirmed on resume and Verify is restored.
+        Assert.Equal(AutoOrderModeAction.None, rule.Observe(false, Order, suspended: false));
+        Assert.Equal(AutoOrderModeAction.SwitchToVerify, rule.Observe(false, Order, suspended: false));
+        Assert.False(rule.AutoSwitched);
+
+        // And it only happens once.
+        Assert.Equal(AutoOrderModeAction.None, rule.Observe(false, Verify, suspended: false));
+    }
+
+    [Fact]
+    public void ManualVerifyPickClearsTheAutoFlag()
+    {
+        var rule = new AutoOrderModeRule();
+        rule.Observe(true, Verify, false);
+        Assert.True(rule.AutoSwitched);
+        rule.Observe(true, Verify, false); // pharmacist picked Verify while on the screen
+        Assert.False(rule.AutoSwitched);
     }
 
     [Fact]

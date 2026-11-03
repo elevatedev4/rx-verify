@@ -81,8 +81,33 @@ public static class LocalContrastNormalizer
     /// <summary>Max per-channel difference to the pixel above and below for a pixel to be flat (rejects 1-2 px horizontal strokes and grid lines).</summary>
     public const int VerticalTolerance = 16;
 
-    /// <summary>How far up/down (rows) to look for the local background of a non-flat pixel. A table row is ~18-24 px with ~9 px text, so padding is always inside this.</summary>
-    public const int VerticalSearchRows = 8;
+    /// <summary>
+    /// How far up/down (rows) to look for the local background of a non-flat
+    /// pixel. A table row is ~14-24 px with ~9 px text, so the row's own
+    /// padding is always inside this, while a reference in the NEXT row
+    /// (which may be a different color: alternating white / blue rows in a
+    /// tight grid) is mostly out of reach. A pixel with no reference inside
+    /// the cap falls back to the same-row horizontal search, and failing
+    /// that is left unchanged.
+    /// </summary>
+    public const int VerticalSearchRows = 6;
+
+    /// <summary>
+    /// A flat run shorter than this is only trusted as background if it has a
+    /// vertically adjacent flat pixel (i.e. is at least 2 rows thick).
+    /// Row padding runs span the whole row (far wider than this); the bar of
+    /// a thick (3x-scaled / bold) glyph is a short run only ~1-4 px thick, so
+    /// its middle row is NOT trusted and the stroke survives as text.
+    /// </summary>
+    public const int LongRunPixels = 24;
+
+    /// <summary>
+    /// Safety valve: if the rewrite would change more than this fraction of
+    /// the capture's pixels the pass is discarded and the original bitmap
+    /// used (a table screen only ever has a few colored row bands; a larger
+    /// change means the heuristics misjudged the capture).
+    /// </summary>
+    public const double MaxChangedFraction = 0.60;
 
     /// <summary>Fallback horizontal search distance (px) when no flat pixel exists above/below (very tight rows).</summary>
     public const int HorizontalSearchPixels = 24;
@@ -98,9 +123,34 @@ public static class LocalContrastNormalizer
     /// rewritten and the Y ranges (inclusive top, exclusive bottom) of the
     /// rows that contained at least one rewritten pixel -- diagnostics only.
     /// </summary>
-    public readonly record struct Result(int ChangedPixels, IReadOnlyList<(int Top, int Bottom)> ChangedBands);
+    public readonly record struct Result(int ChangedPixels, IReadOnlyList<(int Top, int Bottom)> ChangedBands, bool Discarded = false, int WouldChangePixels = 0);
 
     private static readonly Result NoChange = new(0, Array.Empty<(int, int)>());
+
+    /// <summary>
+    /// Reusable scratch arrays (flat map, staged output). A 1080p capture
+    /// needs ~8 MB of them; allocating that every 500 ms tick lands on the
+    /// large object heap. One workspace per thread (the order tick runs on
+    /// the UI thread), grown on demand, never shrunk.
+    /// </summary>
+    private sealed class Workspace
+    {
+        public byte[] Flat = Array.Empty<byte>();
+        public byte[] Gray = Array.Empty<byte>();
+        public byte[] Touched = Array.Empty<byte>();
+        public bool[] ChangedRows = Array.Empty<bool>();
+
+        public void Prepare(int pixels, int rows)
+        {
+            if (Flat.Length < pixels) { Flat = new byte[pixels]; Gray = new byte[pixels]; Touched = new byte[pixels]; }
+            else { Array.Clear(Flat, 0, pixels); Array.Clear(Touched, 0, pixels); }
+            if (ChangedRows.Length < rows) ChangedRows = new bool[rows];
+            else Array.Clear(ChangedRows, 0, rows);
+        }
+    }
+
+    [ThreadStatic]
+    private static Workspace? _workspace;
 
     /// <summary>
     /// Rewrites <paramref name="bgra"/> in place (Format32bppArgb byte order:
@@ -108,11 +158,15 @@ public static class LocalContrastNormalizer
     /// byte distance between rows. Never throws for a well-formed buffer;
     /// returns <see cref="NoChange"/> for degenerate sizes.
     /// </summary>
-    public static Result Normalize(byte[] bgra, int width, int height, int stride)
+    public static Result Normalize(byte[] bgra, int width, int height, int stride, double maxChangedFraction = MaxChangedFraction)
     {
         if (width <= 0 || height <= 0 || stride < width * 4 || bgra.Length < stride * height) return NoChange;
 
-        var flat = ComputeFlatMap(bgra, width, height, stride);
+        var ws = _workspace ??= new Workspace();
+        ws.Prepare(width * height, height);
+
+        var flat = ws.Flat;
+        FillFlatMap(bgra, width, height, stride, flat);
 
         // Exact short-circuit: a non-plain reference can only come from a
         // non-plain FLAT pixel, so if there is none, nothing would change.
@@ -134,10 +188,10 @@ public static class LocalContrastNormalizer
 
         // Results are staged in side arrays: reference pixels are read from
         // the ORIGINAL buffer, so nothing may be written back until the end.
-        var gray = new byte[width * height];
-        var touched = new byte[width * height];
-        var changedRows = new bool[height];
-        var changed = 0;
+        var gray = ws.Gray;
+        var touched = ws.Touched;
+        var changedRows = ws.ChangedRows;
+        var wouldChange = 0;
 
         for (var y = 0; y < height; y++)
         {
@@ -156,6 +210,7 @@ public static class LocalContrastNormalizer
                     {
                         gray[i] = 255;
                         touched[i] = 1;
+                        wouldChange++;
                     }
                     continue;
                 }
@@ -169,8 +224,18 @@ public static class LocalContrastNormalizer
 
                 gray[i] = contrast <= NoiseFloor ? (byte)255 : (byte)(255 - contrast);
                 touched[i] = 1;
+                wouldChange++;
             }
         }
+
+        // Safety valve: nothing has been written to bgra yet, so discarding
+        // just means returning without the write-back below.
+        if (wouldChange > maxChangedFraction * width * height)
+        {
+            return new Result(0, Array.Empty<(int, int)>(), Discarded: true, WouldChangePixels: wouldChange);
+        }
+
+        var changed = 0;
 
         for (var y = 0; y < height; y++)
         {
@@ -191,18 +256,24 @@ public static class LocalContrastNormalizer
             }
         }
 
-        return new Result(changed, ToBands(changedRows));
+        return new Result(changed, ToBands(changedRows, height));
     }
 
     /// <summary>
-    /// Pass 1+2: 1 where the pixel is background by SHAPE (long horizontal
-    /// run of near-identical pixels, stable vertically). Exposed for tests.
-    /// Index = y * width + x.
+    /// 0 = not background; 1 = background in a short flat run; 2 = background
+    /// in a long flat run (see <see cref="LongRunPixels"/>). Exposed for
+    /// tests. Index = y * width + x.
     /// </summary>
     public static byte[] ComputeFlatMap(byte[] bgra, int width, int height, int stride)
     {
         var flat = new byte[width * height];
+        FillFlatMap(bgra, width, height, stride, flat);
+        return flat;
+    }
 
+    private static void FillFlatMap(byte[] bgra, int width, int height, int stride, byte[] flat)
+    {
+        // Pass 1: long horizontal runs of near-identical pixels.
         for (var y = 0; y < height; y++)
         {
             var rowPix = y * stride;
@@ -220,15 +291,17 @@ public static class LocalContrastNormalizer
                     x++;
                 }
 
-                if (x - runStart >= MinFlatRunPixels)
+                var len = x - runStart;
+                if (len >= MinFlatRunPixels)
                 {
-                    for (var k = runStart; k < x; k++) flat[rowFlat + k] = 1;
+                    var mark = len >= LongRunPixels ? (byte)2 : (byte)1;
+                    for (var k = runStart; k < x; k++) flat[rowFlat + k] = mark;
                 }
             }
         }
 
-        // Vertical stability: drop run pixels that differ from the pixel
-        // above or below (horizontal strokes 1-2 px thick, grid lines).
+        // Pass 2: vertical stability -- drop run pixels that differ from the
+        // pixel above or below (horizontal strokes 1-2 px thick, grid lines).
         for (var y = 0; y < height; y++)
         {
             var rowPix = y * stride;
@@ -242,7 +315,25 @@ public static class LocalContrastNormalizer
             }
         }
 
-        return flat;
+        // Pass 3 (thick-glyph guard): a SHORT-run flat pixel with no flat
+        // pixel directly above or below is a 1-row sliver -- the middle of a
+        // 3-px-thick glyph bar (3x / bold text), not background. Mark (4,
+        // still "nonzero" so neighbours' tests are unaffected), then clear.
+        for (var y = 0; y < height; y++)
+        {
+            var rowFlat = y * width;
+            for (var x = 0; x < width; x++)
+            {
+                if (flat[rowFlat + x] != 1) continue;
+                var above = y > 0 && flat[rowFlat - width + x] != 0;
+                var below = y < height - 1 && flat[rowFlat + width + x] != 0;
+                if (!above && !below) flat[rowFlat + x] = 4;
+            }
+        }
+        for (var i = 0; i < width * height; i++)
+        {
+            if (flat[i] == 4) flat[i] = 0;
+        }
     }
 
     /// <summary>
@@ -289,11 +380,11 @@ public static class LocalContrastNormalizer
         return Math.Max(db, Math.Max(dg, dr));
     }
 
-    private static IReadOnlyList<(int Top, int Bottom)> ToBands(bool[] rows)
+    private static IReadOnlyList<(int Top, int Bottom)> ToBands(bool[] rows, int height)
     {
         var bands = new List<(int Top, int Bottom)>();
         var open = -1;
-        for (var y = 0; y < rows.Length; y++)
+        for (var y = 0; y < height; y++)
         {
             if (rows[y])
             {
@@ -305,7 +396,7 @@ public static class LocalContrastNormalizer
                 open = -1;
             }
         }
-        if (open >= 0) bands.Add((open, rows.Length));
+        if (open >= 0) bands.Add((open, height));
         return bands;
     }
 }

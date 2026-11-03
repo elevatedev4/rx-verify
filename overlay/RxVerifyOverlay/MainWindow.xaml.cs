@@ -512,26 +512,28 @@ public partial class MainWindow : Window, IOverlayVisibilityController
             if (action == OrderAssist.Windows.AutoOrderModeAction.None) return;
 
             var toOrder = action == OrderAssist.Windows.AutoOrderModeAction.SwitchToOrder;
-            if (toOrder)
-            {
-                // Remember what the pharmacist had (Verify) as the value to persist.
-                _settings.OrderAssistPersistedOverride = _settings.OrderAssistEnabled;
-            }
-            else
-            {
-                // Back to the pharmacist-visible Verify state: live == persisted again.
-                _settings.OrderAssistPersistedOverride = null;
-            }
 
-            _settings.OrderAssistEnabled = toOrder;
+            // Order: in-memory only (persisted value stays the pharmacist's
+            // choice). Back to Verify: persisted too, so a manual Order that
+            // was auto-reverted cannot relaunch the app in Order mode.
+            var persistNow = _settings.ApplyAutoOrderModeSwitch(toOrder);
+
             _orderAssistCoordinator.SetEnabled(toOrder);
             _integratedOverlay.SyncToggles();
 
-            OcrLogger.LogTiming($"[AUTO-MODE] order screen {(toOrder ? "appeared" : "closed")}: switched to {(toOrder ? "Order" : "Verify")} mode (not persisted)");
+            if (persistNow)
+            {
+                try { _settings.Save(); }
+                catch (Exception saveEx) { OcrLogger.LogTiming($"[AUTO-MODE] saving Verify failed: {saveEx.GetType().Name}"); }
+            }
+
+            OcrLogger.LogTiming($"[AUTO-MODE] order screen {(toOrder ? "appeared" : "closed")}: switched to {(toOrder ? "Order" : "Verify")} mode {(toOrder ? "(not persisted)" : "(persisted)")}");
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Best-effort: a failure here must never break the integrated tick.
+            // Best-effort: a failure here must never break the integrated
+            // tick. Exception TYPE only -- messages can carry paths/PHI.
+            try { OcrLogger.LogTiming($"[AUTO-MODE] auto switch failed: {ex.GetType().Name}"); } catch { /* logging must never throw */ }
         }
     }
 

@@ -22,8 +22,12 @@ namespace RxVerifyOverlay.OrderAssist.Ocr;
 /// doc for why neither shape was right and what replaces them: a
 /// color-blind, local-background contrast rewrite that leaves plain white
 /// rows byte-for-byte untouched. RowHighlightColorDetector is no longer
-/// called from here (kept, with its tests, as a documented measurement
-/// helper).
+/// called from the default path; it only runs via
+/// LegacyRowHighlightNormalizer, the runtime fallback selected by
+/// settings.json "OrderAssistRowNormalizer": "legacy" (see
+/// RowNormalizerModes). The default path also has a safety valve: if the
+/// rewrite would change over 60% of the capture it is discarded for that
+/// tick and the original bitmap is used.
 ///
 /// This class is only the System.Drawing plumbing (LockBits + Marshal.Copy
 /// in, LocalContrastNormalizer.Normalize on the raw bytes, copy back only
@@ -40,7 +44,8 @@ public static class RowHighlightNormalizer
     /// <summary>Result of one NormalizeInPlace call -- rewritten row bands (inclusive top, exclusive bottom), plus an always-empty near-miss list kept for log-format compatibility.</summary>
     public readonly record struct NormalizeResult(
         IReadOnlyList<(int Top, int Bottom)> AcceptedBands,
-        IReadOnlyList<RejectedHighlightCandidate> RejectedCandidates);
+        IReadOnlyList<RejectedHighlightCandidate> RejectedCandidates,
+        bool SafetyValveTripped = false);
 
     private static readonly NormalizeResult EmptyResult = new(Array.Empty<(int, int)>(), Array.Empty<RejectedHighlightCandidate>());
 
@@ -50,10 +55,13 @@ public static class RowHighlightNormalizer
     /// (empty result, bitmap left as captured) rather than blocking the
     /// capture the caller already has in hand.
     /// </summary>
-    public static NormalizeResult NormalizeInPlace(Bitmap bitmap)
+    public static NormalizeResult NormalizeInPlace(Bitmap bitmap, RowNormalizerMode mode = RowNormalizerMode.Local)
     {
         try
         {
+            // Runtime fallback (settings.json OrderAssistRowNormalizer =
+            // "legacy"): the exact pre-change gate-then-binarize path.
+            if (mode == RowNormalizerMode.Legacy) return LegacyRowHighlightNormalizer.NormalizeInPlace(bitmap);
             return NormalizeInPlaceCore(bitmap);
         }
         catch
@@ -61,6 +69,9 @@ public static class RowHighlightNormalizer
             return EmptyResult;
         }
     }
+
+    [ThreadStatic]
+    private static byte[]? _buffer;
 
     private static NormalizeResult NormalizeInPlaceCore(Bitmap bitmap)
     {
@@ -75,13 +86,18 @@ public static class RowHighlightNormalizer
             var stride = data.Stride;
             if (stride <= 0) return EmptyResult; // bottom-up DIB: not produced by CaptureRegion; do nothing
 
-            var buffer = new byte[stride * height];
-            Marshal.Copy(data.Scan0, buffer, 0, buffer.Length);
+            // Reused per thread (UI thread): an 8 MB buffer every 500 ms tick
+            // would land on the large object heap.
+            var needed = stride * height;
+            var buffer = _buffer;
+            if (buffer is null || buffer.Length < needed) buffer = _buffer = new byte[needed];
+            Marshal.Copy(data.Scan0, buffer, 0, needed);
 
             var result = LocalContrastNormalizer.Normalize(buffer, width, height, stride);
+            if (result.Discarded) return new NormalizeResult(Array.Empty<(int, int)>(), Array.Empty<RejectedHighlightCandidate>(), SafetyValveTripped: true);
             if (result.ChangedPixels == 0) return EmptyResult;
 
-            Marshal.Copy(buffer, 0, data.Scan0, buffer.Length);
+            Marshal.Copy(buffer, 0, data.Scan0, needed);
             return new NormalizeResult(result.ChangedBands, Array.Empty<RejectedHighlightCandidate>());
         }
         finally

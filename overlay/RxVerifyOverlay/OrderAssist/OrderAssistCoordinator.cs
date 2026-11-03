@@ -469,8 +469,9 @@ public sealed class OrderAssistCoordinator
         // blue, McKesson yellow, in-edit qty rows on Create Recommended
         // Orders). Logging is best-effort and throttled "log on change".
         stageStopwatch.Restart();
-        var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap);
+        var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap, RowNormalizerModes.Resolve(_settings.OrderAssistRowNormalizer));
         var normalizeMs = stageStopwatch.ElapsedMilliseconds;
+        if (highlightResult.SafetyValveTripped) LogNormalizerValveTripped(target.Value.Kind);
         LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
 
         stageStopwatch.Restart();
@@ -804,6 +805,23 @@ public sealed class OrderAssistCoordinator
     private const long SlowTickLogThresholdMs = 1_500;
 
     private long _lastTimingLogTick = long.MinValue;
+
+    private int _normalizerValveTrips;
+
+    /// <summary>
+    /// The local-contrast pass would have rewritten more than 60% of the
+    /// capture, so it was discarded and OCR ran on the untouched bitmap this
+    /// tick (see LocalContrastNormalizer.MaxChangedFraction). Logs a running
+    /// counter only (first trip, then every 20th) -- no pixels, no text.
+    /// </summary>
+    private void LogNormalizerValveTripped(OrderAssistWindowKind kind)
+    {
+        _normalizerValveTrips++;
+        if (_normalizerValveTrips == 1 || _normalizerValveTrips % 20 == 0)
+        {
+            OcrLogger.LogTiming($"OrderAssist[{kind}]: local-contrast pass discarded (would change over {LocalContrastNormalizer.MaxChangedFraction:P0} of pixels); original bitmap used. trips={_normalizerValveTrips}");
+        }
+    }
 
     /// <summary>
     /// Per-stage cost of one capture / normalize / OCR pass, so a field
