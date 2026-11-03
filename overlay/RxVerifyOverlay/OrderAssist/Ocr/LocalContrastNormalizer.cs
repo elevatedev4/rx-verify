@@ -93,13 +93,23 @@ public static class LocalContrastNormalizer
     public const int VerticalSearchRows = 6;
 
     /// <summary>
-    /// A flat run shorter than this is only trusted as background if it has a
-    /// vertically adjacent flat pixel (i.e. is at least 2 rows thick).
-    /// Row padding runs span the whole row (far wider than this); the bar of
-    /// a thick (3x-scaled / bold) glyph is a short run only ~1-4 px thick, so
-    /// its middle row is NOT trusted and the stroke survives as text.
+    /// A flat run at least this wide is trusted as background outright (row
+    /// padding spans the whole row). A SHORTER flat run (8-23 px) is only
+    /// trusted if it is at least <see cref="MinShortRunExtent"/> rows thick:
+    /// the bars and joints of thick (2x/3x-scaled or bold) glyphs are short
+    /// runs only 1-3 rows thick, so they are NOT background and the stroke
+    /// survives as text. (A background strip between bars is thicker.)
     /// </summary>
     public const int LongRunPixels = 24;
+
+    /// <summary>Minimum vertical thickness (rows of flat pixels, counting up to 3 above and 3 below) for a short flat run to count as background.</summary>
+    public const int MinShortRunExtent = 4;
+
+    /// <summary>A flat pixel this close (rows) above/below is taken as the local background outright: it is the pixel's own row padding.</summary>
+    public const int PreferredVerticalRows = 3;
+
+    /// <summary>When the nearest vertical reference is farther than <see cref="PreferredVerticalRows"/> (tight rows: the padding is gone, and the nearest vertical reference may be the neighbouring row of a DIFFERENT color), the up/down/left/right references vote and the most agreeing color wins.</summary>
+    public const int ReferenceAgreeTolerance = 24;
 
     /// <summary>
     /// Safety valve: if the rewrite would change more than this fraction of
@@ -315,19 +325,32 @@ public static class LocalContrastNormalizer
             }
         }
 
-        // Pass 3 (thick-glyph guard): a SHORT-run flat pixel with no flat
-        // pixel directly above or below is a 1-row sliver -- the middle of a
-        // 3-px-thick glyph bar (3x / bold text), not background. Mark (4,
-        // still "nonzero" so neighbours' tests are unaffected), then clear.
+        // Pass 3 (thick-glyph guard): a SHORT-run flat pixel whose flat
+        // vertical extent (itself plus up to 3 flat pixels above and 3 below)
+        // is under MinShortRunExtent is a bar / joint of a thick glyph, not
+        // background. Mark (4: excluded from later counts, cleared below).
         for (var y = 0; y < height; y++)
         {
             var rowFlat = y * width;
             for (var x = 0; x < width; x++)
             {
                 if (flat[rowFlat + x] != 1) continue;
-                var above = y > 0 && flat[rowFlat - width + x] != 0;
-                var below = y < height - 1 && flat[rowFlat + width + x] != 0;
-                if (!above && !below) flat[rowFlat + x] = 4;
+
+                var extent = 1;
+                for (var k = 1; k <= 3 && y - k >= 0; k++)
+                {
+                    var v = flat[rowFlat - k * width + x];
+                    if (v == 0 || v == 4) break;
+                    extent++;
+                }
+                for (var k = 1; k <= 3 && y + k < height; k++)
+                {
+                    var v = flat[rowFlat + k * width + x];
+                    if (v == 0 || v == 4) break;
+                    extent++;
+                }
+
+                if (extent < MinShortRunExtent) flat[rowFlat + x] = 4;
             }
         }
         for (var i = 0; i < width * height; i++)
@@ -337,35 +360,66 @@ public static class LocalContrastNormalizer
     }
 
     /// <summary>
-    /// Byte offset (into the pixel buffer) of the nearest flat pixel above or
-    /// below (x, y) in the same column -- nearer wins, ties go up -- else the
-    /// nearest flat pixel to the left/right on the same row, else -1.
+    /// Byte offset (into the pixel buffer) of the pixel's local background,
+    /// or -1. Candidates are the nearest flat pixel above, below (within
+    /// <see cref="VerticalSearchRows"/>), left and right (within
+    /// <see cref="HorizontalSearchPixels"/>). If the nearest vertical one is
+    /// within <see cref="PreferredVerticalRows"/> it wins outright (the
+    /// pixel's own row padding). Otherwise the candidates vote: the color
+    /// most of them agree with wins, ties to the nearest. That keeps a tight
+    /// row (14-16 px, no padding left in the glyph's columns) from taking its
+    /// reference from the neighbouring row's different fill.
     /// </summary>
     private static int FindReferenceOffset(byte[] bgra, byte[] flat, int width, int height, int stride, int x, int y)
     {
-        var up = 0;
-        var down = 0;
+        var upD = 0;
+        var downD = 0;
         for (var k = 1; k <= VerticalSearchRows; k++)
         {
-            if (up == 0 && y - k >= 0 && flat[(y - k) * width + x] != 0) up = k;
-            if (down == 0 && y + k < height && flat[(y + k) * width + x] != 0) down = k;
-            if (up != 0 && down != 0) break;
+            if (upD == 0 && y - k >= 0 && flat[(y - k) * width + x] != 0) upD = k;
+            if (downD == 0 && y + k < height && flat[(y + k) * width + x] != 0) downD = k;
+            if (upD != 0 && downD != 0) break;
         }
 
-        if (up != 0 || down != 0)
-        {
-            if (down == 0 || (up != 0 && up <= down)) return (y - up) * stride + x * 4;
-            return (y + down) * stride + x * 4;
-        }
+        if (upD != 0 && upD <= PreferredVerticalRows && (downD == 0 || upD <= downD)) return (y - upD) * stride + x * 4;
+        if (downD != 0 && downD <= PreferredVerticalRows && (upD == 0 || downD < upD)) return (y + downD) * stride + x * 4;
 
+        var leftD = 0;
+        var rightD = 0;
         var rowFlat = y * width;
         for (var k = 1; k <= HorizontalSearchPixels; k++)
         {
-            if (x - k >= 0 && flat[rowFlat + x - k] != 0) return y * stride + (x - k) * 4;
-            if (x + k < width && flat[rowFlat + x + k] != 0) return y * stride + (x + k) * 4;
+            if (leftD == 0 && x - k >= 0 && flat[rowFlat + x - k] != 0) leftD = k;
+            if (rightD == 0 && x + k < width && flat[rowFlat + x + k] != 0) rightD = k;
+            if (leftD != 0 && rightD != 0) break;
         }
 
-        return -1;
+        Span<int> offsets = stackalloc int[4];
+        Span<int> distances = stackalloc int[4];
+        var n = 0;
+        if (upD != 0) { offsets[n] = (y - upD) * stride + x * 4; distances[n] = upD; n++; }
+        if (downD != 0) { offsets[n] = (y + downD) * stride + x * 4; distances[n] = downD; n++; }
+        if (leftD != 0) { offsets[n] = y * stride + (x - leftD) * 4; distances[n] = leftD; n++; }
+        if (rightD != 0) { offsets[n] = y * stride + (x + rightD) * 4; distances[n] = rightD; n++; }
+        if (n == 0) return -1;
+
+        var best = 0;
+        var bestSupport = -1;
+        for (var i = 0; i < n; i++)
+        {
+            var support = 0;
+            for (var j = 0; j < n; j++)
+            {
+                if (Cheb(bgra, offsets[i], offsets[j]) <= ReferenceAgreeTolerance) support++;
+            }
+            if (support > bestSupport || (support == bestSupport && distances[i] < distances[best]))
+            {
+                best = i;
+                bestSupport = support;
+            }
+        }
+
+        return offsets[best];
     }
 
     private static bool IsPlain(byte[] bgra, int p) =>
