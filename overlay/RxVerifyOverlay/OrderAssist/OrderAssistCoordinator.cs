@@ -469,7 +469,7 @@ public sealed class OrderAssistCoordinator
         // blue, McKesson yellow, in-edit qty rows on Create Recommended
         // Orders). Logging is best-effort and throttled "log on change".
         stageStopwatch.Restart();
-        var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap, RowNormalizerModes.Resolve(_settings.OrderAssistRowNormalizer));
+        var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap, RowNormalizerWindowPolicy.Resolve(target.Value.Kind, _settings.OrderAssistRowNormalizer));
         var normalizeMs = stageStopwatch.ElapsedMilliseconds;
         if (highlightResult.SafetyValveTripped) LogNormalizerValveTripped(target.Value.Kind);
         LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);

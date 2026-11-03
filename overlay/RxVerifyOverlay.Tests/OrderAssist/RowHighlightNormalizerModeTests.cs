@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.Drawing.Imaging;
 using RxVerifyOverlay.OrderAssist.Ocr;
+using RxVerifyOverlay.OrderAssist.Windows;
 using Xunit;
 
 namespace RxVerifyOverlay.Tests.OrderAssist;
@@ -84,5 +85,22 @@ public class RowHighlightNormalizerModeTests
         Assert.Equal(255, bmp.GetPixel(100, 5).R);       // tinted background whitened by legacy
         Assert.Equal(0, bmp.GetPixel(10, 30).R);         // text black
         Assert.Equal(0, bmp.GetPixel(60, 30).R);         // legacy's hard binarization (local would keep 128)
+    }
+
+    [Fact]
+    public void CatalogSubstitutionDefaultPixelsAreIdenticalToTheLegacyNormalizer()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        using var viaPolicy = TintedBandBitmap();
+        var mode = RowNormalizerWindowPolicy.Resolve(OrderAssistWindowKind.CatalogSubstitution, "local");
+        RowHighlightNormalizer.NormalizeInPlace(viaPolicy, mode);
+
+        using var direct = TintedBandBitmap();
+        LegacyRowHighlightNormalizer.NormalizeInPlace(direct);
+
+        for (var y = 0; y < direct.Height; y++)
+            for (var x = 0; x < direct.Width; x++)
+                Assert.Equal(direct.GetPixel(x, y).ToArgb(), viaPolicy.GetPixel(x, y).ToArgb());
     }
 }
