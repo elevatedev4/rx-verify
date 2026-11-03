@@ -65,20 +65,24 @@ public class RowHighlightNormalizerModeTests
     }
 
     [Fact]
-    public void SafetyValveLeavesTheBitmapUntouchedAndReportsIt()
+    public void SafetyValveTripFallsBackToTheLegacyNormalizerAndReportsIt()
     {
         if (!OperatingSystem.IsWindows()) return;
 
         using var bmp = new Bitmap(200, 66, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(bmp)) g.Clear(PaleYellow); // 100% tinted
+        using (var g = Graphics.FromImage(bmp)) g.Clear(PaleYellow); // 100% tinted: local pass would rewrite everything
         for (var x = 10; x < 50; x += 4)
             for (var y = 28; y < 35; y++)
                 bmp.SetPixel(x, y, Color.Black);
+        for (var y = 26; y < 37; y++)
+            bmp.SetPixel(60, y, Color.FromArgb(128, 128, 128));
 
         var result = RowHighlightNormalizer.NormalizeInPlace(bmp, RowNormalizerMode.Local);
 
         Assert.True(result.SafetyValveTripped);
-        Assert.Empty(result.AcceptedBands);
-        Assert.Equal(PaleYellow.ToArgb(), bmp.GetPixel(100, 5).ToArgb());
+        Assert.NotEmpty(result.AcceptedBands);           // legacy output, not the raw bitmap
+        Assert.Equal(255, bmp.GetPixel(100, 5).R);       // tinted background whitened by legacy
+        Assert.Equal(0, bmp.GetPixel(10, 30).R);         // text black
+        Assert.Equal(0, bmp.GetPixel(60, 30).R);         // legacy's hard binarization (local would keep 128)
     }
 }

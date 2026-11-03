@@ -27,7 +27,7 @@ namespace RxVerifyOverlay.OrderAssist.Ocr;
 /// settings.json "OrderAssistRowNormalizer": "legacy" (see
 /// RowNormalizerModes). The default path also has a safety valve: if the
 /// rewrite would change over 60% of the capture it is discarded for that
-/// tick and the original bitmap is used.
+/// tick and the legacy normalizer runs on that tick's bitmap instead.
 ///
 /// This class is only the System.Drawing plumbing (LockBits + Marshal.Copy
 /// in, LocalContrastNormalizer.Normalize on the raw bytes, copy back only
@@ -62,7 +62,16 @@ public static class RowHighlightNormalizer
             // Runtime fallback (settings.json OrderAssistRowNormalizer =
             // "legacy"): the exact pre-change gate-then-binarize path.
             if (mode == RowNormalizerMode.Legacy) return LegacyRowHighlightNormalizer.NormalizeInPlace(bitmap);
-            return NormalizeInPlaceCore(bitmap);
+
+            var local = NormalizeInPlaceCore(bitmap);
+            if (!local.SafetyValveTripped) return local;
+
+            // Safety valve: the local pass was discarded (bitmap untouched
+            // and unlocked again). Raw colored rows read worse than the
+            // legacy gate's output, so run the legacy normalizer on this
+            // tick's bitmap instead, and still report the trip for logging.
+            var legacy = LegacyRowHighlightNormalizer.NormalizeInPlace(bitmap);
+            return new NormalizeResult(legacy.AcceptedBands, legacy.RejectedCandidates, SafetyValveTripped: true);
         }
         catch
         {

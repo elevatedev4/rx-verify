@@ -810,7 +810,7 @@ public sealed class OrderAssistCoordinator
 
     /// <summary>
     /// The local-contrast pass would have rewritten more than 60% of the
-    /// capture, so it was discarded and OCR ran on the untouched bitmap this
+    /// capture, so it was discarded and the legacy normalizer ran on the bitmap this
     /// tick (see LocalContrastNormalizer.MaxChangedFraction). Logs a running
     /// counter only (first trip, then every 20th) -- no pixels, no text.
     /// </summary>
@@ -819,7 +819,7 @@ public sealed class OrderAssistCoordinator
         _normalizerValveTrips++;
         if (_normalizerValveTrips == 1 || _normalizerValveTrips % 20 == 0)
         {
-            OcrLogger.LogTiming($"OrderAssist[{kind}]: local-contrast pass discarded (would change over {LocalContrastNormalizer.MaxChangedFraction:P0} of pixels); original bitmap used. trips={_normalizerValveTrips}");
+            OcrLogger.LogTiming($"OrderAssist[{kind}]: local-contrast pass discarded (would change over {LocalContrastNormalizer.MaxChangedFraction:P0} of pixels); legacy normalizer used for this tick. trips={_normalizerValveTrips}");
         }
     }
 
@@ -896,7 +896,7 @@ public sealed class OrderAssistCoordinator
 
         OcrLogger.LogTiming(bands.Count == 0
             ? $"OrderAssist[{kind}]: row-highlight normalizer found 0 bands this tick"
-            : $"OrderAssist[{kind}]: row-highlight normalizer rewrote {bands.Count} row band(s) to local-contrast this tick: [{signature}]");
+            : $"OrderAssist[{kind}]: row-highlight normalizer rewrote {bands.Count} row band(s) this tick: [{signature}]");
 
         if (rejectedCandidates.Count > 0)
         {
