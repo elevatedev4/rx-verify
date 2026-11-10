@@ -168,6 +168,78 @@ public class DailySalesPlanTests
         }
     }
 
+    public class AltEndFieldTests
+    {
+        private static readonly ReportCatalogEntry Sales = ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)!;
+        private static readonly DateTime Day = new(2026, 10, 3);
+
+        [Fact]
+        public void TheDailyPlanIsBeginAltEEndF12WithTheMonthlyTabsOnlyAsTheFallback()
+        {
+            var daily = Sales with { EndFieldAccelerator = DailySalesPlan.EndFieldAccelerator };
+
+            var plan = ReportParameterKeyPlan.Build(daily, Day, Day);
+
+            Assert.Equal(
+                new[]
+                {
+                    ReportParameterKeyAction.TypeText("10-03-2026"),
+                    ReportParameterKeyAction.AltKey("e", Sales.TabsBetweenDates),
+                    ReportParameterKeyAction.TypeText("10-03-26"),
+                    ReportParameterKeyAction.F12()
+                },
+                plan);
+            Assert.DoesNotContain(plan, a => a.Kind == ReportParameterKeyActionKind.Tab);
+        }
+
+        [Fact]
+        public void TheMonthlyPlanKeepsItsTabsAndHasNoAltKey()
+        {
+            var plan = ReportParameterKeyPlan.Build(Sales, new DateTime(2026, 10, 1), new DateTime(2026, 10, 31));
+
+            Assert.DoesNotContain(plan, a => a.Kind == ReportParameterKeyActionKind.AltKey);
+            Assert.Equal(Sales.TabsBetweenDates, plan.Count(a => a.Kind == ReportParameterKeyActionKind.Tab));
+            Assert.Null(Sales.EndFieldAccelerator);
+        }
+
+        [Fact]
+        public void NoF12InTheTestPlanButStillAltE()
+        {
+            var daily = Sales with { EndFieldAccelerator = "e" };
+
+            var plan = ReportParameterKeyPlan.Build(daily, Day, Day, includeF12: false);
+
+            Assert.DoesNotContain(plan, a => a.Kind == ReportParameterKeyActionKind.F12);
+            Assert.Contains(plan, a => a.Kind == ReportParameterKeyActionKind.AltKey);
+        }
+
+        [Theory]
+        [InlineData("a|r1", "b|r2", true)]        // moved to a different control
+        [InlineData("a|r1", "a|r1", false)]       // same control, same place: Alt+e did nothing
+        [InlineData("a|r1", "a|r2", true)]        // same description, different rectangle (two look-alike date fields)
+        [InlineData(null, "a|r1", true)]
+        [InlineData("a|r1", null, false)]         // nothing focused afterwards: not a landing
+        [InlineData("a|r1", "", false)]
+        public void FocusMoveDecisionDrivesTheTabFallback(string? before, string? after, bool moved)
+        {
+            Assert.Equal(moved, ReportFocusMove.Moved(before, after));
+        }
+
+        [Fact]
+        public async Task EveryDailySalesRunUsesAltEForTheEndField()
+        {
+            var driver = new FakeReportDriver();
+            var coordinator = new ReportsCoordinator(driver, appLog: _ => { }, runLog: (_, _, _) => { });
+            var steps = DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 2), Folder, false, true);
+
+            await coordinator.RunDailyAsync(steps, _ => { }, CancellationToken.None);
+
+            Assert.Equal(2, driver.Items.Count);
+            Assert.All(driver.Items, i => Assert.Equal("e", i.Entry.EndFieldAccelerator));
+            Assert.Null(ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)!.EndFieldAccelerator);
+        }
+    }
+
     public class RunDailyTests
     {
         private static ReportsCoordinator Coordinator(FakeReportDriver driver) =>

@@ -84,6 +84,9 @@ public enum ReportOutputFormat
 /// for every report whose macro types straight into "Set up report"
 /// with no leading &lt;TAB&gt;.
 /// </param>
+/// <param name="EndFieldAccelerator">
+/// Optional Alt+letter that jumps from the Begin field to the End field (Will's daily Sales macro: date, &lt;ALT&gt;e, date). When set, ReportParameterKeyPlan sends Alt+letter instead of the Tabs, and PioneerReportDriver falls back to TabsBetweenDates Tabs only if focus did not move. Null for every catalog row (the monthly runs keep their Tabs).
+/// </param>
 /// <param name="TrailingKeys">
 /// Round 4 fix, reviewer round 4 correction. Extra keys
 /// ReportParameterKeyPlan sends AFTER the last date is typed — null/empty
@@ -110,7 +113,8 @@ public sealed record ReportCatalogEntry(
     int TabsBetweenDates = 2,
     TimeSpan MacroRunTime = default,
     int LeadingTabs = 0,
-    IReadOnlyList<ReportParameterKeyActionKind>? TrailingKeys = null);
+    IReadOnlyList<ReportParameterKeyActionKind>? TrailingKeys = null,
+    string? EndFieldAccelerator = null);
 
 /// <summary>
 /// The fixed phase-1 report list (GOAL brief "WHAT PIONEER LOOKS LIKE"

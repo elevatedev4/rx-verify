@@ -61,6 +61,9 @@ public static class DailySalesPlan
     /// </summary>
     public const bool PosNavigationEnabled = false;
 
+    /// <summary>The macro jumps to the End date field with Alt+e.</summary>
+    public const string EndFieldAccelerator = "e";
+
     public static string FilePrefix(DailyReportKind kind) => kind == DailyReportKind.Pos ? "POS" : "Sales";
 
     public static string DisplayName(DailyReportKind kind) => kind == DailyReportKind.Pos ? "POS Summary" : "Sales Summary";

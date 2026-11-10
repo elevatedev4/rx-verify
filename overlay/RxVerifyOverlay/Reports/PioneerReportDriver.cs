@@ -2821,6 +2821,50 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                         break;
                     }
 
+                    case ReportParameterKeyActionKind.AltKey:
+                    {
+                        var letter = (action.Text ?? string.Empty).ToUpperInvariant();
+                        if (letter.Length != 1 || !Enum.TryParse<VirtualKeyShort>("KEY_" + letter, out var letterKey))
+                        {
+                            log($"  Alt+key: unsupported accelerator '{letter}' - aborting rather than guess.");
+                            return false;
+                        }
+
+                        var before = FocusSignature(SafeFocusedElement());
+                        log($"  key Alt+{letter.ToLowerInvariant()} (focused before: {DescribeControl(SafeFocusedElement())})");
+                        Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, letterKey);
+                        Thread.Sleep(KeyEntrySettleDelay);
+
+                        var afterElement = SafeFocusedElement();
+                        var after = FocusSignature(afterElement);
+                        if (AltKeyMovedFocus(before, after))
+                        {
+                            log($"  focused after Alt+{letter.ToLowerInvariant()}: {DescribeControl(afterElement)}");
+                            break;
+                        }
+
+                        // Alt+letter did not move focus: fall back to the Tabs the monthly runs use.
+                        log($"  Alt+{letter.ToLowerInvariant()} did not move focus - falling back to Tab x{action.FallbackTabs}.");
+                        for (var t = 0; t < action.FallbackTabs; t++)
+                        {
+                            if (!EnsureWindowForeground(parametersWindow, log, "Report Parameters window"))
+                            {
+                                log("  aborting date entry - 'Report Parameters' window lost focus.");
+                                return false;
+                            }
+
+                            if (!NativeInput.SendSpecialKey((ushort)VirtualKeyShort.TAB, sendFailure => log($"  Tab: {sendFailure}")))
+                            {
+                                log("  Tab: SendInput reported a failed send.");
+                            }
+
+                            Thread.Sleep(KeyEntrySettleDelay);
+                        }
+
+                        log($"  focused after the Tab fallback: {DescribeControl(SafeFocusedElement())}");
+                        break;
+                    }
+
                     case ReportParameterKeyActionKind.F12:
                         if (!NativeInput.SendSpecialKey((ushort)VirtualKeyShort.F12, sendFailure => log($"  F12: {sendFailure}")))
                         {
@@ -2852,6 +2896,19 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
         return true;
     }
+
+    /// <summary>Class, id and on-screen rectangle of an element - enough to tell two same-looking date fields apart. Null when nothing is focused.</summary>
+    private static string? FocusSignature(AutomationElement? element)
+    {
+        if (element is null) return null;
+
+        string rect;
+        try { rect = element.BoundingRectangle.ToString(); } catch { rect = string.Empty; }
+        return DescribeControl(element) + "|" + rect;
+    }
+
+    /// <summary>True when the focused control after Alt+letter differs from the one before (a null "after" counts as not moved).</summary>
+    private static bool AltKeyMovedFocus(string? before, string? after) => ReportFocusMove.Moved(before, after);
 
     /// <summary>
     /// ClassName + Name + AutomationId of an element, for the "focused

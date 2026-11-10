@@ -201,7 +201,8 @@ public sealed class ReportsCoordinator
             return new DailyRunSummary(0, steps.Count, null, notFound, false);
         }
 
-        var salesEntry = ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)!;
+        // Macro: <date><ALT>e<date> - Alt+e reaches the End field (Tab only as the driver's fallback).
+        var salesEntry = ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)! with { EndFieldAccelerator = DailySalesPlan.EndFieldAccelerator };
         var saved = 0;
 
         foreach (var step in steps)

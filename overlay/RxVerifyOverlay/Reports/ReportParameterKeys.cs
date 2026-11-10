@@ -62,12 +62,17 @@ public enum ReportParameterKeyActionKind
     ArrowDown,
     F12,
     SelectAll,
-    PasteText
+    PasteText,
+
+    /// <summary>Alt+letter accelerator (Text = the letter) to jump to a labelled field; <see cref="ReportParameterKeyAction.FallbackTabs"/> Tabs are sent instead only if focus did not move.</summary>
+    AltKey
 }
 
 /// <summary>One step of a ReportParameterKeyPlan. Text is set only for TypeText — every other kind carries no data (Value.Text is null for those).</summary>
-public readonly record struct ReportParameterKeyAction(ReportParameterKeyActionKind Kind, string? Text = null)
+public readonly record struct ReportParameterKeyAction(ReportParameterKeyActionKind Kind, string? Text = null, int FallbackTabs = 0)
 {
+    public static ReportParameterKeyAction AltKey(string letter, int fallbackTabs) => new(ReportParameterKeyActionKind.AltKey, letter, fallbackTabs);
+
     public static ReportParameterKeyAction Tab() => new(ReportParameterKeyActionKind.Tab);
 
     public static ReportParameterKeyAction TypeText(string text) => new(ReportParameterKeyActionKind.TypeText, text);
@@ -125,9 +130,18 @@ public static class ReportParameterKeyPlan
             case ReportParameterKind.DateRange:
                 AddLeadingTabs(actions, entry);
                 actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.FormatBegin(begin)));
-                for (var i = 0; i < entry.TabsBetweenDates; i++)
+                if (!string.IsNullOrEmpty(entry.EndFieldAccelerator))
                 {
-                    actions.Add(ReportParameterKeyAction.Tab());
+                    // Daily macro: <date><ALT>e<date> - Alt+e jumps straight to the End
+                    // field; Tabs are only the fallback if focus did not move.
+                    actions.Add(ReportParameterKeyAction.AltKey(entry.EndFieldAccelerator!, entry.TabsBetweenDates));
+                }
+                else
+                {
+                    for (var i = 0; i < entry.TabsBetweenDates; i++)
+                    {
+                        actions.Add(ReportParameterKeyAction.Tab());
+                    }
                 }
                 actions.Add(ReportParameterKeyAction.TypeText(ReportDateKeys.FormatEnd(end)));
                 AddTrailingKeys(actions, entry, includeF12);
@@ -305,4 +319,15 @@ public static class ReadbackEvaluator
     }
 
     private static bool YearsMatch(int a, int b) => a == b || (a % 100) == (b % 100);
+}
+
+/// <summary>Did Alt+letter move keyboard focus? Pure so the fallback decision is unit tested.</summary>
+public static class ReportFocusMove
+{
+    /// <summary>Moved only when a focused control is known afterwards and it differs from the one before.</summary>
+    public static bool Moved(string? before, string? after)
+    {
+        if (string.IsNullOrEmpty(after)) return false;
+        return !string.Equals(before, after, StringComparison.Ordinal);
+    }
 }
