@@ -47,28 +47,6 @@ public enum SaveAsMatchTier
     TitleOnly = 3
 }
 
-/// <summary>Why DetectWithoutFileNameBox accepted a window. Lower is better.</summary>
-public enum SaveAsDetectionReason
-{
-    /// <summary>Pioneer-owned #32770 with a Save/Export title, new since the export click or foreground.</summary>
-    StandardSaveDialog = 1,
-
-    /// <summary>Another process's #32770 with a Save/Export title that is both new and foreground (e.g. a shell-hosted dialog not owned by a Pioneer window).</summary>
-    OtherOwnerStandardSaveDialog = 2,
-
-    /// <summary>A Pioneer-owned window of any class that appeared after the export click and is the foreground window (the modal that grabbed focus).</summary>
-    NewForegroundPioneerWindow = 3,
-
-    /// <summary>A new Pioneer-owned window of any class whose title says Save/Export (WinForms/WPF-hosted Save As).</summary>
-    NewPioneerSaveTitledWindow = 4,
-
-    /// <summary>A new Pioneer-owned #32770 with any other title (localized Save As).</summary>
-    NewPioneerStandardDialog = 5
-}
-
-/// <summary>A window accepted without UIA evidence, and why.</summary>
-public readonly record struct SaveAsDetection(SaveAsCandidate Candidate, SaveAsDetectionReason Reason, bool IsNew, bool IsForeground);
-
 public static class SaveAsDialogMatcher
 {
     /// <summary>The window class of every standard Windows dialog, including the common Save/Open dialogs and MessageBox.</summary>
@@ -134,63 +112,6 @@ public static class SaveAsDialogMatcher
     }
 
     /// <summary>
-    /// Fallback detection that needs NO UI Automation evidence. The UIA path
-    /// (Rank + a File name box found by SaveAsFileNameFieldMatcher) only
-    /// recognises the Windows common dialog; Will's Pioneer build showed a
-    /// modal window that was open (the export Invoke blocked on it) yet was
-    /// never accepted, so the run stalled 20s at "waiting for the Save As
-    /// dialog". Here the window is chosen from what Win32 alone reports:
-    /// it must be visible, not excluded (Pioneer main window / report
-    /// preview), not the "Confirm Save As" prompt, and APPEARED AFTER the
-    /// export click (<paramref name="baselineHandles"/> = every top-level
-    /// handle visible just before the click) or be the foreground window.
-    /// Ordered best first by <see cref="SaveAsDetectionReason"/>, then
-    /// enumeration order. A window of another application is only ever
-    /// accepted as a #32770 with a Save/Export title that is both new and
-    /// the foreground window. The caller still brings the chosen window to
-    /// the foreground and refuses to type unless it really is foreground.
-    /// </summary>
-    public static IReadOnlyList<SaveAsDetection> DetectWithoutFileNameBox(
-        IReadOnlyList<SaveAsCandidate> candidates, int pioneerProcessId, IntPtr foregroundHandle,
-        IReadOnlyCollection<IntPtr>? excludedHandles, IReadOnlyCollection<IntPtr>? baselineHandles)
-    {
-        var found = new List<(SaveAsDetection Detection, int Index)>();
-        for (var index = 0; index < candidates.Count; index++)
-        {
-            var c = candidates[index];
-            if (!c.IsVisible || c.Handle == IntPtr.Zero) continue;
-            if (excludedHandles is not null && excludedHandles.Contains(c.Handle)) continue;
-            if (string.Equals((c.Title ?? string.Empty).Trim(), "Confirm Save As", StringComparison.OrdinalIgnoreCase)) continue;
-
-            var isNew = baselineHandles is not null && !baselineHandles.Contains(c.Handle);
-            var isForeground = foregroundHandle != IntPtr.Zero && c.Handle == foregroundHandle;
-            if (!isNew && !isForeground) continue;
-
-            var pioneer = BelongsToPioneer(c, pioneerProcessId);
-            var dialogClass = IsDialogClass(c.ClassName);
-            var titleSave = TitleLooksLikeSaveDialog(c.Title);
-
-            SaveAsDetectionReason reason;
-            if (pioneer && dialogClass && titleSave) reason = SaveAsDetectionReason.StandardSaveDialog;
-            else if (!pioneer && dialogClass && titleSave && isNew && isForeground) reason = SaveAsDetectionReason.OtherOwnerStandardSaveDialog;
-            else if (!pioneer) continue;
-            else if (isNew && isForeground) reason = SaveAsDetectionReason.NewForegroundPioneerWindow;
-            else if (isNew && titleSave) reason = SaveAsDetectionReason.NewPioneerSaveTitledWindow;
-            else if (isNew && dialogClass) reason = SaveAsDetectionReason.NewPioneerStandardDialog;
-            else continue;
-
-            found.Add((new SaveAsDetection(c, reason, isNew, isForeground), index));
-        }
-
-        return found
-            .OrderBy(x => (int)x.Detection.Reason)
-            .ThenBy(x => x.Detection.IsForeground ? 0 : 1)
-            .ThenBy(x => x.Index)
-            .Select(x => x.Detection)
-            .ToList();
-    }
-
-    /// <summary>
     /// A Pioneer-owned standard dialog other than the Save As dialog
     /// itself that is tied to it: OWNED by the Save As dialog, or titled
     /// "Confirm Save As" (class #32770). An unrelated Pioneer prompt that
@@ -252,6 +173,130 @@ public static class SaveAsDialogMatcher
         }
 
         return false;
+    }
+}
+
+/// <summary>
+/// One control inside a candidate dialog, from Win32 EnumChildWindows
+/// (which lists EVERY descendant, so an Edit inside a ComboBoxEx32 / ComboBox
+/// shows up with that combo as <paramref name="ParentHandle"/>).
+/// <paramref name="Text"/> is only used to recognise the Save button; it is
+/// never logged. <paramref name="ControlId"/> is GetDlgCtrlID.
+/// </summary>
+public readonly record struct SaveAsChild(IntPtr Handle, IntPtr ParentHandle, string ClassName, int ControlId, string Text);
+
+/// <summary>Why a window is NOT a safe typing target. A window is accepted only when this is None.</summary>
+[Flags]
+public enum SaveAsStrictFailure
+{
+    None = 0,
+    NotVisible = 1 << 0,
+    NotPioneer = 1 << 1,
+    Excluded = 1 << 2,
+    ConfirmPrompt = 1 << 3,
+    NotNew = 1 << 4,
+    NotForeground = 1 << 5,
+    NotDialogClass = 1 << 6,
+    NoEditChild = 1 << 7,
+    NoSaveButton = 1 << 8
+}
+
+/// <summary>
+/// The ONLY test that decides a window may receive the file name and the
+/// Save click. Everything is Win32 evidence (no UI Automation):
+/// (a) visible top-level, Pioneer pid or Pioneer owner;
+/// (b) not Pioneer's main window, the report preview or "Confirm Save As";
+/// (c) NEW since the export click AND the foreground window (both);
+/// (d) window class #32770;
+/// (e) children include a file-name Edit (id 1001 / 1152, or any Edit inside a
+///     ComboBox / ComboBoxEx32) AND a Button with id 1 (IDOK) or text "&amp;Save".
+/// A new foreground Pioneer window that fails any of these (a data-entry
+/// form, a message box, an alert) is never typed into.
+/// </summary>
+public static class SaveAsStrictMatcher
+{
+    public static SaveAsStrictFailure CheckWindow(
+        SaveAsCandidate c, int pioneerProcessId, IntPtr foregroundHandle,
+        IReadOnlyCollection<IntPtr>? excludedHandles, IReadOnlyCollection<IntPtr>? baselineHandles)
+    {
+        var failure = SaveAsStrictFailure.None;
+        if (!c.IsVisible || c.Handle == IntPtr.Zero) failure |= SaveAsStrictFailure.NotVisible;
+        if (!SaveAsDialogMatcher.BelongsToPioneer(c, pioneerProcessId)) failure |= SaveAsStrictFailure.NotPioneer;
+        if (excludedHandles is not null && excludedHandles.Contains(c.Handle)) failure |= SaveAsStrictFailure.Excluded;
+        if (string.Equals((c.Title ?? string.Empty).Trim(), "Confirm Save As", StringComparison.OrdinalIgnoreCase)) failure |= SaveAsStrictFailure.ConfirmPrompt;
+        if (baselineHandles is null || baselineHandles.Contains(c.Handle)) failure |= SaveAsStrictFailure.NotNew;
+        if (foregroundHandle == IntPtr.Zero || c.Handle != foregroundHandle) failure |= SaveAsStrictFailure.NotForeground;
+        if (!SaveAsDialogMatcher.IsDialogClass(c.ClassName)) failure |= SaveAsStrictFailure.NotDialogClass;
+        return failure;
+    }
+
+    public static bool IsEditClass(string? className) => string.Equals(className, "Edit", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsComboClass(string? className) =>
+        string.Equals(className, "ComboBox", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(className, "ComboBoxEx32", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The file-name Edit: id 1001 (Vista dialog) first, then id 1152 (legacy dialog), then any Edit whose parent is a ComboBox / ComboBoxEx32. Null when none.</summary>
+    public static SaveAsChild? FindFileNameEdit(IReadOnlyList<SaveAsChild> children)
+    {
+        var edits = children.Where(ch => IsEditClass(ch.ClassName)).ToList();
+        if (edits.Count == 0) return null;
+
+        foreach (var wanted in new[] { 1001, 1152 })
+        {
+            var byId = edits.Where(e => e.ControlId == wanted).Select(e => (SaveAsChild?)e).FirstOrDefault();
+            if (byId is not null) return byId;
+        }
+
+        foreach (var edit in edits)
+        {
+            var parent = children.Where(ch => ch.Handle == edit.ParentHandle && edit.ParentHandle != IntPtr.Zero).Select(ch => (SaveAsChild?)ch).FirstOrDefault();
+            if (parent is not null && IsComboClass(parent.Value.ClassName)) return edit;
+        }
+
+        return null;
+    }
+
+    /// <summary>The Save button: class Button with control id 1 (IDOK), or text "Save" / "&amp;Save".</summary>
+    public static SaveAsChild? FindSaveButton(IReadOnlyList<SaveAsChild> children)
+    {
+        foreach (var ch in children)
+        {
+            if (!string.Equals(ch.ClassName, "Button", StringComparison.OrdinalIgnoreCase)) continue;
+            if (ch.ControlId == 1) return ch;
+            var text = (ch.Text ?? string.Empty).Replace("&", string.Empty).Trim();
+            if (string.Equals(text, "Save", StringComparison.OrdinalIgnoreCase)) return ch;
+        }
+
+        return null;
+    }
+
+    public static SaveAsStrictFailure CheckChildren(IReadOnlyList<SaveAsChild> children)
+    {
+        var failure = SaveAsStrictFailure.None;
+        if (FindFileNameEdit(children) is null) failure |= SaveAsStrictFailure.NoEditChild;
+        if (FindSaveButton(children) is null) failure |= SaveAsStrictFailure.NoSaveButton;
+        return failure;
+    }
+
+    /// <summary>"Rules a-d minus the foreground test" are all satisfied: worth looking inside (and worth bringing to the foreground).</summary>
+    public static bool IsWorthInspecting(SaveAsStrictFailure windowCheck) =>
+        (windowCheck & ~SaveAsStrictFailure.NotForeground) == SaveAsStrictFailure.None;
+
+    /// <summary>Pioneer-related windows the inventory should describe: visible, Pioneer pid/owner, not excluded, and new since the click or foreground.</summary>
+    public static IReadOnlyList<(SaveAsCandidate Candidate, bool IsNew, bool IsForeground)> InventoryWindows(
+        IReadOnlyList<SaveAsCandidate> all, int pioneerProcessId, IntPtr foregroundHandle,
+        IReadOnlyCollection<IntPtr>? excludedHandles, IReadOnlyCollection<IntPtr>? baselineHandles)
+    {
+        return all
+            .Where(c => c.IsVisible && c.Handle != IntPtr.Zero
+                        && SaveAsDialogMatcher.BelongsToPioneer(c, pioneerProcessId)
+                        && (excludedHandles is null || !excludedHandles.Contains(c.Handle)))
+            .Select(c => (Candidate: c,
+                          IsNew: baselineHandles is not null && !baselineHandles.Contains(c.Handle),
+                          IsForeground: foregroundHandle != IntPtr.Zero && c.Handle == foregroundHandle))
+            .Where(x => x.IsNew || x.IsForeground)
+            .ToList();
     }
 }
 
@@ -408,39 +453,6 @@ public static class SaveAsPathBuilder
     }
 }
 
-public enum SaveAsKeyKind
-{
-    SelectAll,
-    TypeText,
-    AltS,
-    AltF4
-}
-
-public readonly record struct SaveAsKeyStep(SaveAsKeyKind Kind, string? Text = null);
-
-/// <summary>
-/// Will's macro, as data (HQ 2026-11-10, verbatim: "type a filename
-/// (Date_Filename) and then save it (Alt+s) and close the report (alt+f4)").
-/// The driver replays these keys only while the target window is the OS
-/// foreground window.
-/// </summary>
-public static class SaveAsKeyPlan
-{
-    /// <summary>Select any default name, type the full path, press Alt+S.</summary>
-    public static IReadOnlyList<SaveAsKeyStep> BuildSave(string fullPath) => new[]
-    {
-        new SaveAsKeyStep(SaveAsKeyKind.SelectAll),
-        new SaveAsKeyStep(SaveAsKeyKind.TypeText, fullPath),
-        new SaveAsKeyStep(SaveAsKeyKind.AltS)
-    };
-
-    /// <summary>Close the report preview.</summary>
-    public static IReadOnlyList<SaveAsKeyStep> BuildClosePreview() => new[]
-    {
-        new SaveAsKeyStep(SaveAsKeyKind.AltF4)
-    };
-}
-
 public enum SaveCompletionState
 {
     /// <summary>Save As dialog still showing.</summary>
@@ -490,11 +502,6 @@ public static class SaveAsCandidateLog
         + $"class='{candidate.ClassName}' visible={(candidate.IsVisible ? "yes" : "no")} pioneer={(SaveAsDialogMatcher.BelongsToPioneer(candidate, pioneerProcessId) ? "yes" : "no")} "
         + $"title_len={(candidate.Title ?? string.Empty).Length} save_like_title={(SaveAsDialogMatcher.TitleLooksLikeSaveDialog(candidate.Title) ? "yes" : "no")}";
 
-    /// <summary>One line describing an accepted window and the reason - no title.</summary>
-    public static string FormatDetection(SaveAsDetection detection, int pioneerProcessId) =>
-        $"{Prefix}dialog accepted by window evidence: reason={detection.Reason} new_since_click={(detection.IsNew ? "yes" : "no")} foreground={(detection.IsForeground ? "yes" : "no")} "
-        + $"handle=0x{detection.Candidate.Handle.ToInt64():X} pid={detection.Candidate.ProcessId} ownerPid={detection.Candidate.OwnerProcessId} class='{detection.Candidate.ClassName}'";
-
     /// <summary>All candidate lines, Pioneer-related first (they are what the next round needs), capped so a crowded desktop cannot flood the log.</summary>
     public static IReadOnlyList<string> FormatAll(IReadOnlyList<SaveAsCandidate> candidates, int pioneerProcessId, int maxLines)
     {
@@ -503,6 +510,26 @@ public static class SaveAsCandidateLog
             .Take(maxLines)
             .Select(c => Format(c, pioneerProcessId))
             .ToList();
+    }
+
+    /// <summary>One new/foreground Pioneer window for the "not recognised" inventory: class, pid, ownerPid, flags and size - no title text.</summary>
+    public static string FormatInventoryWindow(SaveAsCandidate c, bool isNew, bool isForeground, int width, int height, SaveAsStrictFailure failure) =>
+        $"{Prefix}  window handle=0x{c.Handle.ToInt64():X} class='{c.ClassName}' pid={c.ProcessId} ownerPid={c.OwnerProcessId} new={(isNew ? "yes" : "no")} foreground={(isForeground ? "yes" : "no")} size={width}x{height} title_len={(c.Title ?? string.Empty).Length} rejected_because={DescribeFailure(failure)}";
+
+    /// <summary>One child control: class and control id only - no text.</summary>
+    public static string FormatInventoryChild(SaveAsChild child) =>
+        $"{Prefix}    control class='{child.ClassName}' id={child.ControlId}";
+
+    public static string DescribeFailure(SaveAsStrictFailure failure)
+    {
+        if (failure == SaveAsStrictFailure.None) return "nothing";
+        var names = new List<string>();
+        foreach (SaveAsStrictFailure flag in Enum.GetValues(typeof(SaveAsStrictFailure)))
+        {
+            if (flag != SaveAsStrictFailure.None && failure.HasFlag(flag)) names.Add(flag.ToString());
+        }
+
+        return string.Join("+", names);
     }
 
     /// <summary>The periodic "still waiting" line: how many windows are new since the export click and how many of those are Pioneer's, plus the foreground window's class/pid - no titles.</summary>
