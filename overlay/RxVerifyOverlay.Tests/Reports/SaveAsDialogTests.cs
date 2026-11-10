@@ -533,7 +533,7 @@ public class SaveAsDialogTests
             var dialog = Window("anything", handle: 5);
 
             Assert.Equal(SaveAsStrictFailure.None, Check(dialog, 5, Baseline(1, 2), 1, 2));
-            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(RealSaveDialogChildren()));
+            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(RealSaveDialogChildren(), "Save As"));
         }
 
         // The review's blocker: a new foreground Pioneer window that is a form / alert / message box.
@@ -544,7 +544,9 @@ public class SaveAsDialogTests
             var children = new List<SaveAsChild> { Child(1, "Static", 65535, "Something happened"), Child(2, "Button", 2, "OK") };
 
             Assert.Equal(SaveAsStrictFailure.None, Check(messageBox, 5, Baseline(1)));
-            Assert.Equal(SaveAsStrictFailure.NoEditChild | SaveAsStrictFailure.NoSaveButton, SaveAsStrictMatcher.CheckChildren(children));
+            Assert.Equal(
+                SaveAsStrictFailure.NoEditChild | SaveAsStrictFailure.NoSaveButton | SaveAsStrictFailure.NoSaveEvidence,
+                SaveAsStrictMatcher.CheckChildren(children, "Notice"));
         }
 
         [Fact]
@@ -552,7 +554,7 @@ public class SaveAsDialogTests
         {
             var children = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 2, "Cancel") };
 
-            Assert.Equal(SaveAsStrictFailure.NoSaveButton, SaveAsStrictMatcher.CheckChildren(children));
+            Assert.Equal(SaveAsStrictFailure.NoSaveButton, SaveAsStrictMatcher.CheckChildren(children, "Save As"));
         }
 
         [Fact]
@@ -560,7 +562,58 @@ public class SaveAsDialogTests
         {
             var children = new List<SaveAsChild> { Child(1, "Button", 1, "OK"), Child(2, "Edit", 5000) };
 
-            Assert.Equal(SaveAsStrictFailure.NoEditChild, SaveAsStrictMatcher.CheckChildren(children));
+            Assert.True(SaveAsStrictMatcher.CheckChildren(children, "Save As").HasFlag(SaveAsStrictFailure.NoEditChild));
+        }
+
+        // The re-review's blocker: a Pioneer input dialog (#32770, default Edit id 1001, OK = id 1).
+        [Fact]
+        public void AnInputDialogWithEdit1001AndAnOkButtonIsRejected()
+        {
+            var inputDialog = Window("Enter Quantity", handle: 5);
+            var children = new List<SaveAsChild>
+            {
+                Child(1, "Static", 65535, "Quantity:"),
+                Child(2, "Edit", 1001),
+                Child(3, "Button", 1, "OK"),
+                Child(4, "Button", 2, "Cancel")
+            };
+
+            // It is new + foreground + Pioneer + #32770 ...
+            Assert.Equal(SaveAsStrictFailure.None, Check(inputDialog, 5, Baseline(1)));
+            // ... but it has no Save button and no Save/Export title or shell child.
+            var failure = SaveAsStrictMatcher.CheckChildren(children, inputDialog.Title);
+            Assert.NotEqual(SaveAsStrictFailure.None, failure);
+            Assert.True(failure.HasFlag(SaveAsStrictFailure.NoSaveButton));
+            Assert.True(failure.HasFlag(SaveAsStrictFailure.NoSaveEvidence));
+        }
+
+        [Fact]
+        public void AnInputDialogWithASaveButtonButNoSaveTitleOrShellChildIsStillRejected()
+        {
+            var children = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "&Save") };
+
+            Assert.Equal(SaveAsStrictFailure.NoSaveEvidence, SaveAsStrictMatcher.CheckChildren(children, "Enter Quantity"));
+        }
+
+        [Theory]
+        [InlineData("Save As")]
+        [InlineData("Export to PDF")]
+        [InlineData("SAVE")]
+        public void ASaveOrExportTitleSuppliesTheSaveEvidence(string title)
+        {
+            var children = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "&Save") };
+
+            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(children, title));
+        }
+
+        [Theory]
+        [InlineData("DUIViewWndClassName")]
+        [InlineData("SHELLDLL_DefView")]
+        public void AFileDialogShellChildSuppliesTheSaveEvidenceEvenWithALocalizedTitle(string shellClass)
+        {
+            var children = new List<SaveAsChild> { Child(1, shellClass, 0), Child(2, "Edit", 1001), Child(3, "Button", 1, "Save") };
+
+            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(children, "Guardar como"));
         }
 
         [Fact]
@@ -633,11 +686,10 @@ public class SaveAsDialogTests
         }
 
         [Theory]
-        [InlineData(1, "")]
         [InlineData(5, "&Save")]
         [InlineData(5, "Save")]
         [InlineData(5, "SAVE")]
-        public void SaveButtonIsIdOneOrTheSaveText(int id, string text)
+        public void SaveButtonIsRecognisedByItsSaveText(int id, string text)
         {
             var children = new List<SaveAsChild> { Child(1, "Button", 2, "Cancel"), Child(2, "Button", id, text) };
 
@@ -645,9 +697,18 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void ANonButtonControlWithIdOneIsNotTheSaveButton()
+        public void ANonButtonControlWithSaveTextIsNotTheSaveButton()
         {
             Assert.Null(SaveAsStrictMatcher.FindSaveButton(new List<SaveAsChild> { Child(1, "Static", 1, "Save") }));
+        }
+
+        [Theory]
+        [InlineData("OK")]
+        [InlineData("")]
+        [InlineData("Save and Close")]
+        public void ControlIdOneAloneIsNotTheSaveButton(string text)
+        {
+            Assert.Null(SaveAsStrictMatcher.FindSaveButton(new List<SaveAsChild> { Child(1, "Button", 1, text) }));
         }
 
         [Fact]
@@ -686,6 +747,11 @@ public class SaveAsDialogTests
         public bool Visible = true;
         public int Pid = PioneerPid;
         public string Class = Dlg;
+        public string EditClass = "Edit";
+        public string ButtonClass = "Button";
+        public bool EditIsChild = true;
+        public bool ButtonIsChild = true;
+        public bool EditExists = true;
         public IntPtr Foreground = new(100);
         public bool SetTextWorks = true;
         public string? TextAfterSet;           // null = echo what was set
@@ -695,10 +761,15 @@ public class SaveAsDialogTests
         public bool AltF4Closes = false;
         private string _text = string.Empty;
 
-        public bool IsWindow(IntPtr handle) { Calls.Add("IsWindow"); return WindowExists; }
+        public bool IsWindow(IntPtr handle)
+        {
+            Calls.Add("IsWindow");
+            return handle == new IntPtr(101) ? EditExists && WindowExists : WindowExists;
+        }
         public bool IsVisible(IntPtr handle) => Visible;
         public int ProcessIdOf(IntPtr handle) => Pid;
-        public string ClassOf(IntPtr handle) => Class;
+        public string ClassOf(IntPtr handle) => handle.ToInt64() switch { 101 => EditClass, 102 => ButtonClass, _ => Class };
+        public bool IsChildOf(IntPtr parent, IntPtr child) => child.ToInt64() switch { 101 => EditIsChild, 102 => ButtonIsChild, _ => false };
         public bool IsForeground(IntPtr handle) => Foreground == handle;
         public bool SetText(IntPtr edit, string text) { Calls.Add("SetText"); _text = text; return SetTextWorks; }
         public string? GetText(IntPtr edit) { Calls.Add("GetText"); return TextAfterSet ?? _text; }
@@ -811,6 +882,31 @@ public class SaveAsDialogTests
             Assert.DoesNotContain("Click", host.Calls);
             Assert.DoesNotContain("WM_CLOSE", host.Calls);
             Assert.DoesNotContain("Alt+F4", host.Calls);
+        }
+
+        [Theory]
+        [InlineData("editNotChild")]
+        [InlineData("buttonNotChild")]
+        [InlineData("editWrongClass")]
+        [InlineData("buttonWrongClass")]
+        [InlineData("editGone")]
+        public void AnEditOrSaveHandleThatIsNoLongerTheRightChildGetsNothing(string change)
+        {
+            var host = new FakeHost();
+            switch (change)
+            {
+                case "editNotChild": host.EditIsChild = false; break;
+                case "buttonNotChild": host.ButtonIsChild = false; break;
+                case "editWrongClass": host.EditClass = "Static"; break;
+                case "buttonWrongClass": host.ButtonClass = "Edit"; break;
+                case "editGone": host.EditExists = false; break;
+            }
+
+            Assert.Equal(SaveAsEntryResult.StaleWindow, Run(host));
+
+            Assert.DoesNotContain("SetText", host.Calls);
+            Assert.DoesNotContain("Click", host.Calls);
+            Assert.DoesNotContain("WM_CLOSE", host.Calls);
         }
 
         [Fact]

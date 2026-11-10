@@ -335,6 +335,9 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     [DllImport("user32.dll")]
     private static extern IntPtr GetParent(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
     private const uint BM_CLICK = 0x00F5;
 
     private const uint GW_OWNER = 4;
@@ -3735,7 +3738,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 if (!SaveAsStrictMatcher.IsWorthInspecting(windowCheck)) continue;
 
                 var children = EnumerateChildControls(candidate.Handle);
-                if (SaveAsStrictMatcher.CheckChildren(children) != SaveAsStrictFailure.None) continue;
+                if (SaveAsStrictMatcher.CheckChildren(children, candidate.Title) != SaveAsStrictFailure.None) continue;
 
                 if (windowCheck.HasFlag(SaveAsStrictFailure.NotForeground))
                 {
@@ -3832,7 +3835,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
                 var children = EnumerateChildControls(candidate.Handle);
                 var failure = SaveAsStrictMatcher.CheckWindow(candidate, _pioneerProcessId, foreground, excluded, _exportBaselineHandles)
-                              | SaveAsStrictMatcher.CheckChildren(children);
+                              | SaveAsStrictMatcher.CheckChildren(children, candidate.Title);
                 log(SaveAsCandidateLog.FormatInventoryWindow(candidate, isNew, isForeground, width, height, failure));
                 foreach (var child in children.Take(40))
                 {
@@ -3852,6 +3855,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         public bool IsWindow(IntPtr handle) => PioneerReportDriver.IsWindow(handle);
 
         public bool IsVisible(IntPtr handle) => IsWindowVisible(handle);
+
+        public bool IsChildOf(IntPtr parent, IntPtr child) => IsChild(parent, child);
 
         public int ProcessIdOf(IntPtr handle)
         {

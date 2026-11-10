@@ -198,7 +198,10 @@ public enum SaveAsStrictFailure
     NotForeground = 1 << 5,
     NotDialogClass = 1 << 6,
     NoEditChild = 1 << 7,
-    NoSaveButton = 1 << 8
+    NoSaveButton = 1 << 8,
+
+    /// <summary>Neither a Save/Export title nor a file-dialog shell child (DUIViewWndClassName / SHELLDLL_DefView): an input form with an Edit and an OK button.</summary>
+    NoSaveEvidence = 1 << 9
 }
 
 /// <summary>
@@ -209,7 +212,11 @@ public enum SaveAsStrictFailure
 /// (c) NEW since the export click AND the foreground window (both);
 /// (d) window class #32770;
 /// (e) children include a file-name Edit (id 1001 / 1152, or any Edit inside a
-///     ComboBox / ComboBoxEx32) AND a Button with id 1 (IDOK) or text "&amp;Save".
+///     ComboBox / ComboBoxEx32) AND a Button whose text is "&amp;Save" / "Save"
+///     (id 1 alone is NOT enough: an input dialog's OK button is id 1);
+/// (f) the title contains Save or Export, OR a file-dialog shell child exists
+///     (DUIViewWndClassName or SHELLDLL_DefView). Title and button text are
+///     read only for this decision and are never logged.
 /// A new foreground Pioneer window that fails any of these (a data-entry
 /// form, a message box, an alert) is never typed into.
 /// </summary>
@@ -257,13 +264,12 @@ public static class SaveAsStrictMatcher
         return null;
     }
 
-    /// <summary>The Save button: class Button with control id 1 (IDOK), or text "Save" / "&amp;Save".</summary>
+    /// <summary>The Save button: class Button whose text is "Save" / "&amp;Save". Control id 1 alone is not enough (every dialog's OK button is id 1).</summary>
     public static SaveAsChild? FindSaveButton(IReadOnlyList<SaveAsChild> children)
     {
         foreach (var ch in children)
         {
             if (!string.Equals(ch.ClassName, "Button", StringComparison.OrdinalIgnoreCase)) continue;
-            if (ch.ControlId == 1) return ch;
             var text = (ch.Text ?? string.Empty).Replace("&", string.Empty).Trim();
             if (string.Equals(text, "Save", StringComparison.OrdinalIgnoreCase)) return ch;
         }
@@ -271,11 +277,17 @@ public static class SaveAsStrictMatcher
         return null;
     }
 
-    public static SaveAsStrictFailure CheckChildren(IReadOnlyList<SaveAsChild> children)
+    public static bool HasFileDialogShellChild(IReadOnlyList<SaveAsChild> children) =>
+        children.Any(ch => string.Equals(ch.ClassName, "DUIViewWndClassName", StringComparison.OrdinalIgnoreCase)
+                           || string.Equals(ch.ClassName, "SHELLDLL_DefView", StringComparison.OrdinalIgnoreCase));
+
+    /// <param name="windowTitle">The dialog's title, used only to look for Save / Export; never logged.</param>
+    public static SaveAsStrictFailure CheckChildren(IReadOnlyList<SaveAsChild> children, string? windowTitle)
     {
         var failure = SaveAsStrictFailure.None;
         if (FindFileNameEdit(children) is null) failure |= SaveAsStrictFailure.NoEditChild;
         if (FindSaveButton(children) is null) failure |= SaveAsStrictFailure.NoSaveButton;
+        if (!SaveAsDialogMatcher.TitleLooksLikeSaveDialog(windowTitle) && !HasFileDialogShellChild(children)) failure |= SaveAsStrictFailure.NoSaveEvidence;
         return failure;
     }
 

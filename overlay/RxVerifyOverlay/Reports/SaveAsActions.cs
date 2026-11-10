@@ -15,6 +15,9 @@ public interface ISaveAsNativeHost
     bool IsVisible(IntPtr handle);
     int ProcessIdOf(IntPtr handle);
     string ClassOf(IntPtr handle);
+
+    /// <summary>True when <paramref name="child"/> is a child (any depth) of <paramref name="parent"/> (user32 IsChild).</summary>
+    bool IsChildOf(IntPtr parent, IntPtr child);
     bool IsForeground(IntPtr handle);
 
     /// <summary>WM_SETTEXT to an Edit control. False when the message could not be delivered.</summary>
@@ -74,6 +77,16 @@ public static class SaveAsActions
             || !host.IsForeground(dialog.Handle))
         {
             log("the dialog changed after it was accepted (closed, replaced or lost the foreground) - sending nothing.");
+            return SaveAsEntryResult.StaleWindow;
+        }
+
+        // The Edit and Save handles must still be live children of this dialog with the classes they were found with.
+        if (!host.IsWindow(edit) || !host.IsChildOf(dialog.Handle, edit)
+            || !string.Equals(host.ClassOf(edit), "Edit", StringComparison.OrdinalIgnoreCase)
+            || !host.IsWindow(saveButton) || !host.IsChildOf(dialog.Handle, saveButton)
+            || !string.Equals(host.ClassOf(saveButton), "Button", StringComparison.OrdinalIgnoreCase))
+        {
+            log("the File name box or Save button is no longer a child of the dialog - sending nothing.");
             return SaveAsEntryResult.StaleWindow;
         }
 
