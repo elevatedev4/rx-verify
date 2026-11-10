@@ -17,6 +17,12 @@ public sealed class FakeReportDriver : IPioneerReportDriver
 {
     public bool MainWindowFound { get; set; } = true;
     public List<string> Calls { get; } = new();
+
+    /// <summary>Every item handed to a Run*/TestDateEntry call, in order.</summary>
+    public List<ReportRunItem> Items { get; } = new();
+
+    /// <summary>Output file names (not keys) that should come back Failed.</summary>
+    public Dictionary<string, ReportRunResult> ResultsByFileName { get; } = new();
     public Dictionary<string, ReportRunResult> Results { get; } = new();
 
     /// <summary>Report key(s) that should throw OperationCanceledException instead of returning a result.</summary>
@@ -43,6 +49,12 @@ public sealed class FakeReportDriver : IPioneerReportDriver
     private Task<ReportRunResult> RunAny(ReportRunItem item, CancellationToken ct)
     {
         Calls.Add(item.Entry.Key);
+        Items.Add(item);
+
+        if (ResultsByFileName.TryGetValue(System.IO.Path.GetFileName(item.OutputFilePath), out var byFile))
+        {
+            return Task.FromResult(byFile);
+        }
 
         if (ThrowCancelledFor.Contains(item.Entry.Key))
         {

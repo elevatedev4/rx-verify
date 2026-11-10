@@ -182,6 +182,7 @@ public sealed partial class ReportsWindow : Window
         }
 
         RunButton.IsEnabled = false;
+        RunDailyButton.IsEnabled = false;
         TestDateEntryButton.IsEnabled = false;
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
@@ -193,6 +194,7 @@ public sealed partial class ReportsWindow : Window
         finally
         {
             RunButton.IsEnabled = true;
+            RunDailyButton.IsEnabled = true;
             TestDateEntryButton.IsEnabled = true;
             StopButton.IsEnabled = false;
             _runCts?.Dispose();
@@ -247,6 +249,7 @@ public sealed partial class ReportsWindow : Window
 
         TestDateEntryButton.IsEnabled = false;
         RunButton.IsEnabled = false;
+        RunDailyButton.IsEnabled = false;
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
 
@@ -258,6 +261,84 @@ public sealed partial class ReportsWindow : Window
         {
             TestDateEntryButton.IsEnabled = true;
             RunButton.IsEnabled = true;
+            RunDailyButton.IsEnabled = true;
+            StopButton.IsEnabled = false;
+            _runCts?.Dispose();
+            _runCts = null;
+        }
+    }
+
+    /// <summary>
+    /// "Run daily": DailySalesPlan.Build over the Begin..End range (macro
+    /// order), run by ReportsCoordinator.RunDailyAsync. Stops at the first
+    /// failed day; Stop cancels between steps.
+    /// </summary>
+    private async void OnRunDailyClick(object sender, RoutedEventArgs e)
+    {
+        var begin = BeginDatePicker.SelectedDate;
+        var end = EndDatePicker.SelectedDate;
+        if (begin is null || end is null)
+        {
+            AppendLog("Pick a Begin and End date first.");
+            return;
+        }
+
+        if (!DailySalesPlan.TryValidateRange(begin.Value, end.Value, out var rangeProblem))
+        {
+            AppendLog(rangeProblem ?? "Invalid date range.");
+            return;
+        }
+
+        var outputFolder = OutputFolderTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(outputFolder))
+        {
+            AppendLog("Pick an output folder first.");
+            return;
+        }
+
+        var includeSales = DailySalesCheckBox.IsChecked == true;
+        var includePos = DailyPosCheckBox.IsChecked == true;
+        if (!includeSales && !includePos)
+        {
+            AppendLog("Tick Sales Summary first.");
+            return;
+        }
+
+        var steps = DailySalesPlan.Build(begin.Value, end.Value, outputFolder, includePos, includeSales);
+        var refusal = DailySalesPlan.CheckRunnable(steps);
+        if (refusal is not null)
+        {
+            AppendLog(refusal);
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(outputFolder);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Couldn't create the output folder: {ex.Message}");
+            return;
+        }
+
+        AppendLog($"Daily run: {steps.Count} report(s) over {(end.Value.Date - begin.Value.Date).Days + 1} day(s). Stops at the first failure.");
+
+        RunButton.IsEnabled = false;
+        RunDailyButton.IsEnabled = false;
+        TestDateEntryButton.IsEnabled = false;
+        StopButton.IsEnabled = true;
+        _runCts = new CancellationTokenSource();
+
+        try
+        {
+            await _coordinator.RunDailyAsync(steps, AppendLog, _runCts.Token);
+        }
+        finally
+        {
+            RunButton.IsEnabled = true;
+            RunDailyButton.IsEnabled = true;
+            TestDateEntryButton.IsEnabled = true;
             StopButton.IsEnabled = false;
             _runCts?.Dispose();
             _runCts = null;

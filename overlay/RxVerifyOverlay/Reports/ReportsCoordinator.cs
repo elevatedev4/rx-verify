@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using RxVerifyOverlay.Update;
@@ -153,6 +154,97 @@ public sealed class ReportsCoordinator
         }
 
         return outcomes;
+    }
+
+    /// <summary>Result of <see cref="RunDailyAsync"/>.</summary>
+    public sealed record DailyRunSummary(int Saved, int Total, DailyReportStep? FailedStep, string? FailureReason, bool Stopped);
+
+    /// <summary>
+    /// "Daily Sales + POS": runs each step of DailySalesPlan.Build in order
+    /// (macro order: all POS days, then all Sales days). A Sales step is
+    /// the existing, verified RunFinancialReport flow for the Sales Summary
+    /// row with Begin = End = that day and the macro's file name
+    /// (Sales_mm-dd-yy); Save As is the strict Win32 path, and a duplicate
+    /// of our exact target is overwritten. The FIRST failure stops the run:
+    /// no later day is attempted (so no key goes to a screen that may still
+    /// have a stray window on top), and the log names the day and report.
+    /// A run that contains a step that is not available (POS) is refused
+    /// before FindMainWindow, so nothing at all is sent to Pioneer.
+    /// </summary>
+    public async Task<DailyRunSummary> RunDailyAsync(IReadOnlyList<DailyReportStep> steps, Action<string> log, CancellationToken ct)
+    {
+        var refusal = DailySalesPlan.CheckRunnable(steps);
+        if (refusal is not null)
+        {
+            _appLog(refusal);
+            log(refusal);
+            return new DailyRunSummary(0, steps.Count, null, refusal, false);
+        }
+
+        var runLogFileName = BuildRunLogFileName(DateTime.Now);
+        var runLogFolder = steps[0].OutputFolder;
+
+        void WriteLine(string text)
+        {
+            log(text);
+            _appLog(text);
+            _runLog(runLogFolder, runLogFileName, text);
+        }
+
+        WriteLine(BuildInfo.Summary);
+        WriteLine($"Daily run: {steps.Count} report(s), {DailySalesPlan.DateText(steps[0].Day)} onward, saving to the chosen folder.");
+
+        if (!_driver.FindMainWindow(WriteLine, ct))
+        {
+            const string notFound = "Could not find the main PioneerRx window - is Pioneer open?";
+            WriteLine(notFound);
+            return new DailyRunSummary(0, steps.Count, null, notFound, false);
+        }
+
+        var salesEntry = ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)!;
+        var saved = 0;
+
+        foreach (var step in steps)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                WriteLine($"Stopped before {DailySalesPlan.DescribeStep(step)} - the rest was not run.");
+                return new DailyRunSummary(saved, steps.Count, null, null, true);
+            }
+
+            WriteLine($"{DailySalesPlan.DescribeStep(step)}: running...");
+
+            ReportRunResult result;
+            try
+            {
+                var item = new ReportRunItem(salesEntry, step.Day, step.Day, step.OutputFolder, step.OutputFilePath);
+                result = await _driver.RunFinancialReport(item, WriteLine, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                WriteLine($"{DailySalesPlan.DescribeStep(step)}: stopped - the rest was not run.");
+                return new DailyRunSummary(saved, steps.Count, null, null, true);
+            }
+            catch (Exception ex)
+            {
+                result = ReportRunResult.Failed(ex.Message, TimeSpan.Zero);
+            }
+
+            if (result.Status == ReportRunStatus.Saved)
+            {
+                saved++;
+                WriteLine($"{DailySalesPlan.DescribeStep(step)}: OK - saved {Path.GetFileName(step.OutputFilePath)} ({result.Elapsed.TotalSeconds:0.0}s).");
+                continue;
+            }
+
+            var reason = result.FailureReason ?? "unknown failure";
+            WriteLine($"{DailySalesPlan.DescribeStep(step)}: FAILED - {reason}");
+            WriteLine($"Daily run stopped at {DailySalesPlan.DisplayName(step.Kind)} for {DailySalesPlan.DateText(step.Day)}: {saved} of {steps.Count} saved; the remaining {steps.Count - saved - 1} were not run.");
+            return new DailyRunSummary(saved, steps.Count, step, reason, false);
+        }
+
+        WriteLine($"Daily run finished: {saved} of {steps.Count} saved.");
+        return new DailyRunSummary(saved, steps.Count, null, null, false);
     }
 
     /// <summary>

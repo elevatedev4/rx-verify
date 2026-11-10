@@ -28,6 +28,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="150" />
         </Grid.RowDefinitions>
 
@@ -95,8 +96,23 @@
             <Button x:Name="StopButton" Content="Stop" Padding="14,5" Click="OnStopClick" IsEnabled="False" />
         </StackPanel>
 
+        <!--
+            "Daily Sales + POS" (Will 2026-11-10): runs the chosen reports
+            once for EACH day from Begin to End (defaults to last complete
+            month), saved as Sales_mm-dd-yy / POS_mm-dd-yy in the folder
+            above. Stops at the first failed day. POS is listed but
+            disabled until its Pioneer screen path is confirmed (see
+            DailySalesPlan.PosNavigationEnabled).
+        -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,10">
+            <TextBlock Text="Daily, each day in the range:" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <CheckBox x:Name="DailySalesCheckBox" Content="Sales Summary" IsChecked="True" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <CheckBox x:Name="DailyPosCheckBox" Content="POS Summary (not available yet)" IsEnabled="False" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <Button x:Name="RunDailyButton" Content="Run daily" Padding="14,5" Click="OnRunDailyClick" />
+        </StackPanel>
+
         <!-- Scrolling log -->
-        <Border Grid.Row="4" BorderBrush="#FFD5D5D5" BorderThickness="1" CornerRadius="3">
+        <Border Grid.Row="5" BorderBrush="#FFD5D5D5" BorderThickness="1" CornerRadius="3">
             <TextBox x:Name="LogTextBox" IsReadOnly="True" TextWrapping="NoWrap"
                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                      FontFamily="Consolas" FontSize="11" Background="#FFFAFAFA" BorderThickness="0" />
