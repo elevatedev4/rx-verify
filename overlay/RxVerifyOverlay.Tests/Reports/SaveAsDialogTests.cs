@@ -405,7 +405,7 @@ public class SaveAsDialogTests
     public class LogTests
     {
         [Fact]
-        public void LineCarriesPrefixPidOwnerClassAndTitle()
+        public void LineCarriesPrefixPidOwnerAndClassButNoTitleText()
         {
             var line = SaveAsCandidateLog.Format(Window("Save As", handle: 0x2A, owner: 0x10, ownerPid: PioneerPid), PioneerPid);
 
@@ -414,40 +414,28 @@ public class SaveAsDialogTests
             Assert.Contains($"pid={PioneerPid}", line);
             Assert.Contains("owner=0x10", line);
             Assert.Contains("class='#32770'", line);
-            Assert.Contains("title='Save As'", line);
             Assert.Contains("pioneer=yes", line);
-        }
-
-        [Fact]
-        public void OtherAppTitlesAreNeverLogged()
-        {
-            var line = SaveAsCandidateLog.Format(Window("Inbox - patient@example.test - Mail", pid: OtherPid), PioneerPid);
-
-            Assert.DoesNotContain("Inbox", line);
-            Assert.DoesNotContain("patient", line);
-            Assert.Contains("title='[other-app]'", line);
-            Assert.Contains("title_len=", line);
-            Assert.Contains("pioneer=no", line);
-        }
-
-        [Fact]
-        public void PioneerScreenTitlesOutsideTheSaveVocabularyAreRedacted()
-        {
-            var line = SaveAsCandidateLog.Format(Window("Rx 1234567 - Jane Doe", className: "WindowsForms10.Window.8.app.0"), PioneerPid);
-
-            Assert.DoesNotContain("Jane", line);
-            Assert.Contains("title='[redacted]'", line);
+            Assert.Contains("title_len=7", line);
+            Assert.Contains("save_like_title=yes", line);
+            Assert.DoesNotContain("title='", line);
+            Assert.DoesNotContain("Save As", line);
         }
 
         [Theory]
-        [InlineData("Open Rx 123 - DOE, JOHN")]
-        [InlineData("Print Label - DOE, JANE")]
-        public void PioneerTitlesWithOpenOrPrintAreRedacted(string title)
+        [InlineData("Inbox - patient@example.test - Mail", OtherPid)]
+        [InlineData("Rx 1234567 - Jane Doe", PioneerPid)]
+        [InlineData("Open Rx 123 - DOE, JOHN", PioneerPid)]
+        [InlineData("Print Label - DOE, JANE", PioneerPid)]
+        public void NoTitleTextIsEverLogged(string title, int pid)
         {
-            var line = SaveAsCandidateLog.Format(Window(title, className: "WindowsForms10.Window.8.app.0"), PioneerPid);
+            var line = SaveAsCandidateLog.Format(Window(title, className: "WindowsForms10.Window.8.app.0", pid: pid), PioneerPid);
 
-            Assert.DoesNotContain("DOE", line);
-            Assert.Contains("title='[redacted]'", line);
+            foreach (var word in new[] { "Inbox", "patient", "Jane", "Doe", "DOE", "JOHN", "JANE", "1234567", "Label", "Mail" })
+            {
+                Assert.DoesNotContain(word, line);
+            }
+
+            Assert.Contains($"title_len={title.Length}", line);
         }
 
         [Fact]
@@ -464,6 +452,230 @@ public class SaveAsDialogTests
 
             Assert.Equal(2, lines.Count);
             Assert.Contains("handle=0x3", lines[0]);
+        }
+
+        [Fact]
+        public void DetectionLineNamesTheReasonButNotTheTitle()
+        {
+            var detection = new SaveAsDetection(Window("Save As for Jane Doe", handle: 0x30), SaveAsDetectionReason.NewForegroundPioneerWindow, true, true);
+
+            var line = SaveAsCandidateLog.FormatDetection(detection, PioneerPid);
+
+            Assert.Contains("reason=NewForegroundPioneerWindow", line);
+            Assert.Contains("new_since_click=yes", line);
+            Assert.Contains("foreground=yes", line);
+            Assert.Contains("handle=0x30", line);
+            Assert.DoesNotContain("Jane", line);
+        }
+
+        [Fact]
+        public void WaitingSummaryCountsNewWindowsAndNamesTheForegroundClassWithoutTitles()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("Pioneer main - Jane Doe", className: "WindowsForms10.Window.8.app.0", handle: 1),
+                Window("Jane Doe export", className: "HwndWrapper[App;;1]", handle: 2),
+                Window("Notepad", className: "Notepad", pid: OtherPid, handle: 3)
+            };
+            var baseline = new HashSet<IntPtr> { new IntPtr(1), new IntPtr(3) };
+
+            var line = SaveAsCandidateLog.FormatWaitingSummary(all, baseline, PioneerPid, new IntPtr(2), 5);
+
+            Assert.Contains("3 visible top-level windows", line);
+            Assert.Contains("1 new since the export click (1 Pioneer-related)", line);
+            Assert.Contains("foreground class='HwndWrapper[App;;1]'", line);
+            Assert.DoesNotContain("Jane", line);
+            Assert.DoesNotContain("Notepad ", line);
+        }
+
+        [Fact]
+        public void WaitingSummaryWithoutABaselineOrForegroundDoesNotThrow()
+        {
+            var line = SaveAsCandidateLog.FormatWaitingSummary(new List<SaveAsCandidate>(), null, PioneerPid, IntPtr.Zero, 5);
+
+            Assert.Contains("0 new since the export click", line);
+            Assert.Contains("foreground=unknown", line);
+        }
+    }
+
+    public class WindowEvidenceDetectionTests
+    {
+        private static readonly IntPtr[] NoExclusions = Array.Empty<IntPtr>();
+
+        private static HashSet<IntPtr> Baseline(params long[] handles) => new(handles.Select(h => new IntPtr(h)));
+
+        private static IReadOnlyList<SaveAsDetection> Detect(
+            IReadOnlyList<SaveAsCandidate> all, long foreground, IReadOnlyCollection<IntPtr>? baseline, params long[] excluded) =>
+            SaveAsDialogMatcher.DetectWithoutFileNameBox(all, PioneerPid, new IntPtr(foreground), excluded.Select(h => new IntPtr(h)).ToList(), baseline);
+
+        // The reported failure: a modal window of Pioneer that is not a classic
+        // common dialog (no #32770, no "Save" title, no UIA File name box).
+        [Fact]
+        public void AcceptsANewForegroundPioneerWindowOfAnyClassAndTitle()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("Main", className: "WindowsForms10.Window.8.app.0", handle: 1),
+                Window("Preview", className: "WindowsForms10.Window.8.app.0", handle: 2),
+                Window("", className: "HwndWrapper[PioneerRx;;abc]", handle: 3)
+            };
+
+            var result = Detect(all, foreground: 3, Baseline(1, 2), excluded: new long[] { 1, 2 });
+
+            var only = Assert.Single(result);
+            Assert.Equal(new IntPtr(3), only.Candidate.Handle);
+            Assert.Equal(SaveAsDetectionReason.NewForegroundPioneerWindow, only.Reason);
+            Assert.True(only.IsNew);
+            Assert.True(only.IsForeground);
+        }
+
+        [Fact]
+        public void AcceptsADialogOwnedByAPioneerWindowThatLivesInAnotherProcess()
+        {
+            var all = new List<SaveAsCandidate> { Window("Save As", pid: OtherPid, owner: 2, ownerPid: PioneerPid, handle: 9) };
+
+            var result = Detect(all, foreground: 9, Baseline(1, 2), excluded: new long[] { 1, 2 });
+
+            Assert.Equal(SaveAsDetectionReason.StandardSaveDialog, Assert.Single(result).Reason);
+        }
+
+        [Fact]
+        public void StandardSaveDialogOutranksOtherNewPioneerWindows()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("", className: "tooltips_class32", handle: 5),
+                Window("Save As", handle: 6),
+                Window("Something", className: "HwndWrapper", handle: 7)
+            };
+
+            var result = Detect(all, foreground: 7, Baseline());
+
+            Assert.Equal(new IntPtr(6), result[0].Candidate.Handle);
+            Assert.Equal(SaveAsDetectionReason.StandardSaveDialog, result[0].Reason);
+            Assert.Equal(new IntPtr(7), result[1].Candidate.Handle);
+        }
+
+        [Fact]
+        public void ANewNonForegroundPioneerWindowWithNoDialogEvidenceIsIgnored()
+        {
+            // e.g. a tooltip or IME window that popped up with the click.
+            var all = new List<SaveAsCandidate> { Window("", className: "tooltips_class32", handle: 5) };
+
+            Assert.Empty(Detect(all, foreground: 1, Baseline(1)));
+        }
+
+        [Fact]
+        public void ANewNonForegroundSaveTitledPioneerWindowIsAcceptedBelowTheForegroundOnes()
+        {
+            var all = new List<SaveAsCandidate> { Window("Save report", className: "WindowsForms10.Window.8.app.0", handle: 5) };
+
+            var result = Detect(all, foreground: 1, Baseline(1));
+
+            var only = Assert.Single(result);
+            Assert.Equal(SaveAsDetectionReason.NewPioneerSaveTitledWindow, only.Reason);
+            Assert.False(only.IsForeground);
+        }
+
+        [Fact]
+        public void ANewNonForegroundLocalizedStandardDialogIsAccepted()
+        {
+            var all = new List<SaveAsCandidate> { Window("Guardar como", handle: 5) };
+
+            Assert.Equal(SaveAsDetectionReason.NewPioneerStandardDialog, Assert.Single(Detect(all, foreground: 1, Baseline(1))).Reason);
+        }
+
+        [Fact]
+        public void WindowsPresentBeforeTheClickAreNotAcceptedUnlessForegroundStandardSaveDialogs()
+        {
+            var old = new List<SaveAsCandidate> { Window("Some modal", className: "HwndWrapper", handle: 5) };
+            Assert.Empty(Detect(old, foreground: 1, Baseline(5)));
+            // Foreground but pre-existing and not Save-titled: still not ours.
+            Assert.Empty(Detect(old, foreground: 5, Baseline(5)));
+        }
+
+        [Fact]
+        public void WithoutABaselineOnlyAForegroundStandardSaveDialogQualifies()
+        {
+            var plain = new List<SaveAsCandidate> { Window("Something", className: "HwndWrapper", handle: 5) };
+            Assert.Empty(Detect(plain, foreground: 5, baseline: null));
+
+            var save = new List<SaveAsCandidate> { Window("Save As", handle: 6) };
+            Assert.Single(Detect(save, foreground: 6, baseline: null));
+        }
+
+        [Fact]
+        public void MainWindowAndPreviewAreNeverReturned()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("Save-like main", className: "HwndWrapper", handle: 1),
+                Window("Preview", className: "HwndWrapper", handle: 2)
+            };
+
+            Assert.Empty(Detect(all, foreground: 2, Baseline(), excluded: new long[] { 1, 2 }));
+        }
+
+        [Fact]
+        public void AnotherApplicationsSaveAsIsRejectedUnlessItIsNewAndForeground()
+        {
+            var other = new List<SaveAsCandidate> { Window("Save As", pid: OtherPid, handle: 8) };
+
+            Assert.Empty(Detect(other, foreground: 1, Baseline(1)));         // new, background
+            Assert.Empty(Detect(other, foreground: 8, Baseline(8)));         // foreground, pre-existing
+            Assert.Empty(Detect(new List<SaveAsCandidate> { Window("Notes", className: "Notepad", pid: OtherPid, handle: 8) }, foreground: 8, Baseline(1)));
+            Assert.Equal(SaveAsDetectionReason.OtherOwnerStandardSaveDialog, Assert.Single(Detect(other, foreground: 8, Baseline(1))).Reason);
+        }
+
+        [Fact]
+        public void TheOverwritePromptAndInvisibleOrHandleZeroWindowsAreNeverReturned()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("Confirm Save As", handle: 5),
+                Window("Save As", handle: 6, visible: false),
+                Window("Save As", handle: 0)
+            };
+
+            Assert.Empty(Detect(all, foreground: 5, Baseline()));
+        }
+
+        [Fact]
+        public void ForegroundWindowBreaksTiesBetweenEquallyRankedCandidates()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("Save As", handle: 5),
+                Window("Save As", handle: 6)
+            };
+
+            Assert.Equal(new IntPtr(6), Detect(all, foreground: 6, Baseline())[0].Candidate.Handle);
+        }
+    }
+
+    public class KeyPlanTests
+    {
+        [Fact]
+        public void SavePlanSelectsAllTypesTheFullDatedPathThenPressesAltS()
+        {
+            var path = SaveAsPathBuilder.BuildFullPath(Path.Combine(Path.GetTempPath(), "Pioneer Reports", "2026-10"), new DateTime(2026, 10, 31), "Customer A-R Control Balance", ".pdf");
+
+            var plan = SaveAsKeyPlan.BuildSave(path);
+
+            Assert.Equal(3, plan.Count);
+            Assert.Equal(SaveAsKeyKind.SelectAll, plan[0].Kind);
+            Assert.Equal(SaveAsKeyKind.TypeText, plan[1].Kind);
+            Assert.Equal(path, plan[1].Text);
+            Assert.EndsWith("10-31-26_Customer A-R Control Balance.pdf", plan[1].Text);
+            Assert.Equal(SaveAsKeyKind.AltS, plan[2].Kind);
+        }
+
+        [Fact]
+        public void ClosePlanIsJustAltF4()
+        {
+            var plan = SaveAsKeyPlan.BuildClosePreview();
+
+            Assert.Equal(SaveAsKeyKind.AltF4, Assert.Single(plan).Kind);
         }
     }
 }

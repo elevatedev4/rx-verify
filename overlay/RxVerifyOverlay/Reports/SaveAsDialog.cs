@@ -47,6 +47,28 @@ public enum SaveAsMatchTier
     TitleOnly = 3
 }
 
+/// <summary>Why DetectWithoutFileNameBox accepted a window. Lower is better.</summary>
+public enum SaveAsDetectionReason
+{
+    /// <summary>Pioneer-owned #32770 with a Save/Export title, new since the export click or foreground.</summary>
+    StandardSaveDialog = 1,
+
+    /// <summary>Another process's #32770 with a Save/Export title that is both new and foreground (e.g. a shell-hosted dialog not owned by a Pioneer window).</summary>
+    OtherOwnerStandardSaveDialog = 2,
+
+    /// <summary>A Pioneer-owned window of any class that appeared after the export click and is the foreground window (the modal that grabbed focus).</summary>
+    NewForegroundPioneerWindow = 3,
+
+    /// <summary>A new Pioneer-owned window of any class whose title says Save/Export (WinForms/WPF-hosted Save As).</summary>
+    NewPioneerSaveTitledWindow = 4,
+
+    /// <summary>A new Pioneer-owned #32770 with any other title (localized Save As).</summary>
+    NewPioneerStandardDialog = 5
+}
+
+/// <summary>A window accepted without UIA evidence, and why.</summary>
+public readonly record struct SaveAsDetection(SaveAsCandidate Candidate, SaveAsDetectionReason Reason, bool IsNew, bool IsForeground);
+
 public static class SaveAsDialogMatcher
 {
     /// <summary>The window class of every standard Windows dialog, including the common Save/Open dialogs and MessageBox.</summary>
@@ -108,6 +130,63 @@ public static class SaveAsDialogMatcher
             .ThenBy(x => x.candidate.Handle == foregroundHandle && foregroundHandle != IntPtr.Zero ? 0 : 1)
             .ThenBy(x => x.index)
             .Select(x => x.candidate)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Fallback detection that needs NO UI Automation evidence. The UIA path
+    /// (Rank + a File name box found by SaveAsFileNameFieldMatcher) only
+    /// recognises the Windows common dialog; Will's Pioneer build showed a
+    /// modal window that was open (the export Invoke blocked on it) yet was
+    /// never accepted, so the run stalled 20s at "waiting for the Save As
+    /// dialog". Here the window is chosen from what Win32 alone reports:
+    /// it must be visible, not excluded (Pioneer main window / report
+    /// preview), not the "Confirm Save As" prompt, and APPEARED AFTER the
+    /// export click (<paramref name="baselineHandles"/> = every top-level
+    /// handle visible just before the click) or be the foreground window.
+    /// Ordered best first by <see cref="SaveAsDetectionReason"/>, then
+    /// enumeration order. A window of another application is only ever
+    /// accepted as a #32770 with a Save/Export title that is both new and
+    /// the foreground window. The caller still brings the chosen window to
+    /// the foreground and refuses to type unless it really is foreground.
+    /// </summary>
+    public static IReadOnlyList<SaveAsDetection> DetectWithoutFileNameBox(
+        IReadOnlyList<SaveAsCandidate> candidates, int pioneerProcessId, IntPtr foregroundHandle,
+        IReadOnlyCollection<IntPtr>? excludedHandles, IReadOnlyCollection<IntPtr>? baselineHandles)
+    {
+        var found = new List<(SaveAsDetection Detection, int Index)>();
+        for (var index = 0; index < candidates.Count; index++)
+        {
+            var c = candidates[index];
+            if (!c.IsVisible || c.Handle == IntPtr.Zero) continue;
+            if (excludedHandles is not null && excludedHandles.Contains(c.Handle)) continue;
+            if (string.Equals((c.Title ?? string.Empty).Trim(), "Confirm Save As", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var isNew = baselineHandles is not null && !baselineHandles.Contains(c.Handle);
+            var isForeground = foregroundHandle != IntPtr.Zero && c.Handle == foregroundHandle;
+            if (!isNew && !isForeground) continue;
+
+            var pioneer = BelongsToPioneer(c, pioneerProcessId);
+            var dialogClass = IsDialogClass(c.ClassName);
+            var titleSave = TitleLooksLikeSaveDialog(c.Title);
+
+            SaveAsDetectionReason reason;
+            if (pioneer && dialogClass && titleSave) reason = SaveAsDetectionReason.StandardSaveDialog;
+            else if (!pioneer && dialogClass && titleSave && isNew && isForeground) reason = SaveAsDetectionReason.OtherOwnerStandardSaveDialog;
+            else if (!pioneer) continue;
+            else if (isNew && isForeground) reason = SaveAsDetectionReason.NewForegroundPioneerWindow;
+            else if (isNew && titleSave) reason = SaveAsDetectionReason.NewPioneerSaveTitledWindow;
+            else if (isNew && dialogClass) reason = SaveAsDetectionReason.NewPioneerStandardDialog;
+            else continue;
+
+            found.Add((new SaveAsDetection(c, reason, isNew, isForeground), index));
+        }
+
+        return found
+            .OrderBy(x => (int)x.Detection.Reason)
+            .ThenBy(x => x.Detection.IsForeground ? 0 : 1)
+            .ThenBy(x => x.Index)
+            .Select(x => x.Detection)
             .ToList();
     }
 
@@ -329,6 +408,39 @@ public static class SaveAsPathBuilder
     }
 }
 
+public enum SaveAsKeyKind
+{
+    SelectAll,
+    TypeText,
+    AltS,
+    AltF4
+}
+
+public readonly record struct SaveAsKeyStep(SaveAsKeyKind Kind, string? Text = null);
+
+/// <summary>
+/// Will's macro, as data (HQ 2026-11-10, verbatim: "type a filename
+/// (Date_Filename) and then save it (Alt+s) and close the report (alt+f4)").
+/// The driver replays these keys only while the target window is the OS
+/// foreground window.
+/// </summary>
+public static class SaveAsKeyPlan
+{
+    /// <summary>Select any default name, type the full path, press Alt+S.</summary>
+    public static IReadOnlyList<SaveAsKeyStep> BuildSave(string fullPath) => new[]
+    {
+        new SaveAsKeyStep(SaveAsKeyKind.SelectAll),
+        new SaveAsKeyStep(SaveAsKeyKind.TypeText, fullPath),
+        new SaveAsKeyStep(SaveAsKeyKind.AltS)
+    };
+
+    /// <summary>Close the report preview.</summary>
+    public static IReadOnlyList<SaveAsKeyStep> BuildClosePreview() => new[]
+    {
+        new SaveAsKeyStep(SaveAsKeyKind.AltF4)
+    };
+}
+
 public enum SaveCompletionState
 {
     /// <summary>Save As dialog still showing.</summary>
@@ -364,39 +476,24 @@ public static class SaveCompletion
 }
 
 /// <summary>
-/// Log formatting for the "save-as" lines. A candidate that is not
-/// Pioneer's is logged by LENGTH only; a Pioneer window's title text is
-/// logged only when it reads like a file/confirm dialog (a Pioneer
-/// screen title could carry something patient-specific - same rule as
-/// MainWindowTitleRedaction).
+/// Log formatting for the "save-as" lines. Window TITLES are never
+/// written (a Pioneer screen title can carry something patient-specific):
+/// a candidate line carries handle/pid/owner/class, the title LENGTH and
+/// whether the title reads like Save/Export - nothing else.
 /// </summary>
 public static class SaveAsCandidateLog
 {
     public const string Prefix = "save-as: ";
 
-    private const int MaxLoggedTitleLength = 80;
-
-    private static readonly string[] SafeTitleWords = { "Save", "Export", "Confirm", "Replace" };
-
-    public static string TitleForLog(SaveAsCandidate candidate, int pioneerProcessId)
-    {
-        var title = candidate.Title ?? string.Empty;
-        if (title.Length == 0) return "<untitled>";
-        if (!SaveAsDialogMatcher.BelongsToPioneer(candidate, pioneerProcessId)) return "[other-app]";
-        if (title.Length > MaxLoggedTitleLength) return "[redacted]";
-
-        foreach (var word in SafeTitleWords)
-        {
-            if (title.Contains(word, StringComparison.OrdinalIgnoreCase)) return title;
-        }
-
-        return "[redacted]";
-    }
-
     public static string Format(SaveAsCandidate candidate, int pioneerProcessId) =>
         $"{Prefix}  candidate handle=0x{candidate.Handle.ToInt64():X} pid={candidate.ProcessId} owner=0x{candidate.OwnerHandle.ToInt64():X} ownerPid={candidate.OwnerProcessId} "
         + $"class='{candidate.ClassName}' visible={(candidate.IsVisible ? "yes" : "no")} pioneer={(SaveAsDialogMatcher.BelongsToPioneer(candidate, pioneerProcessId) ? "yes" : "no")} "
-        + $"title_len={(candidate.Title ?? string.Empty).Length} title='{TitleForLog(candidate, pioneerProcessId)}'";
+        + $"title_len={(candidate.Title ?? string.Empty).Length} save_like_title={(SaveAsDialogMatcher.TitleLooksLikeSaveDialog(candidate.Title) ? "yes" : "no")}";
+
+    /// <summary>One line describing an accepted window and the reason - no title.</summary>
+    public static string FormatDetection(SaveAsDetection detection, int pioneerProcessId) =>
+        $"{Prefix}dialog accepted by window evidence: reason={detection.Reason} new_since_click={(detection.IsNew ? "yes" : "no")} foreground={(detection.IsForeground ? "yes" : "no")} "
+        + $"handle=0x{detection.Candidate.Handle.ToInt64():X} pid={detection.Candidate.ProcessId} ownerPid={detection.Candidate.OwnerProcessId} class='{detection.Candidate.ClassName}'";
 
     /// <summary>All candidate lines, Pioneer-related first (they are what the next round needs), capped so a crowded desktop cannot flood the log.</summary>
     public static IReadOnlyList<string> FormatAll(IReadOnlyList<SaveAsCandidate> candidates, int pioneerProcessId, int maxLines)
@@ -406,5 +503,19 @@ public static class SaveAsCandidateLog
             .Take(maxLines)
             .Select(c => Format(c, pioneerProcessId))
             .ToList();
+    }
+
+    /// <summary>The periodic "still waiting" line: how many windows are new since the export click and how many of those are Pioneer's, plus the foreground window's class/pid - no titles.</summary>
+    public static string FormatWaitingSummary(
+        IReadOnlyList<SaveAsCandidate> all, IReadOnlyCollection<IntPtr>? baselineHandles, int pioneerProcessId, IntPtr foregroundHandle, double elapsedSeconds)
+    {
+        var visible = all.Where(c => c.IsVisible && c.Handle != IntPtr.Zero).ToList();
+        var newOnes = baselineHandles is null ? new List<SaveAsCandidate>() : visible.Where(c => !baselineHandles.Contains(c.Handle)).ToList();
+        var newPioneer = newOnes.Count(c => SaveAsDialogMatcher.BelongsToPioneer(c, pioneerProcessId));
+        var fg = visible.FirstOrDefault(c => c.Handle == foregroundHandle);
+        var fgText = fg.Handle == IntPtr.Zero
+            ? "foreground=unknown"
+            : $"foreground class='{fg.ClassName}' pid={fg.ProcessId} ownerPid={fg.OwnerProcessId} pioneer={(SaveAsDialogMatcher.BelongsToPioneer(fg, pioneerProcessId) ? "yes" : "no")}";
+        return $"{Prefix}still waiting for the dialog ({elapsedSeconds:0}s): {visible.Count} visible top-level windows, {newOnes.Count} new since the export click ({newPioneer} Pioneer-related); {fgText}.";
     }
 }
