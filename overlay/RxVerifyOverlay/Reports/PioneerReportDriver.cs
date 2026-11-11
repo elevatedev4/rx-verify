@@ -817,16 +817,17 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 ct.ThrowIfCancellationRequested();
                 var step = keys[i];
 
-                if (!PosWindowRuleHolds(step.Rule, drawersHandle))
+                if (!PosWindowRuleHolds(step.Rule, drawersHandle, baselineForReport))
                 {
                     L($"FAILED - before key {i + 1}/{keys.Count} ({step.Key}) the required window was not in front; stopped without sending it.");
                     return ReportRunResult.Failed($"Search Drawers lost focus before key {i + 1} - stopped", stopwatch.Elapsed);
                 }
 
-                if (step.Key == PosKey.Enter)
+                if (step.Key == PosKey.AltO)
                 {
-                    // The Save As appears after this key: snapshot first so "new since" is exact.
-                    CaptureExportBaseline(L, "the final Enter");
+                    // Snapshot before the menu opens: the menu popup and later the report
+                    // window are "new since" this, and nothing else counts as a key target.
+                    CaptureExportBaseline(L, "Alt+o");
                     baselineForReport = _exportBaselineHandles;
                 }
 
@@ -851,36 +852,89 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 await Task.Delay(step.SettleMs, ct).ConfigureAwait(false);
             }
 
-            // ---- 3: Save As (strict Win32 path) ---------------------------
-            L("step 3: waiting for the Save As dialog...");
+            // ---- 3: the report window, then the macro's export click -------
+            // (the macro: wait for "Sales Summary Report", 1500 ms, a click on
+            // the report window's export control, 1000 ms, then "Save as").
+            L("step 3: waiting for the report window...");
+            var reportCandidate = await WaitForReportWindowAsync(baselineForReport, TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
+            if (reportCandidate is null)
+            {
+                L("FAILED - the report window did not appear after Enter. Nothing more was sent.");
+                LogStrictInventory(EnumerateAllTopLevelWindowsForSaveAs(), log);
+                _unsafeToContinue = true;
+                return ReportRunResult.Failed("The POS report window did not open - stopped", stopwatch.Elapsed);
+            }
+
+            var reportHandle = reportCandidate.Value.Handle;
+            _previewWindowHandle = reportHandle;
+            _previewWindowElement = ResolveNativeHandleToElement(reportHandle);
+            L($"report window found (class='{reportCandidate.Value.ClassName}', pid={reportCandidate.Value.ProcessId}).");
+
+            // From here on, any failure closes THIS report window (the safe way) before stopping.
+            Task<ReportRunResult> FailAndClose(string reason, bool unsafeAfter)
+            {
+                L("closing the report window before stopping...");
+                var outcome = PreviewCloser.Close(new NativeSaveAsHost(), reportHandle, _pioneerProcessId, PreviewCloseConfirmTimeout, L);
+                L($"report window close result: {outcome}.");
+                _previewWindowHandle = IntPtr.Zero;
+                _previewWindowElement = null;
+                var closedOk = outcome is PreviewCloseOutcome.ClosedByMessage or PreviewCloseOutcome.ClosedByAltF4 or PreviewCloseOutcome.AlreadyClosed;
+                if (unsafeAfter || !closedOk) _unsafeToContinue = true;
+                return Task.FromResult(ReportRunResult.Failed(reason, stopwatch.Elapsed));
+            }
+
+            await Task.Delay(PosReportSettleDelay, ct).ConfigureAwait(false);
+
+            if (_previewWindowElement is null) return await FailAndClose("The POS report window could not be read - stopped", false).ConfigureAwait(false);
+
+            if (!await WaitForReportCompletionStatus(log, ct).ConfigureAwait(false))
+            {
+                return await FailAndClose("Timed out waiting for the POS report to finish generating - never saved", false).ConfigureAwait(false);
+            }
+
+            if (!EnsureHandleForeground(reportHandle))
+            {
+                return await FailAndClose("The POS report window would not come to the front - stopped before exporting", false).ConfigureAwait(false);
+            }
+
+            L("exporting to PDF...");
+            if (!InvokeExportButton(_previewWindowElement, "Export to PDF", "PDF", log))
+            {
+                return await FailAndClose("Could not find the PDF export button on the POS report", false).ConfigureAwait(false);
+            }
+
+            // ---- 4: Save As (strict Win32 path) ---------------------------
             var saveOutcome = await SaveAsAndVerify(item.OutputFilePath, log, ct).ConfigureAwait(false);
             if (saveOutcome == SaveAsOutcome.NotRecognised)
             {
-                return ReportRunResult.Failed("Save As window not recognised - stopped without typing (see the save-as inventory in the log)", stopwatch.Elapsed);
+                return await FailAndClose("Save As window not recognised - stopped without typing (see the save-as inventory in the log)", true).ConfigureAwait(false);
             }
-
-            // ---- 4: close the report window the export left --------------
-            var closed = await CloseSalesSummaryReportWindowAsync(baselineForReport, log, ct).ConfigureAwait(false);
 
             if (saveOutcome != SaveAsOutcome.Saved)
             {
-                return ReportRunResult.Failed("Save As did not produce the expected file", stopwatch.Elapsed);
+                return await FailAndClose("Save As did not produce the expected file", false).ConfigureAwait(false);
             }
 
-            if (!closed)
+            // ---- 5: close the saved report window -------------------------
+            L("step 5: closing the report window...");
+            var closeOutcome = PreviewCloser.Close(new NativeSaveAsHost(), reportHandle, _pioneerProcessId, PreviewCloseConfirmTimeout, L);
+            L($"report window close result: {closeOutcome}.");
+            _previewWindowHandle = IntPtr.Zero;
+            _previewWindowElement = null;
+            if (closeOutcome is not (PreviewCloseOutcome.ClosedByMessage or PreviewCloseOutcome.ClosedByAltF4 or PreviewCloseOutcome.AlreadyClosed))
             {
                 _unsafeToContinue = true;
                 return ReportRunResult.Failed("The saved POS report window could not be closed - stopped", stopwatch.Elapsed);
             }
 
-            // ---- 5: back on Search Drawers for the next day ---------------
+            // ---- 6: back on Search Drawers for the next day ---------------
             if (!await WaitForHandleForegroundAsync(drawersHandle, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false))
             {
                 L("FAILED - Search Drawers did not come back to the front after the report was closed.");
                 return ReportRunResult.Failed("Search Drawers did not come back after closing the report - stopped", stopwatch.Elapsed);
             }
 
-            L("step 5: back on Search Drawers.");
+            L("step 6: back on Search Drawers.");
             return ReportRunResult.Saved(item.OutputFilePath, stopwatch.Elapsed);
         }
         catch (OperationCanceledException)
@@ -925,14 +979,34 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     }
 
     /// <summary>True when the window a key needs is the foreground window right now (Search Drawers: handle + title re-checked; menus: any Pioneer window).</summary>
-    private bool PosWindowRuleHolds(PosForegroundRule rule, IntPtr drawersHandle)
+    private bool PosWindowRuleHolds(PosForegroundRule rule, IntPtr drawersHandle, IReadOnlyCollection<IntPtr>? baseline)
     {
-        if (rule == PosForegroundRule.AnyPioneerWindow) return IsForegroundOwnedByPioneer();
+        try
+        {
+            var foregroundHandle = GetForegroundWindow();
+            if (foregroundHandle == IntPtr.Zero) return false;
 
-        if (!IsWindow(drawersHandle) || !IsWindowVisible(drawersHandle) || GetForegroundWindow() != drawersHandle) return false;
-        var title = new StringBuilder(256);
-        GetWindowText(drawersHandle, title, title.Capacity);
-        return PosSummaryPlan.TitleContains(title.ToString(), PosSummaryPlan.SearchDrawersTitle);
+            var titleStillMatches = false;
+            if (IsWindow(drawersHandle) && IsWindowVisible(drawersHandle))
+            {
+                var title = new StringBuilder(256);
+                GetWindowText(drawersHandle, title, title.Capacity);
+                titleStillMatches = PosSummaryPlan.TitleContains(title.ToString(), PosSummaryPlan.SearchDrawersTitle);
+            }
+
+            SaveAsCandidate? foreground = null;
+            foreach (var c in EnumerateAllTopLevelWindowsForSaveAs())
+            {
+                if (c.Handle == foregroundHandle) { foreground = c; break; }
+            }
+
+            var mainHandle = _mainWindow is null ? IntPtr.Zero : SafeNativeHandle(_mainWindow);
+            return PosSummaryPlan.KeyTargetAllowed(rule, foreground, drawersHandle, titleStillMatches, mainHandle, _pioneerProcessId, baseline);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private bool SendPosKey(PosKeyStep step, Action<string> L)
@@ -966,37 +1040,22 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
     }
 
-    /// <summary>
-    /// The macro's last POS steps: find the "Sales Summary Report" window
-    /// (new since the baseline) and close it - WM_CLOSE first, Alt+F4 only
-    /// if it is still open and foreground (PreviewCloser). No such window
-    /// is fine (nothing to close); a window that will not close is not.
-    /// </summary>
-    private async Task<bool> CloseSalesSummaryReportWindowAsync(IReadOnlyCollection<IntPtr>? baseline, Action<string> log, CancellationToken ct)
+    /// <summary>The macro's "wait for window Sales Summary Report": polls for a window of Pioneer, new since the baseline, whose title names the report.</summary>
+    private async Task<SaveAsCandidate?> WaitForReportWindowAsync(IReadOnlyCollection<IntPtr>? baseline, TimeSpan timeout, CancellationToken ct)
     {
-        void L(string message) => log(PosLogPrefix + message);
-
-        SaveAsCandidate? report;
         var watch = Stopwatch.StartNew();
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            report = PosSummaryPlan.FindReportWindow(EnumerateAllTopLevelWindowsForSaveAs(), _pioneerProcessId, baseline, ExcludedSaveAsHandles());
-            if (report is not null || watch.Elapsed >= TimeSpan.FromSeconds(5)) break;
+            var report = PosSummaryPlan.FindReportWindow(EnumerateAllTopLevelWindowsForSaveAs(), _pioneerProcessId, baseline, ExcludedSaveAsHandles());
+            if (report is not null) return report;
+            if (watch.Elapsed >= timeout) return null;
             await Task.Delay(PollInterval, ct).ConfigureAwait(false);
         }
-
-        if (report is null)
-        {
-            L("no report window found to close (nothing new with the report's name) - continuing.");
-            return true;
-        }
-
-        L($"step 4: closing the report window (class='{report.Value.ClassName}', pid={report.Value.ProcessId}).");
-        var outcome = PreviewCloser.Close(new NativeSaveAsHost(), report.Value.Handle, _pioneerProcessId, PreviewCloseConfirmTimeout, L);
-        L($"report window close result: {outcome}.");
-        return outcome is PreviewCloseOutcome.ClosedByMessage or PreviewCloseOutcome.ClosedByAltF4 or PreviewCloseOutcome.AlreadyClosed;
     }
+
+    /// <summary>The macro's 1500 ms wait between the report window appearing and the export click.</summary>
+    private static readonly TimeSpan PosReportSettleDelay = TimeSpan.FromMilliseconds(1500);
 
     /// <summary>
     /// A Sales report after the POS pass: the "Search Drawers" window may

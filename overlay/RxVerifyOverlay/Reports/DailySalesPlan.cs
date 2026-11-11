@@ -154,21 +154,15 @@ public static class DailySalesPlan
 
     /// <summary>
     /// The folder a daily run saves to: the EOM folder unless the user
-    /// changed the "Save to" box (Browse or typing). A box that is blank or
-    /// still holds <paramref name="untouchedDefaultText"/> (what the window
-    /// put there itself) counts as not changed.
+    /// typed in or browsed the "Save to" box (<paramref name="userChoseFolder"/>)
+    /// and left something in it. Choosing the monthly default folder on
+    /// purpose therefore works too.
     /// </summary>
-    public static string ResolveOutputFolder(string? typedFolder, string? untouchedDefaultText, DateTime rangeEnd, string downloadsFolder)
+    public static string ResolveOutputFolder(string? typedFolder, bool userChoseFolder, DateTime rangeEnd, string downloadsFolder)
     {
         var typed = (typedFolder ?? string.Empty).Trim();
-        if (typed.Length == 0 || SameFolder(typed, untouchedDefaultText)) return DefaultOutputFolder(rangeEnd, downloadsFolder);
+        if (!userChoseFolder || typed.Length == 0) return DefaultOutputFolder(rangeEnd, downloadsFolder);
         return typed;
-    }
-
-    private static bool SameFolder(string a, string? b)
-    {
-        if (string.IsNullOrWhiteSpace(b)) return false;
-        return string.Equals(a.TrimEnd('\\', '/'), b.Trim().TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The line logged before a step: counts and the report name, no patient data.</summary>

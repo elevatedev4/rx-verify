@@ -33,8 +33,8 @@ public sealed partial class ReportsWindow : Window
     private readonly ReportsCoordinator _coordinator;
     private CancellationTokenSource? _runCts;
 
-    /// <summary>What the window itself put in "Save to" - lets a daily run tell "untouched" from "user chose a folder".</summary>
-    private readonly string _initialFolderText;
+    /// <summary>True once the user typed in or browsed the "Save to" box (set by TextChanged; the window's own default does not count) - a daily run then uses that folder instead of the EOM one.</summary>
+    private bool _saveToChosenByUser;
 
     /// <summary>Production constructor — real PioneerReportDriver (FlaUI/UIA against the live PioneerRx window).</summary>
     public ReportsWindow() : this(new PioneerReportDriver())
@@ -72,7 +72,7 @@ public sealed partial class ReportsWindow : Window
         BeginDatePicker.SelectedDate = defaultBegin;
         EndDatePicker.SelectedDate = defaultEnd;
         OutputFolderTextBox.Text = ReportRunPlan.DefaultOutputFolder(defaultEnd);
-        _initialFolderText = OutputFolderTextBox.Text;
+        _saveToChosenByUser = false;
     }
 
     /// <summary>
@@ -294,7 +294,7 @@ public sealed partial class ReportsWindow : Window
         }
 
         // Daily files go to Downloads\<yyyy-MM>_EOM reports unless "Save to" was changed.
-        var outputFolder = DailySalesPlan.ResolveOutputFolder(OutputFolderTextBox.Text, _initialFolderText, end.Value, DailySalesPlan.UserDownloadsFolder());
+        var outputFolder = DailySalesPlan.ResolveOutputFolder(OutputFolderTextBox.Text, _saveToChosenByUser, end.Value, DailySalesPlan.UserDownloadsFolder());
 
         var includeSales = DailySalesCheckBox.IsChecked == true;
         var includePos = DailyPosCheckBox.IsChecked == true;
@@ -345,6 +345,8 @@ public sealed partial class ReportsWindow : Window
             _runCts = null;
         }
     }
+
+    private void OnOutputFolderTextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => _saveToChosenByUser = true;
 
     private void OnStopClick(object sender, RoutedEventArgs e) => _runCts?.Cancel();
 

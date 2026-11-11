@@ -32,8 +32,13 @@ public enum PosForegroundRule
     /// <summary>The verified "Search Drawers" window itself (title re-checked).</summary>
     SearchDrawersWindow,
 
-    /// <summary>Any window of Pioneer's process - after Alt+o a menu popup may be the foreground window.</summary>
-    AnyPioneerWindow
+    /// <summary>
+    /// The Search Drawers window, OR a NEW Pioneer window (not in the
+    /// baseline taken before Alt+o) that is not Pioneer's main window - the
+    /// menu popup Alt+o opens. Never the main window, never a window that
+    /// was already there.
+    /// </summary>
+    SearchDrawersOrNewPioneerWindow
 }
 
 public readonly record struct PosKeyStep(PosKey Key, string? Text, PosForegroundRule Rule, int SettleMs);
@@ -60,9 +65,35 @@ public static class PosSummaryPlan
             new PosKeyStep(PosKey.Tab, null, PosForegroundRule.SearchDrawersWindow, 100),
             new PosKeyStep(PosKey.TypeDate, date, PosForegroundRule.SearchDrawersWindow, 100),
             new PosKeyStep(PosKey.AltO, null, PosForegroundRule.SearchDrawersWindow, 100),
-            new PosKeyStep(PosKey.ArrowDown, null, PosForegroundRule.AnyPioneerWindow, 100),
-            new PosKeyStep(PosKey.Enter, null, PosForegroundRule.AnyPioneerWindow, 100)
+            new PosKeyStep(PosKey.ArrowDown, null, PosForegroundRule.SearchDrawersOrNewPioneerWindow, 100),
+            new PosKeyStep(PosKey.Enter, null, PosForegroundRule.SearchDrawersOrNewPioneerWindow, 100)
         };
+    }
+
+    /// <summary>
+    /// May a key be sent right now? <paramref name="foreground"/> is the OS
+    /// foreground window (null when unknown/invisible). The Search Drawers
+    /// window qualifies only while its title still reads "Search Drawers"
+    /// (<paramref name="drawersTitleStillMatches"/>) - so even when that
+    /// screen IS Pioneer's main window, no key goes to it once the screen
+    /// has changed. For the menu keys a NEW non-main Pioneer window (the
+    /// popup Alt+o opened) also qualifies. Pioneer's main window never
+    /// qualifies on any other basis.
+    /// </summary>
+    public static bool KeyTargetAllowed(
+        PosForegroundRule rule, SaveAsCandidate? foreground, IntPtr drawersHandle, bool drawersTitleStillMatches,
+        IntPtr mainHandle, int pioneerProcessId, IReadOnlyCollection<IntPtr>? baselineHandles)
+    {
+        if (foreground is null) return false;
+        var fg = foreground.Value;
+        if (fg.Handle == IntPtr.Zero || !fg.IsVisible) return false;
+
+        if (drawersHandle != IntPtr.Zero && fg.Handle == drawersHandle) return drawersTitleStillMatches;
+        if (rule == PosForegroundRule.SearchDrawersWindow) return false;
+
+        if (!SaveAsDialogMatcher.BelongsToPioneer(fg, pioneerProcessId)) return false;
+        if (mainHandle != IntPtr.Zero && fg.Handle == mainHandle) return false;
+        return baselineHandles is not null && !baselineHandles.Contains(fg.Handle);
     }
 
     public static bool TitleContains(string? title, string needle) =>

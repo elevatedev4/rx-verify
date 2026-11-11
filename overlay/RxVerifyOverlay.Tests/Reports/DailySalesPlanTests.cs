@@ -413,19 +413,20 @@ public class DailySalesPlanTests
         public void AnUntouchedSaveToBoxMeansTheEomFolder()
         {
             var monthlyDefault = Path.Combine("docs", "Pioneer Reports", "2026-10");
+            var eom = Path.Combine(Downloads, "2026-10_EOM reports");
 
-            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder(monthlyDefault, monthlyDefault, new DateTime(2026, 10, 31), Downloads));
-            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder(monthlyDefault + Path.DirectorySeparatorChar, monthlyDefault, new DateTime(2026, 10, 31), Downloads));
-            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder("  ", monthlyDefault, new DateTime(2026, 10, 31), Downloads));
-            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder(null, null, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(eom, DailySalesPlan.ResolveOutputFolder(monthlyDefault, userChoseFolder: false, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(eom, DailySalesPlan.ResolveOutputFolder("  ", userChoseFolder: true, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(eom, DailySalesPlan.ResolveOutputFolder(null, userChoseFolder: true, new DateTime(2026, 10, 31), Downloads));
         }
 
         [Fact]
-        public void AFolderTheUserChoseIsKept()
+        public void AFolderTheUserChoseIsKeptEvenWhenItIsTheMonthlyDefault()
         {
             var monthlyDefault = Path.Combine("docs", "Pioneer Reports", "2026-10");
 
-            Assert.Equal(Path.Combine("D:", "my reports"), DailySalesPlan.ResolveOutputFolder(Path.Combine("D:", "my reports"), monthlyDefault, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(monthlyDefault, DailySalesPlan.ResolveOutputFolder(monthlyDefault, userChoseFolder: true, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(Path.Combine("D:", "my reports"), DailySalesPlan.ResolveOutputFolder(Path.Combine("D:", "my reports"), userChoseFolder: true, new DateTime(2026, 10, 31), Downloads));
         }
 
         [Fact]
@@ -454,12 +455,12 @@ public class DailySalesPlanTests
         }
 
         [Fact]
-        public void EveryKeyBeforeTheMenuNeedsTheSearchDrawersWindowAndOnlyTheMenuKeysAcceptAnyPioneerWindow()
+        public void EveryKeyBeforeTheMenuNeedsTheSearchDrawersWindowAndOnlyTheMenuKeysAlsoAcceptANewPopup()
         {
             var keys = PosSummaryPlan.BuildKeys(new DateTime(2026, 10, 3));
 
             Assert.All(keys.Take(7), k => Assert.Equal(PosForegroundRule.SearchDrawersWindow, k.Rule));
-            Assert.All(keys.Skip(7), k => Assert.Equal(PosForegroundRule.AnyPioneerWindow, k.Rule));
+            Assert.All(keys.Skip(7), k => Assert.Equal(PosForegroundRule.SearchDrawersOrNewPioneerWindow, k.Rule));
             Assert.All(keys, k => Assert.Equal(100, k.SettleMs));
         }
 
@@ -513,6 +514,68 @@ public class DailySalesPlanTests
             Assert.Equal(new IntPtr(7), PosSummaryPlan.FindReportWindow(all, Pid, baseline, new List<IntPtr>())!.Value.Handle);
             Assert.Equal(new IntPtr(8), PosSummaryPlan.FindReportWindow(all, Pid, baseline, new List<IntPtr> { new IntPtr(7) })!.Value.Handle);
             Assert.Null(PosSummaryPlan.FindReportWindow(all, Pid, null, new List<IntPtr>()));
+        }
+
+        private static readonly IntPtr Drawers = new(10);
+        private static readonly IntPtr Main = new(1);
+        private static readonly HashSet<IntPtr> Baseline = new() { new IntPtr(1), new IntPtr(10) };
+
+        private static bool Allowed(PosForegroundRule rule, SaveAsCandidate? fg, bool titleOk = true, IReadOnlyCollection<IntPtr>? baseline = null) =>
+            PosSummaryPlan.KeyTargetAllowed(rule, fg, Drawers, titleOk, Main, Pid, baseline ?? Baseline);
+
+        [Theory]
+        [InlineData(PosForegroundRule.SearchDrawersWindow)]
+        [InlineData(PosForegroundRule.SearchDrawersOrNewPioneerWindow)]
+        public void TheSearchDrawersWindowIsAlwaysAllowedWhileItsTitleStillMatches(PosForegroundRule rule)
+        {
+            Assert.True(Allowed(rule, W("Search Drawers", 10)));
+            Assert.False(Allowed(rule, W("Rx Queue", 10), titleOk: false));
+        }
+
+        [Fact]
+        public void ANewNonMainPioneerPopupIsAllowedOnlyForTheMenuKeys()
+        {
+            var popup = W("", 50, cls: "#32768");
+
+            Assert.True(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, popup));
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersWindow, popup));
+        }
+
+        [Fact]
+        public void PioneersMainWindowNeverGetsAKeyAfterSearchDrawersIsGone()
+        {
+            var main = W("Rx Queue", 1);
+
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, main));
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersWindow, main));
+            // even if the main window were not in the baseline
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, main, baseline: new HashSet<IntPtr>()));
+        }
+
+        [Fact]
+        public void WhenSearchDrawersIsTheMainWindowItselfKeysStopOnceItsTitleChanges()
+        {
+            var sameWindow = W("Rx Queue", 10);
+            Assert.True(PosSummaryPlan.KeyTargetAllowed(PosForegroundRule.SearchDrawersWindow, W("Search Drawers", 10), new IntPtr(10), true, new IntPtr(10), Pid, Baseline));
+            Assert.False(PosSummaryPlan.KeyTargetAllowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, sameWindow, new IntPtr(10), false, new IntPtr(10), Pid, Baseline));
+        }
+
+        [Fact]
+        public void AWindowThatWasAlreadyOpenBeforeTheMenuIsNeverATarget()
+        {
+            var old = W("Some other screen", 20);
+
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, old, baseline: new HashSet<IntPtr> { new IntPtr(20) }));
+            Assert.False(PosSummaryPlan.KeyTargetAllowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, old, Drawers, true, Main, Pid, null));
+        }
+
+        [Fact]
+        public void OtherAppsInvisibleAndUnknownForegroundWindowsAreNeverTargets()
+        {
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, W("Popup", 50, pid: 99)));
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, W("Popup", 50, visible: false)));
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, null));
+            Assert.False(Allowed(PosForegroundRule.SearchDrawersOrNewPioneerWindow, W("Popup", 0)));
         }
     }
 }
