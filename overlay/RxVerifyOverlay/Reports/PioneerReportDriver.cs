@@ -237,6 +237,9 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// </summary>
     private bool _unsafeToContinue;
 
+    /// <summary>The "Search Drawers" window found by RunPosSummary (never a Save As candidate); cleared when the main window is brought back for a Sales report.</summary>
+    private IntPtr _searchDrawersHandle = IntPtr.Zero;
+
     /// <summary>
     /// Round 6 (W-T92 follow-up): the "Report Parameters" popup's native
     /// handle, set by TrySelectAndOpenReportRow the moment its own
@@ -537,6 +540,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 return ReportRunResult.Failed("Skipped - an earlier Save As window may still be open", stopwatch.Elapsed);
             }
 
+            if (!ReturnToMainWindowAfterPos(log))
+            {
+                return ReportRunResult.Failed("Pioneer main window could not be brought to the front after the POS reports", stopwatch.Elapsed);
+            }
+
             // Round 6 (W-T92 follow-up): never carry a stale popup handle
             // into a new report - TrySelectAndOpenReportRow sets this the
             // moment it confirms a new Pioneer window opened, and
@@ -751,6 +759,268 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             log($"Automation error: {ex.Message}");
             return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
         }
+    }
+
+    /// <summary>
+    /// One day of the daily POS Summary, from Will's macro ("POS sales.mex",
+    /// loop "Run POS reports"; see PosSummaryPlan). Order: verify the
+    /// "Search Drawers" window is open -> bring it to the front -> send the
+    /// macro's keys, each only while the required window is the OS
+    /// foreground window (date read-back after each date; a wrong date
+    /// aborts before Alt+o) -> the strict Save As path with
+    /// POS_&lt;mm-dd-yy&gt; -> close the "Sales Summary Report" window the
+    /// export left (WM_CLOSE first, Alt+F4 only if still open and
+    /// foreground) -> wait for "Search Drawers" to be in front again.
+    /// Logs never contain a window title.
+    /// </summary>
+    public async Task<ReportRunResult> RunPosSummary(ReportRunItem item, Action<string> log, CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        void L(string message) => log(PosLogPrefix + message);
+
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (_unsafeToContinue)
+            {
+                L("SKIPPED - a Pioneer window from the previous step may still be open; nothing was sent. Close it by hand and run again.");
+                return ReportRunResult.Failed("Skipped - an earlier Save As window may still be open", stopwatch.Elapsed);
+            }
+
+            if (_mainWindow is null) return ReportRunResult.Failed("PioneerRx main window not found", stopwatch.Elapsed);
+
+            // ---- 1: the start screen must be open ------------------------
+            var drawers = PosSummaryPlan.FindSearchDrawers(EnumerateAllTopLevelWindowsForSaveAs(), _pioneerProcessId, GetForegroundWindow());
+            if (drawers is null)
+            {
+                L(PosSummaryPlan.OpenSearchDrawersMessage);
+                return ReportRunResult.Failed("Open Pioneer's Search Drawers screen first - nothing was sent", stopwatch.Elapsed);
+            }
+
+            var drawersHandle = drawers.Value.Handle;
+            _searchDrawersHandle = drawersHandle;
+            L($"step 1: Search Drawers window found (class='{drawers.Value.ClassName}', pid={drawers.Value.ProcessId}, foreground={(GetForegroundWindow() == drawersHandle ? "yes" : "no")}).");
+
+            if (!EnsureHandleForeground(drawersHandle))
+            {
+                L("FAILED - could not bring the Search Drawers window to the front; nothing was sent.");
+                return ReportRunResult.Failed("Could not bring Search Drawers to the front - nothing was sent", stopwatch.Elapsed);
+            }
+
+            // ---- 2: the macro's keys, each gated on the right window ------
+            var keys = PosSummaryPlan.BuildKeys(item.Begin);
+            L($"step 2: sending the macro's {keys.Count} keys for {DailySalesPlan.DateText(item.Begin)}...");
+            IReadOnlyCollection<IntPtr>? baselineForReport = null;
+            for (var i = 0; i < keys.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var step = keys[i];
+
+                if (!PosWindowRuleHolds(step.Rule, drawersHandle))
+                {
+                    L($"FAILED - before key {i + 1}/{keys.Count} ({step.Key}) the required window was not in front; stopped without sending it.");
+                    return ReportRunResult.Failed($"Search Drawers lost focus before key {i + 1} - stopped", stopwatch.Elapsed);
+                }
+
+                if (step.Key == PosKey.Enter)
+                {
+                    // The Save As appears after this key: snapshot first so "new since" is exact.
+                    CaptureExportBaseline(L, "the final Enter");
+                    baselineForReport = _exportBaselineHandles;
+                }
+
+                if (!SendPosKey(step, L)) return ReportRunResult.Failed($"Could not send key {i + 1} ({step.Key})", stopwatch.Elapsed);
+
+                if (step.Key == PosKey.TypeDate)
+                {
+                    Thread.Sleep(KeyEntrySettleDelay);
+                    var readBack = TryReadFocusedFieldValue();
+                    var decision = ReadbackEvaluator.Decide(readBack, step.Text ?? string.Empty);
+                    if (decision == ReadbackDecision.Mismatch)
+                    {
+                        L($"FAILED - a date field read back as '{readBack}', expected '{step.Text}'. Stopped before opening the report.");
+                        return ReportRunResult.Failed("A POS date did not read back correctly - stopped before running the report", stopwatch.Elapsed);
+                    }
+
+                    L(decision == ReadbackDecision.Ok
+                        ? $"  date {step.Text} read back OK."
+                        : "  date read-back unavailable on this field - continuing (check the first saved POS file's date).");
+                }
+
+                await Task.Delay(step.SettleMs, ct).ConfigureAwait(false);
+            }
+
+            // ---- 3: Save As (strict Win32 path) ---------------------------
+            L("step 3: waiting for the Save As dialog...");
+            var saveOutcome = await SaveAsAndVerify(item.OutputFilePath, log, ct).ConfigureAwait(false);
+            if (saveOutcome == SaveAsOutcome.NotRecognised)
+            {
+                return ReportRunResult.Failed("Save As window not recognised - stopped without typing (see the save-as inventory in the log)", stopwatch.Elapsed);
+            }
+
+            // ---- 4: close the report window the export left --------------
+            var closed = await CloseSalesSummaryReportWindowAsync(baselineForReport, log, ct).ConfigureAwait(false);
+
+            if (saveOutcome != SaveAsOutcome.Saved)
+            {
+                return ReportRunResult.Failed("Save As did not produce the expected file", stopwatch.Elapsed);
+            }
+
+            if (!closed)
+            {
+                _unsafeToContinue = true;
+                return ReportRunResult.Failed("The saved POS report window could not be closed - stopped", stopwatch.Elapsed);
+            }
+
+            // ---- 5: back on Search Drawers for the next day ---------------
+            if (!await WaitForHandleForegroundAsync(drawersHandle, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false))
+            {
+                L("FAILED - Search Drawers did not come back to the front after the report was closed.");
+                return ReportRunResult.Failed("Search Drawers did not come back after closing the report - stopped", stopwatch.Elapsed);
+            }
+
+            L("step 5: back on Search Drawers.");
+            return ReportRunResult.Saved(item.OutputFilePath, stopwatch.Elapsed);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            log($"Automation error: {ex.Message}");
+            return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
+        }
+    }
+
+    private const string PosLogPrefix = "pos: ";
+
+    private bool EnsureHandleForeground(IntPtr handle)
+    {
+        if (GetForegroundWindow() == handle) return true;
+        BringHandleToForeground(handle);
+        return WaitUntilSync(() => GetForegroundWindow() == handle, ForegroundSettleTimeout, PollInterval);
+    }
+
+    private async Task<bool> WaitForHandleForegroundAsync(IntPtr handle, TimeSpan timeout, CancellationToken ct)
+    {
+        var watch = Stopwatch.StartNew();
+        var asked = false;
+        while (watch.Elapsed < timeout)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!IsWindow(handle) || !IsWindowVisible(handle)) return false;
+            if (GetForegroundWindow() == handle) return true;
+            if (!asked && watch.Elapsed > TimeSpan.FromSeconds(2))
+            {
+                asked = true;
+                BringHandleToForeground(handle);
+            }
+
+            await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+        }
+
+        return GetForegroundWindow() == handle;
+    }
+
+    /// <summary>True when the window a key needs is the foreground window right now (Search Drawers: handle + title re-checked; menus: any Pioneer window).</summary>
+    private bool PosWindowRuleHolds(PosForegroundRule rule, IntPtr drawersHandle)
+    {
+        if (rule == PosForegroundRule.AnyPioneerWindow) return IsForegroundOwnedByPioneer();
+
+        if (!IsWindow(drawersHandle) || !IsWindowVisible(drawersHandle) || GetForegroundWindow() != drawersHandle) return false;
+        var title = new StringBuilder(256);
+        GetWindowText(drawersHandle, title, title.Capacity);
+        return PosSummaryPlan.TitleContains(title.ToString(), PosSummaryPlan.SearchDrawersTitle);
+    }
+
+    private bool SendPosKey(PosKeyStep step, Action<string> L)
+    {
+        try
+        {
+            switch (step.Key)
+            {
+                case PosKey.Alt:
+                    Keyboard.Type(VirtualKeyShort.ALT);
+                    break;
+                case PosKey.Tab:
+                    return NativeInput.SendSpecialKey((ushort)VirtualKeyShort.TAB, f => L($"  Tab: {f}"));
+                case PosKey.TypeDate:
+                    return NativeInput.TypeKeystrokes(step.Text ?? string.Empty, (int)NativeInput.KeystrokeCharDelay.TotalMilliseconds, f => L($"  date: {f}"));
+                case PosKey.AltO:
+                    Keyboard.TypeSimultaneously(VirtualKeyShort.ALT, VirtualKeyShort.KEY_O);
+                    break;
+                case PosKey.ArrowDown:
+                    return NativeInput.SendSpecialKey((ushort)VirtualKeyShort.DOWN, f => L($"  ArrowDown: {f}"));
+                case PosKey.Enter:
+                    return NativeInput.SendSpecialKey((ushort)VirtualKeyShort.RETURN, f => L($"  Enter: {f}"));
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            L($"  key {step.Key} failed ({ex.GetType().Name}).");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The macro's last POS steps: find the "Sales Summary Report" window
+    /// (new since the baseline) and close it - WM_CLOSE first, Alt+F4 only
+    /// if it is still open and foreground (PreviewCloser). No such window
+    /// is fine (nothing to close); a window that will not close is not.
+    /// </summary>
+    private async Task<bool> CloseSalesSummaryReportWindowAsync(IReadOnlyCollection<IntPtr>? baseline, Action<string> log, CancellationToken ct)
+    {
+        void L(string message) => log(PosLogPrefix + message);
+
+        SaveAsCandidate? report;
+        var watch = Stopwatch.StartNew();
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            report = PosSummaryPlan.FindReportWindow(EnumerateAllTopLevelWindowsForSaveAs(), _pioneerProcessId, baseline, ExcludedSaveAsHandles());
+            if (report is not null || watch.Elapsed >= TimeSpan.FromSeconds(5)) break;
+            await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+        }
+
+        if (report is null)
+        {
+            L("no report window found to close (nothing new with the report's name) - continuing.");
+            return true;
+        }
+
+        L($"step 4: closing the report window (class='{report.Value.ClassName}', pid={report.Value.ProcessId}).");
+        var outcome = PreviewCloser.Close(new NativeSaveAsHost(), report.Value.Handle, _pioneerProcessId, PreviewCloseConfirmTimeout, L);
+        L($"report window close result: {outcome}.");
+        return outcome is PreviewCloseOutcome.ClosedByMessage or PreviewCloseOutcome.ClosedByAltF4 or PreviewCloseOutcome.AlreadyClosed;
+    }
+
+    /// <summary>
+    /// A Sales report after the POS pass: the "Search Drawers" window may
+    /// still be open on top, so make the main window the foreground window
+    /// first (verified) - no-op when RunPosSummary never ran.
+    /// </summary>
+    private bool ReturnToMainWindowAfterPos(Action<string> log)
+    {
+        if (_searchDrawersHandle == IntPtr.Zero) return true;
+
+        var drawers = _searchDrawersHandle;
+        _searchDrawersHandle = IntPtr.Zero;
+        var mainHandle = _mainWindow is null ? IntPtr.Zero : SafeNativeHandle(_mainWindow);
+        if (mainHandle == IntPtr.Zero) return false;
+        if (mainHandle == drawers) return true;
+
+        if (EnsureHandleForeground(mainHandle))
+        {
+            log(PosLogPrefix + "main Pioneer window brought to the front for the Sales reports.");
+            return true;
+        }
+
+        log(PosLogPrefix + "could not bring the main Pioneer window to the front - nothing was sent.");
+        return false;
     }
 
     /// <summary>
@@ -2502,6 +2772,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// method never accidentally searches (or clicks into) the wrong
     /// window.
     /// </summary>
+    /// <summary>Snapshots every visible top-level handle; a window not in it later "appeared after" this moment.</summary>
+    private void CaptureExportBaseline(Action<string> L, string moment)
+    {
+        try
+        {
+            _exportBaselineHandles = EnumerateAllTopLevelWindowsForSaveAs()
+                .Where(c => c.IsVisible && c.Handle != IntPtr.Zero)
+                .Select(c => c.Handle)
+                .ToHashSet();
+            L($"{_exportBaselineHandles.Count} top-level windows visible before {moment}.");
+        }
+        catch
+        {
+            _exportBaselineHandles = null;
+        }
+    }
+
     private bool InvokeExportButton(AutomationElement searchRoot, string primaryName, string toolTipContains, Action<string> log)
     {
         var ok = false;
@@ -2526,18 +2813,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
         // Snapshot BEFORE the click: SaveAsAndVerify treats any window that is not in
         // here as "appeared after the export click" (the Save As dialog).
-        try
-        {
-            _exportBaselineHandles = EnumerateAllTopLevelWindowsForSaveAs()
-                .Where(c => c.IsVisible && c.Handle != IntPtr.Zero)
-                .Select(c => c.Handle)
-                .ToHashSet();
-            L($"{_exportBaselineHandles.Count} top-level windows visible before the export click.");
-        }
-        catch
-        {
-            _exportBaselineHandles = null;
-        }
+        CaptureExportBaseline(L, "the export click");
 
         var attempted = false;
 
@@ -3831,6 +4107,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         var excluded = new List<IntPtr>();
         if (_mainWindow is not null) excluded.Add(SafeNativeHandle(_mainWindow));
         if (_previewWindowHandle != IntPtr.Zero) excluded.Add(_previewWindowHandle);
+        if (_searchDrawersHandle != IntPtr.Zero) excluded.Add(_searchDrawersHandle);
         return excluded;
     }
 

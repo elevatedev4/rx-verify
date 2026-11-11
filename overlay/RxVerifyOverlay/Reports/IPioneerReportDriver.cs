@@ -94,6 +94,16 @@ public interface IPioneerReportDriver
     Task<ReportRunResult> RunPaymentsExport(ReportRunItem item, Action<string> log, CancellationToken ct);
 
     /// <summary>
+    /// One day of the daily POS Summary, following Will's macro from the
+    /// "Search Drawers" screen (see PosSummaryPlan). The start window is
+    /// verified before the first key; every key then goes only to that
+    /// verified window (or, after Alt+o, to a Pioneer window); Save As is
+    /// the strict path. Same never-throws-for-automation-failure contract as
+    /// RunFinancialReport.
+    /// </summary>
+    Task<ReportRunResult> RunPosSummary(ReportRunItem item, Action<string> log, CancellationToken ct);
+
+    /// <summary>
     /// "Test date entry" button (W-T92 round 3, GOAL brief step 3): runs
     /// ONLY the date-entry portion (SelectAll/PasteText/Tab, with
     /// read-back verification) against whatever "Report Parameters"

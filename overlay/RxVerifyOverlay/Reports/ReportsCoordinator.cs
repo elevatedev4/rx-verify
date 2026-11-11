@@ -168,8 +168,9 @@ public sealed class ReportsCoordinator
     /// of our exact target is overwritten. The FIRST failure stops the run:
     /// no later day is attempted (so no key goes to a screen that may still
     /// have a stray window on top), and the log names the day and report.
-    /// A run that contains a step that is not available (POS) is refused
-    /// before FindMainWindow, so nothing at all is sent to Pioneer.
+    /// A POS step is the macro's "Search Drawers" flow (RunPosSummary): the
+    /// driver verifies that screen before the first key and stops with a
+    /// plain message if it is not open.
     /// </summary>
     public async Task<DailyRunSummary> RunDailyAsync(IReadOnlyList<DailyReportStep> steps, Action<string> log, CancellationToken ct)
     {
@@ -203,6 +204,7 @@ public sealed class ReportsCoordinator
 
         // Macro: <date><ALT>e<date> - Alt+e reaches the End field (Tab only as the driver's fallback).
         var salesEntry = ReportCatalog.FindByKey(ReportCatalog.SalesSummaryKey)! with { EndFieldAccelerator = DailySalesPlan.EndFieldAccelerator };
+        var posEntry = ReportCatalog.FindByKey(ReportCatalog.PosDailyKey)!;
         var saved = 0;
 
         foreach (var step in steps)
@@ -218,8 +220,9 @@ public sealed class ReportsCoordinator
             ReportRunResult result;
             try
             {
-                var item = new ReportRunItem(salesEntry, step.Day, step.Day, step.OutputFolder, step.OutputFilePath);
-                result = await _driver.RunFinancialReport(item, WriteLine, ct).ConfigureAwait(false);
+                result = step.Kind == DailyReportKind.Pos
+                    ? await _driver.RunPosSummary(new ReportRunItem(posEntry, step.Day, step.Day, step.OutputFolder, step.OutputFilePath), WriteLine, ct).ConfigureAwait(false)
+                    : await _driver.RunFinancialReport(new ReportRunItem(salesEntry, step.Day, step.Day, step.OutputFolder, step.OutputFilePath), WriteLine, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

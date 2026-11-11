@@ -33,6 +33,9 @@ public sealed partial class ReportsWindow : Window
     private readonly ReportsCoordinator _coordinator;
     private CancellationTokenSource? _runCts;
 
+    /// <summary>What the window itself put in "Save to" - lets a daily run tell "untouched" from "user chose a folder".</summary>
+    private readonly string _initialFolderText;
+
     /// <summary>Production constructor — real PioneerReportDriver (FlaUI/UIA against the live PioneerRx window).</summary>
     public ReportsWindow() : this(new PioneerReportDriver())
     {
@@ -69,6 +72,7 @@ public sealed partial class ReportsWindow : Window
         BeginDatePicker.SelectedDate = defaultBegin;
         EndDatePicker.SelectedDate = defaultEnd;
         OutputFolderTextBox.Text = ReportRunPlan.DefaultOutputFolder(defaultEnd);
+        _initialFolderText = OutputFolderTextBox.Text;
     }
 
     /// <summary>
@@ -289,21 +293,18 @@ public sealed partial class ReportsWindow : Window
             return;
         }
 
-        var outputFolder = OutputFolderTextBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(outputFolder))
-        {
-            AppendLog("Pick an output folder first.");
-            return;
-        }
+        // Daily files go to Downloads\<yyyy-MM>_EOM reports unless "Save to" was changed.
+        var outputFolder = DailySalesPlan.ResolveOutputFolder(OutputFolderTextBox.Text, _initialFolderText, end.Value, DailySalesPlan.UserDownloadsFolder());
 
         var includeSales = DailySalesCheckBox.IsChecked == true;
         var includePos = DailyPosCheckBox.IsChecked == true;
         if (!includeSales && !includePos)
         {
-            AppendLog("Tick Sales Summary first.");
+            AppendLog("Tick POS Summary and/or Sales Summary first.");
             return;
         }
 
+        AppendLog($"Daily files go to: {outputFolder}");
         var steps = DailySalesPlan.Build(begin.Value, end.Value, outputFolder, includePos, includeSales);
         var refusal = DailySalesPlan.CheckRunnable(steps);
         if (refusal is not null)

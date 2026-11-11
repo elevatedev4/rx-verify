@@ -100,14 +100,14 @@
             "Daily Sales + POS" (Will 2026-11-10): runs the chosen reports
             once for EACH day from Begin to End (defaults to last complete
             month), saved as Sales_mm-dd-yy / POS_mm-dd-yy in the folder
-            above. Stops at the first failed day. POS is listed but
-            disabled until its Pioneer screen path is confirmed (see
-            DailySalesPlan.PosNavigationEnabled).
+            above (default: Downloads\<yyyy-MM>_EOM reports). POS runs
+            first for every day (it starts on Pioneer's Search Drawers
+            screen), then Sales. Stops at the first failed day.
         -->
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,10">
             <TextBlock Text="Daily, each day in the range:" VerticalAlignment="Center" Margin="0,0,10,0" />
             <CheckBox x:Name="DailySalesCheckBox" Content="Sales Summary" IsChecked="True" VerticalAlignment="Center" Margin="0,0,10,0" />
-            <CheckBox x:Name="DailyPosCheckBox" Content="POS Summary (not available yet)" IsEnabled="False" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <CheckBox x:Name="DailyPosCheckBox" Content="POS Summary" IsChecked="True" ToolTip="Starts on Pioneer's Search Drawers screen - open it first." VerticalAlignment="Center" Margin="0,0,10,0" />
             <Button x:Name="RunDailyButton" Content="Run daily" Padding="14,5" Click="OnRunDailyClick" />
         </StackPanel>
 

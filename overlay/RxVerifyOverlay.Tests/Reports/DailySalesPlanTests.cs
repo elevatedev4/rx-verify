@@ -149,13 +149,11 @@ public class DailySalesPlanTests
         }
 
         [Fact]
-        public void APosStepIsRefusedBeforeAnythingRunsWhileItsNavigationIsUnconfirmed()
+        public void OnlyAnEmptyPlanIsRefused()
         {
-            var steps = DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 1), Folder, true, true);
+            var both = DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 1), Folder, true, true);
 
-            Assert.False(DailySalesPlan.PosNavigationEnabled);
-            Assert.Contains("POS Summary is not available", DailySalesPlan.CheckRunnable(steps));
-            Assert.Null(DailySalesPlan.CheckRunnable(DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 1), Folder, false, true)));
+            Assert.Null(DailySalesPlan.CheckRunnable(both));
             Assert.NotNull(DailySalesPlan.CheckRunnable(Array.Empty<DailyReportStep>()));
         }
 
@@ -325,17 +323,50 @@ public class DailySalesPlanTests
         }
 
         [Fact]
-        public async Task PosStepsAreRefusedAndNothingIsSentToPioneer()
+        public async Task PosRunsForEveryDayBeforeAnySalesDayAndUsesThePosFileName()
         {
             var driver = new FakeReportDriver();
             var steps = DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 2), Folder, true, true);
+
+            var summary = await Coordinator(driver).RunDailyAsync(steps, _ => { }, CancellationToken.None);
+
+            Assert.Equal(4, summary.Saved);
+            Assert.Equal(
+                new[] { "FindMainWindow", ReportCatalog.PosDailyKey, ReportCatalog.PosDailyKey, ReportCatalog.SalesSummaryKey, ReportCatalog.SalesSummaryKey },
+                driver.Calls);
+            Assert.Equal(
+                new[] { "POS_10-01-26.pdf", "POS_10-02-26.pdf", "Sales_10-01-26.pdf", "Sales_10-02-26.pdf" },
+                driver.Items.Select(i => Path.GetFileName(i.OutputFilePath)));
+            Assert.All(driver.Items, i => Assert.Equal(i.Begin, i.End));
+        }
+
+        [Fact]
+        public async Task APosFailureStopsBeforeTheSalesPassAndNamesTheDay()
+        {
+            var driver = new FakeReportDriver();
+            driver.ResultsByFileName["POS_10-02-26.pdf"] = ReportRunResult.Failed("Open Pioneer's Search Drawers screen first - nothing was sent", TimeSpan.Zero);
+            var steps = DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 3), Folder, true, true);
             var log = new List<string>();
 
             var summary = await Coordinator(driver).RunDailyAsync(steps, log.Add, CancellationToken.None);
 
-            Assert.Equal(0, summary.Saved);
-            Assert.Empty(driver.Calls);   // not even FindMainWindow
-            Assert.Contains("POS Summary is not available", summary.FailureReason);
+            Assert.Equal(1, summary.Saved);
+            Assert.Equal(DailyReportKind.Pos, summary.FailedStep!.Kind);
+            Assert.Equal(2, driver.Items.Count);
+            Assert.DoesNotContain(driver.Items, i => i.Entry.Key == ReportCatalog.SalesSummaryKey);
+            Assert.Contains(log, l => l.Contains("stopped at POS Summary for 10-02-26"));
+        }
+
+        [Fact]
+        public async Task OnlyTheSalesEntryGetsTheAltEEndFieldAccelerator()
+        {
+            var driver = new FakeReportDriver();
+            var steps = DailySalesPlan.Build(new DateTime(2026, 10, 1), new DateTime(2026, 10, 1), Folder, true, true);
+
+            await Coordinator(driver).RunDailyAsync(steps, _ => { }, CancellationToken.None);
+
+            Assert.Null(driver.Items.Single(i => i.Entry.Key == ReportCatalog.PosDailyKey).Entry.EndFieldAccelerator);
+            Assert.Equal("e", driver.Items.Single(i => i.Entry.Key == ReportCatalog.SalesSummaryKey).Entry.EndFieldAccelerator);
         }
 
         [Fact]
@@ -348,6 +379,140 @@ public class DailySalesPlanTests
             Assert.Equal(0, summary.Saved);
             Assert.Empty(driver.Items);
             Assert.Contains("main PioneerRx window", summary.FailureReason);
+        }
+    }
+
+    public class OutputFolderTests
+    {
+        private const string Downloads = @"C:\Users\Synthetic\Downloads";
+
+        [Theory]
+        [InlineData(2026, 10, 31, "2026-10_EOM reports")]
+        [InlineData(2027, 1, 31, "2027-01_EOM reports")]
+        [InlineData(2026, 12, 1, "2026-12_EOM reports")]
+        public void FolderNameIsYearMonthPlusEomReports(int y, int m, int d, string expected)
+        {
+            Assert.Equal(expected, DailySalesPlan.EomFolderName(new DateTime(y, m, d)));
+        }
+
+        [Fact]
+        public void DefaultFolderIsDownloadsPlusTheEomName()
+        {
+            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.DefaultOutputFolder(new DateTime(2026, 10, 31), Downloads));
+        }
+
+        [Fact]
+        public void TheFolderUsesTheRangeEndNotTheBegin()
+        {
+            var steps = DailySalesPlan.Build(new DateTime(2026, 10, 25), new DateTime(2026, 11, 3), DailySalesPlan.DefaultOutputFolder(new DateTime(2026, 11, 3), Downloads), false, true);
+
+            Assert.Contains("2026-11_EOM reports", steps[0].OutputFolder);
+        }
+
+        [Fact]
+        public void AnUntouchedSaveToBoxMeansTheEomFolder()
+        {
+            var monthlyDefault = Path.Combine("docs", "Pioneer Reports", "2026-10");
+
+            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder(monthlyDefault, monthlyDefault, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder(monthlyDefault + Path.DirectorySeparatorChar, monthlyDefault, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder("  ", monthlyDefault, new DateTime(2026, 10, 31), Downloads));
+            Assert.Equal(Path.Combine(Downloads, "2026-10_EOM reports"), DailySalesPlan.ResolveOutputFolder(null, null, new DateTime(2026, 10, 31), Downloads));
+        }
+
+        [Fact]
+        public void AFolderTheUserChoseIsKept()
+        {
+            var monthlyDefault = Path.Combine("docs", "Pioneer Reports", "2026-10");
+
+            Assert.Equal(Path.Combine("D:", "my reports"), DailySalesPlan.ResolveOutputFolder(Path.Combine("D:", "my reports"), monthlyDefault, new DateTime(2026, 10, 31), Downloads));
+        }
+
+        [Fact]
+        public void TheRealDownloadsFolderEndsWithDownloads()
+        {
+            Assert.EndsWith("Downloads", DailySalesPlan.UserDownloadsFolder());
+        }
+    }
+
+    public class PosSummaryPlanTests
+    {
+        private const int Pid = 1234;
+
+        private static SaveAsCandidate W(string title, long handle, int pid = Pid, string cls = "WindowsForms10.Window.8.app.0", bool visible = true, long owner = 0, int ownerPid = 0) =>
+            new(title, cls, pid, new IntPtr(handle), new IntPtr(owner), ownerPid, visible);
+
+        [Fact]
+        public void KeysAreTheMacroInOrderWithTheDateTypedTwice()
+        {
+            var keys = PosSummaryPlan.BuildKeys(new DateTime(2026, 10, 3));
+
+            Assert.Equal(
+                new[] { PosKey.Alt, PosKey.Tab, PosKey.Tab, PosKey.TypeDate, PosKey.Tab, PosKey.TypeDate, PosKey.AltO, PosKey.ArrowDown, PosKey.Enter },
+                keys.Select(k => k.Key));
+            Assert.Equal(new[] { "10-03-26", "10-03-26" }, keys.Where(k => k.Key == PosKey.TypeDate).Select(k => k.Text));
+        }
+
+        [Fact]
+        public void EveryKeyBeforeTheMenuNeedsTheSearchDrawersWindowAndOnlyTheMenuKeysAcceptAnyPioneerWindow()
+        {
+            var keys = PosSummaryPlan.BuildKeys(new DateTime(2026, 10, 3));
+
+            Assert.All(keys.Take(7), k => Assert.Equal(PosForegroundRule.SearchDrawersWindow, k.Rule));
+            Assert.All(keys.Skip(7), k => Assert.Equal(PosForegroundRule.AnyPioneerWindow, k.Rule));
+            Assert.All(keys, k => Assert.Equal(100, k.SettleMs));
+        }
+
+        [Fact]
+        public void FindsTheSearchDrawersWindowOfPioneerAndPrefersTheForegroundOne()
+        {
+            var all = new List<SaveAsCandidate> { W("Rx Queue", 1), W("search drawers", 2), W("Search Drawers", 3) };
+
+            Assert.Equal(new IntPtr(2), PosSummaryPlan.FindSearchDrawers(all, Pid, IntPtr.Zero)!.Value.Handle);
+            Assert.Equal(new IntPtr(3), PosSummaryPlan.FindSearchDrawers(all, Pid, new IntPtr(3))!.Value.Handle);
+        }
+
+        [Fact]
+        public void ASearchDrawersWindowOwnedByPioneerInAnotherProcessCounts()
+        {
+            var all = new List<SaveAsCandidate> { W("Search Drawers", 3, pid: 99, owner: 1, ownerPid: Pid) };
+
+            Assert.NotNull(PosSummaryPlan.FindSearchDrawers(all, Pid, IntPtr.Zero));
+        }
+
+        [Fact]
+        public void NotOpenHiddenOrAnotherAppsSearchDrawersIsNotFound()
+        {
+            Assert.Null(PosSummaryPlan.FindSearchDrawers(new List<SaveAsCandidate>(), Pid, IntPtr.Zero));
+            Assert.Null(PosSummaryPlan.FindSearchDrawers(new List<SaveAsCandidate> { W("Search Drawers", 3, visible: false) }, Pid, IntPtr.Zero));
+            Assert.Null(PosSummaryPlan.FindSearchDrawers(new List<SaveAsCandidate> { W("Search Drawers", 3, pid: 99) }, Pid, IntPtr.Zero));
+            Assert.Null(PosSummaryPlan.FindSearchDrawers(new List<SaveAsCandidate> { W("Search Drawers", 0) }, Pid, IntPtr.Zero));
+            Assert.Null(PosSummaryPlan.FindSearchDrawers(new List<SaveAsCandidate> { W("Rx 123 - Patient Name", 3) }, Pid, IntPtr.Zero));
+        }
+
+        [Fact]
+        public void TheMessageWhenItIsNotOpenIsPlainAndSaysNothingWasSent()
+        {
+            Assert.Contains("Search Drawers", PosSummaryPlan.OpenSearchDrawersMessage);
+            Assert.Contains("Nothing was sent", PosSummaryPlan.OpenSearchDrawersMessage);
+        }
+
+        [Fact]
+        public void FindsOnlyANewSalesSummaryReportWindowOfPioneer()
+        {
+            var baseline = new HashSet<IntPtr> { new IntPtr(1), new IntPtr(2) };
+            var all = new List<SaveAsCandidate>
+            {
+                W("Sales Summary Report", 2),                    // existed before the export
+                W("Sales Summary Report", 5, pid: 99),           // another app
+                W("Something else", 6),
+                W("Sales Summary Report", 7),
+                W("Sales Summary Report", 8)
+            };
+
+            Assert.Equal(new IntPtr(7), PosSummaryPlan.FindReportWindow(all, Pid, baseline, new List<IntPtr>())!.Value.Handle);
+            Assert.Equal(new IntPtr(8), PosSummaryPlan.FindReportWindow(all, Pid, baseline, new List<IntPtr> { new IntPtr(7) })!.Value.Handle);
+            Assert.Null(PosSummaryPlan.FindReportWindow(all, Pid, null, new List<IntPtr>()));
         }
     }
 }

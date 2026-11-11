@@ -53,14 +53,6 @@ public static class DailySalesPlan
     /// <summary>Upper bound on the day count of one run - a typo (year 2206) must not queue thousands of reports.</summary>
     public const int MaxDays = 366;
 
-    /// <summary>
-    /// The POS Summary navigation (how the "Search Drawers" screen is
-    /// reached and what <ALT><TAB><TAB> does there) is not settled by the
-    /// macro, so POS steps are refused up front rather than guessed. Flip to
-    /// true only after Will's answers are built into PioneerReportDriver.
-    /// </summary>
-    public const bool PosNavigationEnabled = false;
-
     /// <summary>The macro jumps to the End date field with Alt+e.</summary>
     public const string EndFieldAccelerator = "e";
 
@@ -139,22 +131,44 @@ public static class DailySalesPlan
         return steps;
     }
 
-    /// <summary>Null when every step can run; otherwise why the whole run is refused before anything is sent to Pioneer.</summary>
-    public static string? CheckRunnable(IReadOnlyList<DailyReportStep> steps)
-    {
-        if (steps.Count == 0) return "Nothing to run.";
-        if (!PosNavigationEnabled)
-        {
-            foreach (var step in steps)
-            {
-                if (step.Kind == DailyReportKind.Pos)
-                {
-                    return "POS Summary is not available yet: how to reach its screen is still being confirmed. Nothing was sent to Pioneer.";
-                }
-            }
-        }
+    /// <summary>Null when there is something to run; otherwise why the run is refused before anything is sent to Pioneer.</summary>
+    public static string? CheckRunnable(IReadOnlyList<DailyReportStep> steps) =>
+        steps.Count == 0 ? "Nothing to run." : null;
 
-        return null;
+    /// <summary>
+    /// THE one place the "month and year + _EOM reports" folder name is
+    /// decided (Will, W-Q11: "It should make a folder in downloads that has
+    /// the month and year + _EOM reports"): e.g. "2026-10_EOM reports". Takes the
+    /// range's END date. If Will wants the monthly reports there too
+    /// (W-Q12), ReportRunPlan.DefaultOutputFolder calls this and nothing else changes.
+    /// </summary>
+    public static string EomFolderName(DateTime rangeEnd) => rangeEnd.ToString("yyyy-MM", CultureInfo.InvariantCulture) + "_EOM reports";
+
+    /// <summary>"&lt;Downloads&gt;\&lt;yyyy-MM&gt;_EOM reports" - <paramref name="downloadsFolder"/> is the user's Downloads folder.</summary>
+    public static string DefaultOutputFolder(DateTime rangeEnd, string downloadsFolder) =>
+        Path.Combine(downloadsFolder, EomFolderName(rangeEnd));
+
+    /// <summary>The current user's Downloads folder (%USERPROFILE%\Downloads).</summary>
+    public static string UserDownloadsFolder() =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+
+    /// <summary>
+    /// The folder a daily run saves to: the EOM folder unless the user
+    /// changed the "Save to" box (Browse or typing). A box that is blank or
+    /// still holds <paramref name="untouchedDefaultText"/> (what the window
+    /// put there itself) counts as not changed.
+    /// </summary>
+    public static string ResolveOutputFolder(string? typedFolder, string? untouchedDefaultText, DateTime rangeEnd, string downloadsFolder)
+    {
+        var typed = (typedFolder ?? string.Empty).Trim();
+        if (typed.Length == 0 || SameFolder(typed, untouchedDefaultText)) return DefaultOutputFolder(rangeEnd, downloadsFolder);
+        return typed;
+    }
+
+    private static bool SameFolder(string a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(b)) return false;
+        return string.Equals(a.TrimEnd('\\', '/'), b.Trim().TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The line logged before a step: counts and the report name, no patient data.</summary>
