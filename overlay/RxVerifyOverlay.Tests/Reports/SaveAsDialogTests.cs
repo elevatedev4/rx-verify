@@ -568,13 +568,18 @@ public class SaveAsDialogTests
             Assert.Equal(new IntPtr(2), SaveAsDialogDetector.FindFileNameEdit(legacy)!.Value.Handle);
         }
 
+        // Review: every common file dialog has an identified file-name control, so one without it is not a candidate.
         [Fact]
-        public void ADialogWhoseOnlyEditIsUnidentifiedIsStillDetectedButHasNoFileNameEdit()
+        public void ADialogWhoseOnlyEditIsUnidentifiedIsRejectedAndTheVerdictSaysSo()
         {
             var children = new List<SaveAsChild> { Child(1, "Edit", 7), Child(2, "Button", 1, "&Save") };
 
-            Assert.Equal(SaveAsRejection.None, Check(Window("Save As", handle: 5), children, Baseline(1)));
+            Assert.Equal(SaveAsRejection.NoFileNameEdit, Check(Window("Save As", handle: 5), children, Baseline(1)));
             Assert.Null(SaveAsDialogDetector.FindFileNameEdit(children));
+            Assert.Empty(SaveAsDialogDetector.FindAll(new[] { Window("Save As", handle: 5) }, Baseline(1), _ => children));
+
+            var row = new SaveAsWindowRow(Window("Save As", handle: 5), "p", children);
+            Assert.Contains("verdict=NoFileNameEdit", SaveAsWindowTable.FormatRow(row, Baseline(1)));
         }
 
         [Fact]
@@ -627,7 +632,7 @@ public class SaveAsDialogTests
             var dialog = Window("Save As", handle: 5);
 
             var noEdit = new List<SaveAsChild> { Child(1, "Static", 65535, "Done"), Child(2, "Button", 1, "&Save") };
-            Assert.Equal(SaveAsRejection.NoEditChild, Check(dialog, noEdit, Baseline(1)));
+            Assert.Equal(SaveAsRejection.NoFileNameEdit, Check(dialog, noEdit, Baseline(1)));
 
             var noSave = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "OK"), Child(3, "Button", 2, "Cancel") };
             Assert.Equal(SaveAsRejection.NoSaveButton, Check(dialog, noSave, Baseline(1)));
@@ -648,39 +653,103 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void FindReturnsTheNewDialogAndOnlyInspectsWindowsThatPassTheWindowTests()
+        public void FindAllReturnsTheNewDialogAndOnlyInspectsWindowsThatPassTheWindowTests()
         {
             var all = new List<SaveAsCandidate>
             {
                 Window("Run Financial Reports", className: "WindowsForms10.Window.8.app.0", handle: 1),
                 Window("Save As", handle: 2),                       // pre-existing: in the baseline
                 Window("Notice", handle: 3),                        // new but not allowlisted
-                Window("Save As", pid: OtherPid, handle: 4),        // the real one, another process
-                Window("Save As", handle: 6)                        // a second candidate: first one wins
+                Window("Save As", pid: OtherPid, handle: 4)         // the real one, another process
             };
             var inspected = new List<long>();
 
-            var found = SaveAsDialogDetector.Find(all, Baseline(1, 2), h =>
+            var found = SaveAsDialogDetector.FindAll(all, Baseline(1, 2), h =>
             {
                 inspected.Add(h.ToInt64());
                 return RealSaveDialogChildren();
             });
 
-            Assert.NotNull(found);
-            Assert.Equal(new IntPtr(4), found!.Window.Handle);
-            Assert.Equal(new IntPtr(13), found.FileNameEdit!.Value.Handle);
-            Assert.Equal(new IntPtr(14), found.SaveButton.Handle);
-            Assert.Equal(new IntPtr(15), found.CancelButton!.Value.Handle);
+            var only = Assert.Single(found);
+            Assert.Equal(new IntPtr(4), only.Window.Handle);
+            Assert.Equal(new IntPtr(13), only.FileNameEdit.Handle);
+            Assert.Equal(new IntPtr(14), only.SaveButton.Handle);
+            Assert.Equal(new IntPtr(15), only.CancelButton!.Value.Handle);
             Assert.Equal(new List<long> { 4 }, inspected);
+
+            // A single candidate from a foreign process is accepted (process is only a tie-breaker).
+            var selection = SaveAsDialogDetector.Select(found, all, PioneerPid);
+            Assert.Equal(new IntPtr(4), selection.Chosen!.Window.Handle);
+            Assert.Equal(1, selection.CandidateCount);
         }
 
         [Fact]
-        public void FindReturnsNullWhenNothingQualifies()
+        public void FindAllReturnsNothingWhenNothingQualifies()
         {
             var all = new List<SaveAsCandidate> { Window("Save As", handle: 2), Window("Notice", handle: 3) };
 
-            Assert.Null(SaveAsDialogDetector.Find(all, Baseline(2), _ => RealSaveDialogChildren()));
-            Assert.Null(SaveAsDialogDetector.Find(new List<SaveAsCandidate>(), Baseline(), _ => RealSaveDialogChildren()));
+            Assert.Empty(SaveAsDialogDetector.FindAll(all, Baseline(2), _ => RealSaveDialogChildren()));
+            Assert.Empty(SaveAsDialogDetector.FindAll(new List<SaveAsCandidate>(), Baseline(), _ => RealSaveDialogChildren()));
+            Assert.Null(SaveAsDialogDetector.Select(new List<SaveAsDetection>(), all, PioneerPid).Chosen);
+        }
+
+        // Review finding 1: a browser / Word "Save As" opening in the same seconds must not be acted on.
+        [Fact]
+        public void TwoSimultaneousCandidatesTheOneOwnedByPioneerIsChosen()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("Save As", pid: OtherPid, handle: 4),                                 // a browser's
+                Window("Save As", pid: OtherPid, handle: 6, owner: 2, ownerPid: PioneerPid), // owned by a Pioneer window
+                Window("Run Financial Reports", className: "WindowsForms10.Window.8.app.0", handle: 2)
+            };
+
+            var found = SaveAsDialogDetector.FindAll(all, Baseline(2), _ => RealSaveDialogChildren());
+            var selection = SaveAsDialogDetector.Select(found, all, PioneerPid);
+
+            Assert.Equal(2, selection.CandidateCount);
+            Assert.Equal(new IntPtr(6), selection.Chosen!.Window.Handle);
+        }
+
+        [Fact]
+        public void ThePioneerOwnerChainThroughAnotherWindowCountsAsPioneerRelated()
+        {
+            var all = new List<SaveAsCandidate>
+            {
+                Window("x", className: "Intermediate", pid: OtherPid, handle: 20, owner: 21, ownerPid: OtherPid),
+                Window("y", className: "WindowsForms10.Window.8.app.0", pid: PioneerPid, handle: 21),
+                Window("Save As", pid: OtherPid, handle: 6, owner: 20, ownerPid: OtherPid),
+                Window("Save As", pid: OtherPid, handle: 7)
+            };
+
+            Assert.True(SaveAsDialogDetector.IsPioneerRelated(all[2], all, PioneerPid));
+            Assert.False(SaveAsDialogDetector.IsPioneerRelated(all[3], all, PioneerPid));
+            Assert.False(SaveAsDialogDetector.IsPioneerRelated(all[2], all, 0));
+        }
+
+        [Fact]
+        public void TwoForeignCandidatesOrTwoPioneerCandidatesActOnNone()
+        {
+            var foreign = new List<SaveAsCandidate>
+            {
+                Window("Save As", pid: OtherPid, handle: 4),
+                Window("Save As", pid: 7777, handle: 6)
+            };
+            var both = new List<SaveAsCandidate>
+            {
+                Window("Save As", handle: 4),
+                Window("Save As", handle: 6)
+            };
+
+            var s1 = SaveAsDialogDetector.Select(SaveAsDialogDetector.FindAll(foreign, Baseline(), _ => RealSaveDialogChildren()), foreign, PioneerPid);
+            var s2 = SaveAsDialogDetector.Select(SaveAsDialogDetector.FindAll(both, Baseline(), _ => RealSaveDialogChildren()), both, PioneerPid);
+
+            Assert.Null(s1.Chosen);
+            Assert.Equal(2, s1.CandidateCount);
+            Assert.Contains("none is Pioneer-related", s1.Note);
+            Assert.Null(s2.Chosen);
+            Assert.Equal(2, s2.CandidateCount);
+            Assert.Contains("more than one", s2.Note);
         }
 
         [Fact]
@@ -823,8 +892,13 @@ public class SaveAsDialogTests
         public string? TextAfterSet;           // null = echo what was set
         public bool ClickWorks = true;
         public bool TypeWorks = true;
-        public string? TextAfterTyping;        // null = echo what was typed
-        public bool LoseForegroundWhileTyping;
+                public int LoseForegroundAfterChars = -1;   // -1 = never
+        public int LoseFocusAfterChars = -1;
+        public bool FocusWorks = true;
+        public char? SwallowChar;               // a control that drops this character
+        private bool _focused = true;
+        private int _typedChars;
+        public bool CancelButtonCloses = true;
         public bool AltSWorks = true;
         public bool CloseMakesWindowDisappear = true;
         public bool ForegroundSurvivesClose = true;
@@ -838,12 +912,17 @@ public class SaveAsDialogTests
         }
         public bool IsVisible(IntPtr handle) => Visible;
         public int ProcessIdOf(IntPtr handle) => Pid;
-        public string ClassOf(IntPtr handle) => handle.ToInt64() switch { 101 => EditClass, 102 => ButtonClass, _ => Class };
-        public bool IsChildOf(IntPtr parent, IntPtr child) => child.ToInt64() switch { 101 => EditIsChild, 102 => ButtonIsChild, _ => false };
+        public string ClassOf(IntPtr handle) => handle.ToInt64() switch { 101 => EditClass, 102 => ButtonClass, 103 => "Button", _ => Class };
+        public bool IsChildOf(IntPtr parent, IntPtr child) => child.ToInt64() switch { 101 => EditIsChild, 102 => ButtonIsChild, 103 => true, _ => false };
         public bool IsForeground(IntPtr handle) => Foreground == handle;
         public bool SetText(IntPtr edit, string text) { Calls.Add("SetText"); _text = text; return SetTextWorks; }
         public string? GetText(IntPtr edit) { Calls.Add("GetText"); return TextAfterSet ?? _text; }
-        public bool ClickButton(IntPtr button) { Calls.Add("Click"); return ClickWorks; }
+        public bool ClickButton(IntPtr button)
+        {
+            Calls.Add(button.ToInt64() == 103 ? "CancelClick" : "Click");
+            if (button.ToInt64() == 103 && CancelButtonCloses) WindowExists = false;
+            return ClickWorks;
+        }
 
         public bool BringToForeground(IntPtr handle)
         {
@@ -852,12 +931,25 @@ public class SaveAsDialogTests
             return BringToForegroundWorks;
         }
 
-        public bool TypeFileName(string text)
+        public bool FocusControl(IntPtr dialog, IntPtr control)
+        {
+            Calls.Add("Focus");
+            _focused = FocusWorks;
+            return FocusWorks;
+        }
+
+        public bool IsFocused(IntPtr control) => _focused;
+
+        public bool SelectAllKeys() { Calls.Add("SelectAll"); _text = string.Empty; TextAfterSet = null; return true; }
+
+        public bool TypeCharacter(char character)
         {
             Calls.Add("Type");
-            _text = TextAfterTyping ?? text;
+            _typedChars++;
+            if (character != SwallowChar) _text += character;
             TextAfterSet = null;
-            if (LoseForegroundWhileTyping) Foreground = IntPtr.Zero;
+            if (_typedChars == LoseForegroundAfterChars) Foreground = IntPtr.Zero;
+            if (_typedChars == LoseFocusAfterChars) _focused = false;
             return TypeWorks;
         }
 
@@ -894,6 +986,7 @@ public class SaveAsDialogTests
         private static void AssertNoKeysAndNoClose(FakeHost host)
         {
             Assert.DoesNotContain("Type", host.Calls);
+            Assert.DoesNotContain("SelectAll", host.Calls);
             Assert.DoesNotContain("Alt+S", host.Calls);
             Assert.DoesNotContain("Alt+F4", host.Calls);
             Assert.DoesNotContain("WM_CLOSE", host.Calls);
@@ -923,15 +1016,17 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void AReadBackThatDoesNotMatchFallsBackToTypingAndAltSWhileTheDialogIsForeground()
+        public void AReadBackThatDoesNotMatchFallsBackToFocusTypingAndAltSWhileTheDialogIsForeground()
         {
             var host = new FakeHost { TextAfterSet = "something else" };
 
             Assert.Equal(SaveAsEntryResult.ClickedByKeyboard, Run(host));
 
             Assert.DoesNotContain("Click", host.Calls);
-            Assert.True(host.Calls.IndexOf("Type") < host.Calls.IndexOf("Alt+S"));
-            Assert.DoesNotContain("Alt+F4", host.Calls);
+            Assert.True(host.Calls.IndexOf("Focus") < host.Calls.IndexOf("SelectAll"));
+            Assert.True(host.Calls.IndexOf("SelectAll") < host.Calls.IndexOf("Type"));
+            Assert.Equal(Target.Length, host.Calls.Count(c => c == "Type"));
+            Assert.True(host.Calls.LastIndexOf("Type") < host.Calls.IndexOf("Alt+S"));
             Assert.DoesNotContain("WM_CLOSE", host.Calls);
         }
 
@@ -959,20 +1054,42 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void LosingTheForegroundWhileTypingStopsBeforeAltS()
+        public void IfTheFileNameBoxCannotBeFocusedNoKeyIsSent()
         {
-            var host = new FakeHost { SetTextWorks = false, LoseForegroundWhileTyping = true };
+            var host = new FakeHost { SetTextWorks = false, FocusWorks = false };
 
             Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
 
-            Assert.Contains("Type", host.Calls);
+            AssertNoKeysAndNoClose(host);
+        }
+
+        // Review finding 3: foreground is checked before EVERY character, not just before the first.
+        [Fact]
+        public void LosingTheForegroundMidTypingStopsAtOnceAndNeverPressesAltS()
+        {
+            var host = new FakeHost { SetTextWorks = false, LoseForegroundAfterChars = 5 };
+
+            Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
+
+            Assert.Equal(5, host.Calls.Count(c => c == "Type"));
             Assert.DoesNotContain("Alt+S", host.Calls);
         }
 
         [Fact]
-        public void ATypedNameThatReadsBackWrongIsNotSaved()
+        public void LosingFocusMidTypingStopsAtOnceSoNoSpaceCanLandOnAButton()
         {
-            var host = new FakeHost { SetTextWorks = false, TextAfterTyping = "wrong" };
+            var host = new FakeHost { SetTextWorks = false, LoseFocusAfterChars = 3 };
+
+            Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
+
+            Assert.Equal(3, host.Calls.Count(c => c == "Type"));
+            Assert.DoesNotContain("Alt+S", host.Calls);
+        }
+
+        [Fact]
+        public void ATypedNameThatDoesNotReadBackInFullIsNeverSaved()
+        {
+            var host = new FakeHost { SetTextWorks = false, SwallowChar = '.' };
 
             Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
 
@@ -980,19 +1097,31 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void WhenNoFileNameEditWasIdentifiedNothingIsWrittenToAnyEditAndTheKeyboardRouteRuns()
+        public void ATypingFailureStopsTheRouteWithoutAltS()
+        {
+            var host = new FakeHost { SetTextWorks = false, TypeWorks = false };
+
+            Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
+
+            Assert.Equal(1, host.Calls.Count(c => c == "Type"));
+            Assert.DoesNotContain("Alt+S", host.Calls);
+        }
+
+        // Review finding 3/4: with no identified file-name Edit nothing is typed or written at all.
+        [Fact]
+        public void WithNoIdentifiedFileNameEditNothingIsSentAtAll()
         {
             var host = new FakeHost();
 
-            Assert.Equal(SaveAsEntryResult.ClickedByKeyboard, Run(host, edit: IntPtr.Zero));
+            Assert.Equal(SaveAsEntryResult.StaleWindow, Run(host, edit: IntPtr.Zero));
 
             Assert.DoesNotContain("SetText", host.Calls);
-            Assert.DoesNotContain("GetText", host.Calls);
-            Assert.True(host.Calls.IndexOf("Type") < host.Calls.IndexOf("Alt+S"));
+            Assert.DoesNotContain("Focus", host.Calls);
+            AssertNoKeysAndNoClose(host);
         }
 
         [Fact]
-        public void AClickThatCannotBeDeliveredAfterAVerifiedNameFallsBackToAltS()
+        public void AClickThatCannotBeDeliveredAfterAVerifiedNameFallsBackToAltSWithoutRetyping()
         {
             var host = new FakeHost { ClickWorks = false };
 
@@ -1065,6 +1194,97 @@ public class SaveAsDialogTests
             Run(new FakeHost { TextAfterSet = "x" }, log);
 
             Assert.All(log, line => Assert.DoesNotContain("Save As", line));
+        }
+    }
+
+    // Review finding 2: the cancel path re-checks pid and class, and sends nothing when nothing was confirmed.
+    public class CancelDialogTests
+    {
+        private static readonly SaveAsCandidate Confirmed = Window("Save As", handle: 100);
+        private static readonly IntPtr Cancel = new(103);
+
+        private static SaveAsCancelResult Run(FakeHost host, SaveAsCandidate? dialog = null, IntPtr? cancel = null, List<string>? log = null) =>
+            SaveAsActions.CancelDialog(host, dialog ?? Confirmed, cancel ?? Cancel, TimeSpan.FromSeconds(1), m => (log ?? new List<string>()).Add(m));
+
+        [Fact]
+        public void PressesTheDialogsOwnCancelButtonAndSendsNoCloseWhenThatClosesIt()
+        {
+            var host = new FakeHost();
+
+            Assert.Equal(SaveAsCancelResult.Closed, Run(host));
+
+            Assert.Contains("CancelClick", host.Calls);
+            Assert.DoesNotContain("WM_CLOSE", host.Calls);
+            Assert.DoesNotContain("Alt+F4", host.Calls);
+        }
+
+        [Fact]
+        public void FallsBackToWmCloseOnTheSameHandleWhenThereIsNoCancelButtonOrItDoesNothing()
+        {
+            var noButton = new FakeHost();
+            Assert.Equal(SaveAsCancelResult.Closed, Run(noButton, cancel: IntPtr.Zero));
+            Assert.DoesNotContain("CancelClick", noButton.Calls);
+            Assert.Contains("WM_CLOSE", noButton.Calls);
+
+            var inert = new FakeHost { CancelButtonCloses = false };
+            Assert.Equal(SaveAsCancelResult.Closed, Run(inert));
+            Assert.True(inert.Calls.IndexOf("CancelClick") < inert.Calls.IndexOf("WM_CLOSE"));
+        }
+
+        [Fact]
+        public void ReportsStillOpenWhenNeitherWorks()
+        {
+            var host = new FakeHost { CancelButtonCloses = false, CloseMakesWindowDisappear = false };
+
+            Assert.Equal(SaveAsCancelResult.StillOpen, Run(host));
+        }
+
+        [Theory]
+        [InlineData("gone")]
+        [InlineData("hidden")]
+        [InlineData("otherProcess")]
+        [InlineData("otherClass")]
+        public void ARecycledOrChangedHandleGetsNothingNoCancelAndNoClose(string change)
+        {
+            var host = new FakeHost();
+            switch (change)
+            {
+                case "gone": host.WindowExists = false; break;
+                case "hidden": host.Visible = false; break;
+                case "otherProcess": host.Pid = OtherPid; break;
+                case "otherClass": host.Class = "Chrome_WidgetWin_1"; break;
+            }
+
+            Assert.Equal(SaveAsCancelResult.Skipped, Run(host));
+
+            Assert.DoesNotContain("CancelClick", host.Calls);
+            Assert.DoesNotContain("WM_CLOSE", host.Calls);
+            Assert.DoesNotContain("Alt+F4", host.Calls);
+        }
+
+        [Fact]
+        public void WhenNothingWasConfirmedNoCancelAndNoCloseIsSent()
+        {
+            var host = new FakeHost();
+            var nothing = new SaveAsCandidate("", "", 0, IntPtr.Zero, IntPtr.Zero, 0, false);
+
+            Assert.Equal(SaveAsCancelResult.Skipped, Run(host, nothing, IntPtr.Zero));
+
+            Assert.DoesNotContain("CancelClick", host.Calls);
+            Assert.DoesNotContain("WM_CLOSE", host.Calls);
+            Assert.DoesNotContain("Click", host.Calls);
+        }
+
+        [Fact]
+        public void ACancelHandleThatIsNotAButtonChildOfTheDialogIsNotClicked()
+        {
+            var host = new FakeHost();
+
+            Assert.Equal(SaveAsCancelResult.Closed, Run(host, cancel: new IntPtr(555)));
+
+            Assert.DoesNotContain("CancelClick", host.Calls);
+            Assert.DoesNotContain("Click", host.Calls);
+            Assert.Contains("WM_CLOSE", host.Calls);
         }
     }
 

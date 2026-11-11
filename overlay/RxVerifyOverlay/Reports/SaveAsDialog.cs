@@ -200,7 +200,8 @@ public enum SaveAsRejection
     NotNew = 1 << 1,
     NotDialogClass = 1 << 2,
     TitleNotAllowed = 1 << 3,
-    NoEditChild = 1 << 4,
+    /// <summary>No identified file-name control: no Edit with control id 1001 / 1152 and none under a ComboBox / ComboBoxEx32.</summary>
+    NoFileNameEdit = 1 << 4,
     NoSaveButton = 1 << 5
 }
 
@@ -214,8 +215,11 @@ public enum SaveAsRejection
 ///     the export click;
 /// (b) window class #32770;
 /// (c) title (trimmed, case-insensitive) is exactly one of <see cref="AllowedTitles"/>;
-/// (d) at any depth it contains an Edit control and a Button whose caption
-///     with "&amp;" removed equals "Save".
+/// (d) at any depth it contains an identified file-name Edit (control id 1001 or
+///     1152, or an Edit under a ComboBox / ComboBoxEx32) and a Button whose
+///     caption with "&amp;" removed equals "Save".
+/// When several windows pass, <see cref="Select"/> acts on one only if it is the
+/// single Pioneer-related candidate (pid, owner or owner chain); otherwise on none.
 /// Everything done afterwards is addressed to that dialog's own handles only.
 /// </summary>
 public static class SaveAsDialogDetector
@@ -246,11 +250,11 @@ public static class SaveAsDialogDetector
         return failure;
     }
 
-    /// <summary>Content tests (d): any Edit at any depth, and a Button captioned Save / &amp;Save.</summary>
+    /// <summary>Content tests (d): an identified file-name Edit at any depth, and a Button captioned Save / &amp;Save.</summary>
     public static SaveAsRejection CheckChildren(IReadOnlyList<SaveAsChild> children)
     {
         var failure = SaveAsRejection.None;
-        if (!children.Any(ch => IsEditClass(ch.ClassName))) failure |= SaveAsRejection.NoEditChild;
+        if (FindFileNameEdit(children) is null) failure |= SaveAsRejection.NoFileNameEdit;
         if (FindSaveButton(children) is null) failure |= SaveAsRejection.NoSaveButton;
         return failure;
     }
@@ -347,10 +351,11 @@ public static class SaveAsDialogDetector
     public static SaveAsRejection Evaluate(SaveAsCandidate c, IReadOnlyList<SaveAsChild> children, IReadOnlyCollection<IntPtr>? baselineHandles) =>
         CheckWindow(c, baselineHandles) | CheckChildren(children);
 
-    /// <summary>The first accepted dialog among <paramref name="all"/> (z-order), or null. <paramref name="childrenOf"/> is only called for windows that pass the window tests.</summary>
-    public static SaveAsDetection? Find(
+    /// <summary>Every accepted dialog among <paramref name="all"/> (z-order). <paramref name="childrenOf"/> is only called for windows that pass the window tests.</summary>
+    public static IReadOnlyList<SaveAsDetection> FindAll(
         IReadOnlyList<SaveAsCandidate> all, IReadOnlyCollection<IntPtr>? baselineHandles, Func<IntPtr, IReadOnlyList<SaveAsChild>> childrenOf)
     {
+        var result = new List<SaveAsDetection>();
         foreach (var candidate in all)
         {
             if (CheckWindow(candidate, baselineHandles) != SaveAsRejection.None) continue;
@@ -359,16 +364,65 @@ public static class SaveAsDialogDetector
             if (CheckChildren(children) != SaveAsRejection.None) continue;
 
             var save = FindSaveButton(children);
-            if (save is null) continue;
-            return new SaveAsDetection(candidate, FindFileNameEdit(children), save.Value, FindCancelButton(children));
+            var edit = FindFileNameEdit(children);
+            if (save is null || edit is null) continue;
+            result.Add(new SaveAsDetection(candidate, edit.Value, save.Value, FindCancelButton(children)));
         }
 
-        return null;
+        return result;
+    }
+
+    /// <summary>
+    /// True when the window is Pioneer's by process, by its owner's process, or
+    /// because following the owner chain through <paramref name="all"/> reaches a
+    /// window of Pioneer's process. A tie-breaker only - never a requirement.
+    /// </summary>
+    public static bool IsPioneerRelated(SaveAsCandidate c, IReadOnlyList<SaveAsCandidate> all, int pioneerProcessId)
+    {
+        if (pioneerProcessId == 0) return false;
+        if (c.ProcessId == pioneerProcessId || c.OwnerProcessId == pioneerProcessId) return true;
+
+        var owner = c.OwnerHandle;
+        for (var depth = 0; depth < 8 && owner != IntPtr.Zero; depth++)
+        {
+            SaveAsCandidate? next = null;
+            foreach (var w in all)
+            {
+                if (w.Handle == owner) { next = w; break; }
+            }
+
+            if (next is null) return false;
+            if (next.Value.ProcessId == pioneerProcessId || next.Value.OwnerProcessId == pioneerProcessId) return true;
+            owner = next.Value.OwnerHandle;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// One match: that one (even from another process - the suspected cause of the
+    /// earlier misses). Several: the single Pioneer-related one, else none (ambiguous:
+    /// nothing is acted on). <see cref="SaveAsSelection.CandidateCount"/> is always the number of matches.
+    /// </summary>
+    public static SaveAsSelection Select(IReadOnlyList<SaveAsDetection> matches, IReadOnlyList<SaveAsCandidate> all, int pioneerProcessId)
+    {
+        if (matches.Count == 0) return new SaveAsSelection(null, 0, "no candidate");
+        if (matches.Count == 1) return new SaveAsSelection(matches[0], 1, "single candidate");
+
+        var pioneer = matches.Where(m => IsPioneerRelated(m.Window, all, pioneerProcessId)).ToList();
+        return pioneer.Count == 1
+            ? new SaveAsSelection(pioneer[0], matches.Count, "several candidates; exactly one is Pioneer-related")
+            : new SaveAsSelection(null, matches.Count, pioneer.Count == 0
+                ? "several candidates and none is Pioneer-related"
+                : "several candidates and more than one is Pioneer-related");
     }
 }
 
-/// <summary>An accepted Save As dialog and its own control handles. <paramref name="FileNameEdit"/> is null when an Edit exists but none could be identified as the file-name box.</summary>
-public sealed record SaveAsDetection(SaveAsCandidate Window, SaveAsChild? FileNameEdit, SaveAsChild SaveButton, SaveAsChild? CancelButton);
+/// <summary>Outcome of <see cref="SaveAsDialogDetector.Select"/>: the dialog to act on (null = act on none) and how many windows matched.</summary>
+public sealed record SaveAsSelection(SaveAsDetection? Chosen, int CandidateCount, string Note);
+
+/// <summary>An accepted Save As dialog and its own control handles (the file-name Edit is always identified; Cancel may be absent).</summary>
+public sealed record SaveAsDetection(SaveAsCandidate Window, SaveAsChild FileNameEdit, SaveAsChild SaveButton, SaveAsChild? CancelButton);
 
 /// <summary>One row of the "window table" logged when the dialog is not found.</summary>
 public sealed record SaveAsWindowRow(SaveAsCandidate Window, string ProcessName, IReadOnlyList<SaveAsChild>? Children);

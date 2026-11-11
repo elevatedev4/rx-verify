@@ -343,6 +343,30 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
     private const uint BM_CLICK = 0x00F5;
 
+    private const uint WM_NEXTDLGCTL = 0x0028;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GUITHREADINFO
+    {
+        public int cbSize;
+        public uint flags;
+        public IntPtr hwndActive;
+        public IntPtr hwndFocus;
+        public IntPtr hwndCapture;
+        public IntPtr hwndMenuOwner;
+        public IntPtr hwndMoveSize;
+        public IntPtr hwndCaret;
+        public RECT rcCaret;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")]
+    private static extern uint GetWindowThreadProcessIdRaw(IntPtr hWnd, IntPtr processId);
+
+    private static uint GetWindowThreadProcessIdRaw(IntPtr hWnd) => GetWindowThreadProcessIdRaw(hWnd, IntPtr.Zero);
+
     private const uint GW_OWNER = 4;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2832,7 +2856,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// window.
     /// </summary>
     /// <summary>Snapshots every visible top-level handle; a window not in it later "appeared after" this moment.</summary>
-    private void CaptureExportBaseline(Action<string> L, string moment)
+    private bool CaptureExportBaseline(Action<string> L, string moment)
     {
         try
         {
@@ -2841,10 +2865,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 .Select(c => c.Handle)
                 .ToHashSet();
             L($"{_exportBaselineHandles.Count} top-level windows visible before {moment}.");
+            return true;
         }
         catch
         {
             _exportBaselineHandles = null;
+            return false;
         }
     }
 
@@ -2872,7 +2898,12 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
         // Snapshot BEFORE the click: SaveAsAndVerify treats any window that is not in
         // here as "appeared after the export click" (the Save As dialog).
-        CaptureExportBaseline(L, "the export click");
+        // No snapshot, no click: without it a new dialog cannot be told from an old window.
+        if (!CaptureExportBaseline(L, "the export click"))
+        {
+            log("Export NOT clicked - the pre-click window snapshot could not be taken.");
+            return false;
+        }
 
         var attempted = false;
 
@@ -2898,7 +2929,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 {
                     // Never a second click once one was attempted: the first
                     // invoke may have thrown AFTER the dialog opened.
-                    if (attempted && FindSaveAsDialog(EnumerateAllTopLevelWindowsForSaveAs()) is not null)
+                    if (attempted && FindSaveAsDialog(EnumerateAllTopLevelWindowsForSaveAs()).Candidates > 0)
                     {
                         L("Save As dialog is already open after the first export attempt - not clicking another export control.");
                         return true;
@@ -3841,8 +3872,11 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     // SAVE AS  (W-T92 round 8 rewrite - every step logs with a "save-as:" prefix)
     // ------------------------------------------------------------------
 
-    /// <summary>A confirmed Save As dialog (SaveAsDialogDetector): the top-level window plus its own file-name Edit (Zero when none could be identified), Save button and Cancel button (Zero when absent) HWNDs found by Win32 child enumeration.</summary>
+    /// <summary>A confirmed Save As dialog (SaveAsDialogDetector): the top-level window plus its own file-name Edit (always identified), Save button and Cancel button (Zero when absent) HWNDs found by Win32 child enumeration.</summary>
     private sealed record SaveAsDialogMatch(IntPtr Handle, SaveAsCandidate Candidate, IntPtr EditHandle, IntPtr SaveButtonHandle, IntPtr CancelButtonHandle);
+
+    /// <summary>Result of one look at the desktop: the dialog to act on (null = none), how many windows qualified, and why.</summary>
+    private sealed record SaveAsFindResult(SaveAsDialogMatch? Match, int Candidates, string Note);
 
     private enum SaveAsOutcome
     {
@@ -3909,19 +3943,35 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
             L($"target='{targetPath}' (file already exists: {(preExistingWriteUtc is null ? "no" : "yes")}).");
 
+            if (_exportBaselineHandles is null)
+            {
+                L("FAILED - there is no pre-click window snapshot (the export click did not happen or the snapshot failed), so there is no new dialog to wait for. Nothing was typed or clicked.");
+                return SaveAsOutcome.Failed;
+            }
+
             // ---- step 1: find the dialog (Win32 test, see SaveAsDialogDetector) --
-            L($"step 1/5: waiting up to {SaveAsDialogTimeout.TotalSeconds:0}s for a NEW Save As dialog from any process (class #32770, title one of {string.Join("/", SaveAsDialogDetector.AllowedTitles.Select(t => "'" + t + "'"))}, containing an Edit and a Save button; pre-click snapshot {(_exportBaselineHandles is null ? "unavailable" : _exportBaselineHandles.Count + " windows")}; pioneer main pid={_pioneerProcessId})...");
+            L($"step 1/5: waiting up to {SaveAsDialogTimeout.TotalSeconds:0}s for a NEW Save As dialog from any process (class #32770, title one of {string.Join("/", SaveAsDialogDetector.AllowedTitles.Select(t => "'" + t + "'"))}, containing a file-name Edit and a Save button; pre-click snapshot {_exportBaselineHandles.Count} windows; pioneer main pid={_pioneerProcessId})...");
             SaveAsDialogMatch? dialog;
             var lastSeen = new List<SaveAsCandidate>();
             var dialogWatch = Stopwatch.StartNew();
             var nextProgress = TimeSpan.FromSeconds(5);
+            var lastCandidates = 0;
+            var lastNote = string.Empty;
+            var ambiguousPolls = 0;
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
 
                 lastSeen = EnumerateAllTopLevelWindowsForSaveAs();
-                dialog = FindSaveAsDialog(lastSeen);
+                var found = FindSaveAsDialog(lastSeen);
+                dialog = found.Match;
+                lastCandidates = found.Candidates;
+                lastNote = found.Note;
                 if (dialog is not null) break;
+
+                // Several windows qualify and Pioneer's cannot be told apart: acting on any of them could write into another app. Give it one more look, then stop.
+                ambiguousPolls = found.Candidates > 1 ? ambiguousPolls + 1 : 0;
+                if (ambiguousPolls >= 2) break;
                 if (dialogWatch.Elapsed >= SaveAsDialogTimeout) break;
 
                 if (dialogWatch.Elapsed >= nextProgress)
@@ -3935,14 +3985,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
 
             if (dialog is null)
             {
-                L($"FAILED - no new Save As dialog appeared within {SaveAsDialogTimeout.TotalSeconds:0}s. NOTHING was typed or clicked, and no window was closed.");
+                if (lastCandidates > 1)
+                {
+                    L($"FAILED - {lastCandidates} windows qualified as a Save As dialog ({lastNote}), so none was chosen. NOTHING was typed or clicked, and no window was closed.");
+                }
+                else
+                {
+                    L($"FAILED - no new Save As dialog appeared within {SaveAsDialogTimeout.TotalSeconds:0}s. NOTHING was typed or clicked, and no window was closed.");
+                }
+
+                L($"candidates that qualified at the last look: {lastCandidates}.");
                 LogSaveAsWindowTable(lastSeen, log);
                 _unsafeToContinue = true;
                 return SaveAsOutcome.NotRecognised;
             }
 
             L($"step 2/5: dialog found after {dialogWatch.Elapsed.TotalSeconds:0.0}s: hwnd=0x{dialog.Handle.ToInt64():X} class='{dialog.Candidate.ClassName}' title={SaveAsWindowTable.TitleText(dialog.Candidate.Title)} process='{ProcessNameOf(dialog.Candidate.ProcessId)}' pid={dialog.Candidate.ProcessId} ownerPid={dialog.Candidate.OwnerProcessId} "
-              + $"(pioneer main pid={_pioneerProcessId}); foreground={(GetForegroundWindow() == dialog.Handle ? "yes" : "no")}; file name box={(dialog.EditHandle == IntPtr.Zero ? "not identified" : "found")}; Save button found{(dialog.CancelButtonHandle == IntPtr.Zero ? "; no Cancel button" : "; Cancel button found")}.");
+              + $"(pioneer main pid={_pioneerProcessId}); foreground={(GetForegroundWindow() == dialog.Handle ? "yes" : "no")}; candidates={lastCandidates} ({lastNote}); file name box found; Save button found{(dialog.CancelButtonHandle == IntPtr.Zero ? "; no Cancel button" : "; Cancel button found")}.");
 
             // Let the dialog finish painting; EnterNameAndSave then re-validates it before writing anything.
             await Task.Delay(DialogSettleDelay, ct).ConfigureAwait(false);
@@ -4114,21 +4173,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// #32770, title in the fixed allowlist, and containing an Edit and a Save
     /// button at any depth. Anything else is never returned.
     /// </summary>
-    private SaveAsDialogMatch? FindSaveAsDialog(IReadOnlyList<SaveAsCandidate> all)
+    private SaveAsFindResult FindSaveAsDialog(IReadOnlyList<SaveAsCandidate> all)
     {
         try
         {
-            var found = SaveAsDialogDetector.Find(all, _exportBaselineHandles, handle => EnumerateChildControls(handle));
-            if (found is null) return null;
+            var matches = SaveAsDialogDetector.FindAll(all, _exportBaselineHandles, handle => EnumerateChildControls(handle));
+            var selection = SaveAsDialogDetector.Select(matches, all, _pioneerProcessId);
+            var chosen = selection.Chosen;
+            if (chosen is null) return new SaveAsFindResult(null, selection.CandidateCount, selection.Note);
 
-            return new SaveAsDialogMatch(
-                found.Window.Handle, found.Window,
-                found.FileNameEdit?.Handle ?? IntPtr.Zero, found.SaveButton.Handle, found.CancelButton?.Handle ?? IntPtr.Zero);
+            return new SaveAsFindResult(
+                new SaveAsDialogMatch(chosen.Window.Handle, chosen.Window, chosen.FileNameEdit.Handle, chosen.SaveButton.Handle, chosen.CancelButton?.Handle ?? IntPtr.Zero),
+                selection.CandidateCount, selection.Note);
         }
         catch
         {
             // Treated as "not found yet" - the caller keeps polling until its own deadline.
-            return null;
+            return new SaveAsFindResult(null, 0, "error while looking");
         }
     }
 
@@ -4296,13 +4357,53 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             }
         }
 
-        public bool TypeFileName(string text)
+        public bool FocusControl(IntPtr dialog, IntPtr control)
+        {
+            try
+            {
+                // WM_NEXTDLGCTL with lParam LOWORD true: the dialog manager moves focus to exactly that control.
+                if (!PostMessage(dialog, WM_NEXTDLGCTL, control, (IntPtr)1)) return false;
+                return WaitUntilSync(() => IsFocused(control), TimeSpan.FromSeconds(1), PollInterval);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public bool IsFocused(IntPtr control)
+        {
+            try
+            {
+                var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+                var threadId = GetWindowThreadProcessIdRaw(control);
+                return threadId != 0 && GetGUIThreadInfo(threadId, ref info) && info.hwndFocus == control;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public bool SelectAllKeys()
         {
             try
             {
                 Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
                 Thread.Sleep(100);
-                return NativeInput.TypeKeystrokes(text, (int)NativeInput.KeystrokeCharDelay.TotalMilliseconds);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public bool TypeCharacter(char character)
+        {
+            try
+            {
+                return NativeInput.TypeKeystrokes(character.ToString(), (int)NativeInput.KeystrokeCharDelay.TotalMilliseconds);
             }
             catch
             {
@@ -4419,35 +4520,14 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     }
 
     /// <summary>
-    /// Never leave Pioneer stuck on a Save As box: presses the confirmed dialog's own Cancel
-    /// button (BM_CLICK); if that is missing, undeliverable or ineffective, WM_CLOSE to the same
-    /// dialog handle (Alt+F4 only via TryCloseWindowSafely's foreground check).
+    /// Never leave Pioneer stuck on a Save As box: SaveAsActions.CancelDialog presses the
+    /// confirmed dialog's own Cancel button, then WM_CLOSE to the same handle, each only
+    /// after re-checking the handle is still a window of the pid and class it was confirmed with.
     /// </summary>
     private void CancelSaveAsDialog(SaveAsDialogMatch dialog, Action<string> log)
     {
-        var handle = dialog.Handle;
-        if (!IsWindow(handle) || !IsWindowVisible(handle)) return;
-        log(SaveAsCandidateLog.Prefix + "cancelling the Save As dialog so Pioneer is not left stuck on it.");
-
-        var pressedCancel = false;
-        if (dialog.CancelButtonHandle != IntPtr.Zero && IsWindow(dialog.CancelButtonHandle) && IsChild(handle, dialog.CancelButtonHandle))
-        {
-            try { pressedCancel = PostMessage(dialog.CancelButtonHandle, BM_CLICK, IntPtr.Zero, IntPtr.Zero); }
-            catch { pressedCancel = false; }
-        }
-
-        var closed = pressedCancel && WaitUntilSync(() => !IsWindow(handle) || !IsWindowVisible(handle), SaveAsCancelConfirmTimeout, PollInterval);
-        if (!closed)
-        {
-            log(SaveAsCandidateLog.Prefix + (pressedCancel ? "Cancel did not close it - sending WM_CLOSE to the same dialog." : "no usable Cancel button - sending WM_CLOSE to the dialog."));
-            TryCloseWindowSafely(handle, log, "the Save As dialog");
-            closed = WaitUntilSync(() => !IsWindow(handle) || !IsWindowVisible(handle), SaveAsCancelConfirmTimeout, PollInterval);
-        }
-
-        log(SaveAsCandidateLog.Prefix + (closed
-            ? "Save As dialog closed (confirmed)."
-            : $"Save As dialog still open {SaveAsCancelConfirmTimeout.TotalSeconds:0}s after the cancel request."));
-        if (!closed) _unsafeToContinue = true;
+        var result = SaveAsActions.CancelDialog(new NativeSaveAsHost(), dialog.Candidate, dialog.CancelButtonHandle, SaveAsCancelConfirmTimeout, m => log(SaveAsCandidateLog.Prefix + m));
+        if (result == SaveAsCancelResult.StillOpen) _unsafeToContinue = true;
     }
 
     /// <summary>
