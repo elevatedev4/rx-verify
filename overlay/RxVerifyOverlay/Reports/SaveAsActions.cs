@@ -6,7 +6,7 @@ namespace RxVerifyOverlay.Reports;
 // small host interface so the decisions (when a name may be written, when a
 // key may be sent) are unit tested on any OS with a fake host. The real host
 // is PioneerReportDriver's NativeSaveAsHost (user32 calls). No UI Automation,
-// no typed keys for the Save As dialog at all.
+// no typed keys for the Save As dialog unless the direct route fails and the dialog is the foreground window.
 
 /// <summary>Win32 operations the Save As / preview-close steps need.</summary>
 public interface ISaveAsNativeHost
@@ -29,6 +29,15 @@ public interface ISaveAsNativeHost
     /// <summary>BM_CLICK to a button HWND. False when it could not be delivered.</summary>
     bool ClickButton(IntPtr button);
 
+    /// <summary>Asks Windows to make this window the foreground window (it may refuse); callers re-check IsForeground afterwards.</summary>
+    bool BringToForeground(IntPtr handle);
+
+    /// <summary>Keyboard: select all, then type the text. Goes to whatever is focused - callers only use it while IsForeground(dialog) holds.</summary>
+    bool TypeFileName(string text);
+
+    /// <summary>Keyboard: Alt+S. Goes to the foreground window - callers only use it while IsForeground(dialog) holds.</summary>
+    bool SendAltS();
+
     /// <summary>WM_CLOSE to a window. False when it could not be posted.</summary>
     bool PostClose(IntPtr handle);
 
@@ -41,31 +50,38 @@ public interface ISaveAsNativeHost
 
 public enum SaveAsEntryResult
 {
-    /// <summary>Name written, read back equal, Save clicked.</summary>
+    /// <summary>Name written into the dialog's own file-name Edit (WM_SETTEXT), read back equal, Save clicked with BM_CLICK.</summary>
     Clicked,
 
-    /// <summary>The dialog changed (closed, other process/class, lost the foreground) since it was accepted: nothing was sent.</summary>
+    /// <summary>Fallback: the dialog was the foreground window; the name was typed and Alt+S pressed.</summary>
+    ClickedByKeyboard,
+
+    /// <summary>The dialog changed (closed, other process/class) since it was accepted: nothing was sent.</summary>
     StaleWindow,
 
-    /// <summary>WM_SETTEXT could not be delivered; the dialog was closed with WM_CLOSE.</summary>
-    SetTextFailed,
+    /// <summary>The direct route failed (WM_SETTEXT undeliverable, read-back different, no identified file-name box) and the dialog is not the foreground window: no key was sent.</summary>
+    NotForeground,
 
-    /// <summary>The read-back did not equal the target path; the dialog was closed with WM_CLOSE and Save was NOT clicked.</summary>
-    TextMismatch,
+    /// <summary>The direct route failed and the keyboard route could not be completed (typing failed, or the dialog lost the foreground before Alt+S).</summary>
+    KeyboardFailed,
 
-    /// <summary>BM_CLICK could not be delivered; the dialog was closed with WM_CLOSE.</summary>
+    /// <summary>The name was set and verified but neither BM_CLICK nor Alt+S could press Save.</summary>
     ClickFailed
 }
 
 public static class SaveAsActions
 {
     /// <summary>
-    /// Writes <paramref name="path"/> into the dialog's file-name Edit with
-    /// WM_SETTEXT, reads it back with WM_GETTEXT and, ONLY when it equals the
-    /// path, clicks the Save button with BM_CLICK. Any other outcome closes
-    /// the dialog with WM_CLOSE and sends no keys. Before anything is sent
-    /// the dialog is re-validated (still a window, still visible, same pid
-    /// and class as when it was accepted, still the foreground window).
+    /// Acts only on the confirmed dialog's own handles. Direct route: WM_SETTEXT
+    /// into its file-name Edit, WM_GETTEXT read-back, and ONLY when the read-back
+    /// equals the path, BM_CLICK on its Save button - no foreground needed, no
+    /// keys. If that route fails (no identified Edit, WM_SETTEXT refused,
+    /// read-back different, BM_CLICK refused) the fallback is exactly what Will
+    /// asked for - type the name, Alt+S - and it runs ONLY while the dialog is
+    /// the foreground window (one attempt to bring it forward first), re-checked
+    /// before the typing and again before Alt+S. Nothing here closes any window:
+    /// the caller cancels the dialog on any non-success result.
+    /// <paramref name="edit"/> is IntPtr.Zero when no file-name Edit could be identified.
     /// </summary>
     public static SaveAsEntryResult EnterNameAndSave(
         ISaveAsNativeHost host, SaveAsCandidate dialog, IntPtr edit, IntPtr saveButton, string path, Action<string> log)
@@ -73,49 +89,105 @@ public static class SaveAsActions
         if (!host.IsWindow(dialog.Handle)
             || !host.IsVisible(dialog.Handle)
             || host.ProcessIdOf(dialog.Handle) != dialog.ProcessId
-            || !string.Equals(host.ClassOf(dialog.Handle), dialog.ClassName, StringComparison.Ordinal)
-            || !host.IsForeground(dialog.Handle))
+            || !string.Equals(host.ClassOf(dialog.Handle), dialog.ClassName, StringComparison.Ordinal))
         {
-            log("the dialog changed after it was accepted (closed, replaced or lost the foreground) - sending nothing.");
+            log("the dialog changed after it was accepted (closed or replaced) - sending nothing.");
             return SaveAsEntryResult.StaleWindow;
         }
 
-        // The Edit and Save handles must still be live children of this dialog with the classes they were found with.
-        if (!host.IsWindow(edit) || !host.IsChildOf(dialog.Handle, edit)
-            || !string.Equals(host.ClassOf(edit), "Edit", StringComparison.OrdinalIgnoreCase)
-            || !host.IsWindow(saveButton) || !host.IsChildOf(dialog.Handle, saveButton)
-            || !string.Equals(host.ClassOf(saveButton), "Button", StringComparison.OrdinalIgnoreCase))
+        // The Save button (and the Edit, when one was identified) must still be live children of this dialog with the classes they were found with.
+        var hasEdit = edit != IntPtr.Zero;
+        if (!host.IsWindow(saveButton) || !host.IsChildOf(dialog.Handle, saveButton)
+            || !string.Equals(host.ClassOf(saveButton), "Button", StringComparison.OrdinalIgnoreCase)
+            || (hasEdit && (!host.IsWindow(edit) || !host.IsChildOf(dialog.Handle, edit)
+                            || !string.Equals(host.ClassOf(edit), "Edit", StringComparison.OrdinalIgnoreCase))))
         {
             log("the File name box or Save button is no longer a child of the dialog - sending nothing.");
             return SaveAsEntryResult.StaleWindow;
         }
 
-        if (!host.SetText(edit, path))
+        var nameVerified = false;
+        if (!hasEdit)
         {
-            log("could not write the file name into the dialog (WM_SETTEXT not delivered) - closing the dialog.");
-            host.PostClose(dialog.Handle);
-            return SaveAsEntryResult.SetTextFailed;
+            log("no file-name box could be identified by control id - going straight to the keyboard route.");
+        }
+        else if (!host.SetText(edit, path))
+        {
+            log("could not write the file name into the dialog (WM_SETTEXT not delivered).");
+        }
+        else
+        {
+            var readBack = host.GetText(edit);
+            if (SaveAsPathBuilder.TextMatches(readBack, path))
+            {
+                nameVerified = true;
+                log("file name written (WM_SETTEXT) and read back (matched).");
+            }
+            else
+            {
+                log($"file name read-back did not match (read-back length {readBack?.Length ?? 0}, expected {path.Length}).");
+            }
         }
 
-        var readBack = host.GetText(edit);
-        if (!SaveAsPathBuilder.TextMatches(readBack, path))
+        if (nameVerified)
         {
-            log($"file name read-back did not match (read-back length {readBack?.Length ?? 0}, expected {path.Length}) - closing the dialog without saving.");
-            host.PostClose(dialog.Handle);
-            return SaveAsEntryResult.TextMismatch;
+            if (host.ClickButton(saveButton))
+            {
+                log("Save clicked (BM_CLICK).");
+                return SaveAsEntryResult.Clicked;
+            }
+
+            log("could not click Save (BM_CLICK not delivered).");
         }
 
-        log("file name written and read back (matched).");
-
-        if (!host.ClickButton(saveButton))
+        // ---- keyboard route: only while THIS dialog is the foreground window ---------
+        if (!EnsureForeground(host, dialog.Handle))
         {
-            log("could not click Save (BM_CLICK not delivered) - closing the dialog.");
-            host.PostClose(dialog.Handle);
-            return SaveAsEntryResult.ClickFailed;
+            log("the direct route did not complete and the dialog is not the foreground window - sending no keys.");
+            return SaveAsEntryResult.NotForeground;
         }
 
-        log("Save clicked.");
-        return SaveAsEntryResult.Clicked;
+        if (!nameVerified)
+        {
+            log("keyboard route: dialog is the foreground window - typing the file name.");
+            if (!host.TypeFileName(path))
+            {
+                log("keyboard route: typing the file name failed.");
+                return SaveAsEntryResult.KeyboardFailed;
+            }
+
+            if (hasEdit)
+            {
+                var typed = host.GetText(edit);
+                log(SaveAsPathBuilder.TextMatches(typed, path)
+                    ? "keyboard route: typed file name read back (matched)."
+                    : $"keyboard route: typed file name read back different (length {typed?.Length ?? 0}, expected {path.Length}) - not pressing Save.");
+                if (!SaveAsPathBuilder.TextMatches(typed, path)) return SaveAsEntryResult.KeyboardFailed;
+            }
+        }
+
+        // Re-check immediately before the Alt+S: focus may have moved while typing.
+        if (!host.IsForeground(dialog.Handle))
+        {
+            log("keyboard route: the dialog lost the foreground before Alt+S - sending no further keys.");
+            return SaveAsEntryResult.KeyboardFailed;
+        }
+
+        if (!host.SendAltS())
+        {
+            log("keyboard route: Alt+S could not be sent.");
+            return nameVerified ? SaveAsEntryResult.ClickFailed : SaveAsEntryResult.KeyboardFailed;
+        }
+
+        log("Save pressed (Alt+S, keyboard route).");
+        return SaveAsEntryResult.ClickedByKeyboard;
+    }
+
+    private static bool EnsureForeground(ISaveAsNativeHost host, IntPtr handle)
+    {
+        if (host.IsForeground(handle)) return true;
+        host.BringToForeground(handle);
+        return host.WaitUntil(() => host.IsForeground(handle), TimeSpan.FromSeconds(1));
     }
 }
 

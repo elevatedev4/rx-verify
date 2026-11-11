@@ -122,8 +122,12 @@ public static class SaveAsDialogMatcher
     {
         if (!candidate.IsVisible || candidate.Handle == IntPtr.Zero) return false;
         if (candidate.Handle == saveAsHandle) return false;
-        if (!BelongsToPioneer(candidate, pioneerProcessId)) return false;
         if (!IsDialogClass(candidate.ClassName)) return false;
+
+        // Owned by the confirmed Save As dialog is the strongest tie there is, whichever process that dialog lives in;
+        // otherwise the prompt must be Pioneer's (by pid or owner) AND titled "Confirm Save As".
+        var ownedBySaveAs = saveAsHandle != IntPtr.Zero && candidate.OwnerHandle == saveAsHandle;
+        if (!ownedBySaveAs && !BelongsToPioneer(candidate, pioneerProcessId)) return false;
 
         return IsTiedToSaveAs(candidate, saveAsHandle);
     }
@@ -185,55 +189,69 @@ public static class SaveAsDialogMatcher
 /// </summary>
 public readonly record struct SaveAsChild(IntPtr Handle, IntPtr ParentHandle, string ClassName, int ControlId, string Text);
 
-/// <summary>Why a window is NOT a safe typing target. A window is accepted only when this is None.</summary>
+/// <summary>Why a window is NOT accepted as the Save As dialog. A window is accepted only when this is None.</summary>
 [Flags]
-public enum SaveAsStrictFailure
+public enum SaveAsRejection
 {
     None = 0,
     NotVisible = 1 << 0,
-    NotPioneer = 1 << 1,
-    Excluded = 1 << 2,
-    ConfirmPrompt = 1 << 3,
-    NotNew = 1 << 4,
-    NotForeground = 1 << 5,
-    NotDialogClass = 1 << 6,
-    NoEditChild = 1 << 7,
-    NoSaveButton = 1 << 8,
 
-    /// <summary>Neither a Save/Export title nor a file-dialog shell child (DUIViewWndClassName / SHELLDLL_DefView): an input form with an Edit and an OK button.</summary>
-    NoSaveEvidence = 1 << 9
+    /// <summary>The window was already on the desktop in the snapshot taken just before the export click (or no snapshot exists).</summary>
+    NotNew = 1 << 1,
+    NotDialogClass = 1 << 2,
+    TitleNotAllowed = 1 << 3,
+    NoEditChild = 1 << 4,
+    NoSaveButton = 1 << 5
 }
 
 /// <summary>
-/// The ONLY test that decides a window may receive the file name and the
-/// Save click. Everything is Win32 evidence (no UI Automation):
-/// (a) visible top-level, Pioneer pid or Pioneer owner;
-/// (b) not Pioneer's main window, the report preview or "Confirm Save As";
-/// (c) NEW since the export click AND the foreground window (both);
-/// (d) window class #32770;
-/// (e) children include a file-name Edit (id 1001 / 1152, or any Edit inside a
-///     ComboBox / ComboBoxEx32) AND a Button whose text is "&amp;Save" / "Save"
-///     (id 1 alone is NOT enough: an input dialog's OK button is id 1);
-/// (f) the title contains Save or Export, OR a file-dialog shell child exists
-///     (DUIViewWndClassName or SHELLDLL_DefView). Title and button text are
-///     read only for this decision and are never logged.
-/// A new foreground Pioneer window that fails any of these (a data-entry
-/// form, a message box, an alert) is never typed into.
+/// The ONLY test that decides a window is the Save As dialog we may act on.
+/// Win32 evidence only (no UI Automation), and deliberately NO process, owner
+/// or foreground condition: the dialog is accepted whichever process owns it,
+/// because a missed dialog leaves Pioneer stuck (three rounds of that) while a
+/// wrong window is excluded by the four tests that matter:
+/// (a) visible top-level window that was NOT in the snapshot taken just before
+///     the export click;
+/// (b) window class #32770;
+/// (c) title (trimmed, case-insensitive) is exactly one of <see cref="AllowedTitles"/>;
+/// (d) at any depth it contains an Edit control and a Button whose caption
+///     with "&amp;" removed equals "Save".
+/// Everything done afterwards is addressed to that dialog's own handles only.
 /// </summary>
-public static class SaveAsStrictMatcher
+public static class SaveAsDialogDetector
 {
-    public static SaveAsStrictFailure CheckWindow(
-        SaveAsCandidate c, int pioneerProcessId, IntPtr foregroundHandle,
-        IReadOnlyCollection<IntPtr>? excludedHandles, IReadOnlyCollection<IntPtr>? baselineHandles)
+    /// <summary>The only window titles that are ever accepted, and the only titles that may appear in the log.</summary>
+    public static readonly IReadOnlyList<string> AllowedTitles = new[] { "Save As", "Save Print Output As", "Export", "Save" };
+
+    public static bool IsAllowedTitle(string? title)
     {
-        var failure = SaveAsStrictFailure.None;
-        if (!c.IsVisible || c.Handle == IntPtr.Zero) failure |= SaveAsStrictFailure.NotVisible;
-        if (!SaveAsDialogMatcher.BelongsToPioneer(c, pioneerProcessId)) failure |= SaveAsStrictFailure.NotPioneer;
-        if (excludedHandles is not null && excludedHandles.Contains(c.Handle)) failure |= SaveAsStrictFailure.Excluded;
-        if (string.Equals((c.Title ?? string.Empty).Trim(), "Confirm Save As", StringComparison.OrdinalIgnoreCase)) failure |= SaveAsStrictFailure.ConfirmPrompt;
-        if (baselineHandles is null || baselineHandles.Contains(c.Handle)) failure |= SaveAsStrictFailure.NotNew;
-        if (foregroundHandle == IntPtr.Zero || c.Handle != foregroundHandle) failure |= SaveAsStrictFailure.NotForeground;
-        if (!SaveAsDialogMatcher.IsDialogClass(c.ClassName)) failure |= SaveAsStrictFailure.NotDialogClass;
+        var trimmed = (title ?? string.Empty).Trim();
+        if (trimmed.Length == 0) return false;
+        foreach (var allowed in AllowedTitles)
+        {
+            if (string.Equals(trimmed, allowed, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Window-level tests (a) to (c). <paramref name="baselineHandles"/> null (no snapshot) rejects everything as not new.</summary>
+    public static SaveAsRejection CheckWindow(SaveAsCandidate c, IReadOnlyCollection<IntPtr>? baselineHandles)
+    {
+        var failure = SaveAsRejection.None;
+        if (!c.IsVisible || c.Handle == IntPtr.Zero) failure |= SaveAsRejection.NotVisible;
+        if (baselineHandles is null || baselineHandles.Contains(c.Handle)) failure |= SaveAsRejection.NotNew;
+        if (!SaveAsDialogMatcher.IsDialogClass(c.ClassName)) failure |= SaveAsRejection.NotDialogClass;
+        if (!IsAllowedTitle(c.Title)) failure |= SaveAsRejection.TitleNotAllowed;
+        return failure;
+    }
+
+    /// <summary>Content tests (d): any Edit at any depth, and a Button captioned Save / &amp;Save.</summary>
+    public static SaveAsRejection CheckChildren(IReadOnlyList<SaveAsChild> children)
+    {
+        var failure = SaveAsRejection.None;
+        if (!children.Any(ch => IsEditClass(ch.ClassName))) failure |= SaveAsRejection.NoEditChild;
+        if (FindSaveButton(children) is null) failure |= SaveAsRejection.NoSaveButton;
         return failure;
     }
 
@@ -243,10 +261,20 @@ public static class SaveAsStrictMatcher
         string.Equals(className, "ComboBox", StringComparison.OrdinalIgnoreCase)
         || string.Equals(className, "ComboBoxEx32", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The file-name Edit: id 1001 (Vista dialog) first, then id 1152 (legacy dialog), then any Edit whose parent is a ComboBox / ComboBoxEx32. Null when none.</summary>
+    private static bool IsSearchOrAddressClass(string? className) =>
+        !string.IsNullOrEmpty(className)
+        && (className.Contains("Search", StringComparison.OrdinalIgnoreCase) || className.Contains("Address", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The file-name Edit: id 1001 (Vista dialog), then id 1152 (legacy dialog),
+    /// then any Edit whose parent is a ComboBox / ComboBoxEx32 (the file-name
+    /// combo nests its Edit, so a direct-child test would miss it). An Edit
+    /// under a search or address control is never chosen. Null when none can
+    /// be identified - the caller then must not write into an unidentified Edit.
+    /// </summary>
     public static SaveAsChild? FindFileNameEdit(IReadOnlyList<SaveAsChild> children)
     {
-        var edits = children.Where(ch => IsEditClass(ch.ClassName)).ToList();
+        var edits = children.Where(ch => IsEditClass(ch.ClassName) && !HasSearchOrAddressAncestor(ch, children)).ToList();
         if (edits.Count == 0) return null;
 
         foreach (var wanted in new[] { 1001, 1152 })
@@ -264,7 +292,27 @@ public static class SaveAsStrictMatcher
         return null;
     }
 
-    /// <summary>The Save button: class Button whose text is "Save" / "&amp;Save". Control id 1 alone is not enough (every dialog's OK button is id 1).</summary>
+    private static bool HasSearchOrAddressAncestor(SaveAsChild child, IReadOnlyList<SaveAsChild> all)
+    {
+        var current = child;
+        for (var depth = 0; depth < 16; depth++)
+        {
+            if (current.ParentHandle == IntPtr.Zero) return false;
+            SaveAsChild? parent = null;
+            foreach (var ch in all)
+            {
+                if (ch.Handle == current.ParentHandle) { parent = ch; break; }
+            }
+
+            if (parent is null) return false;
+            if (IsSearchOrAddressClass(parent.Value.ClassName)) return true;
+            current = parent.Value;
+        }
+
+        return false;
+    }
+
+    /// <summary>The Save button: class Button whose caption with "&amp;" removed is "Save". Control id 1 alone is not enough (every dialog's OK button is id 1).</summary>
     public static SaveAsChild? FindSaveButton(IReadOnlyList<SaveAsChild> children)
     {
         foreach (var ch in children)
@@ -277,40 +325,144 @@ public static class SaveAsStrictMatcher
         return null;
     }
 
-    public static bool HasFileDialogShellChild(IReadOnlyList<SaveAsChild> children) =>
-        children.Any(ch => string.Equals(ch.ClassName, "DUIViewWndClassName", StringComparison.OrdinalIgnoreCase)
-                           || string.Equals(ch.ClassName, "SHELLDLL_DefView", StringComparison.OrdinalIgnoreCase));
-
-    /// <param name="windowTitle">The dialog's title, used only to look for Save / Export; never logged.</param>
-    public static SaveAsStrictFailure CheckChildren(IReadOnlyList<SaveAsChild> children, string? windowTitle)
+    /// <summary>The Cancel button (caption "Cancel"/"&amp;Cancel", else control id 2 = IDCANCEL). Null when neither exists.</summary>
+    public static SaveAsChild? FindCancelButton(IReadOnlyList<SaveAsChild> children)
     {
-        var failure = SaveAsStrictFailure.None;
-        if (FindFileNameEdit(children) is null) failure |= SaveAsStrictFailure.NoEditChild;
-        if (FindSaveButton(children) is null) failure |= SaveAsStrictFailure.NoSaveButton;
-        if (!SaveAsDialogMatcher.TitleLooksLikeSaveDialog(windowTitle) && !HasFileDialogShellChild(children)) failure |= SaveAsStrictFailure.NoSaveEvidence;
-        return failure;
+        foreach (var ch in children)
+        {
+            if (!string.Equals(ch.ClassName, "Button", StringComparison.OrdinalIgnoreCase)) continue;
+            var text = (ch.Text ?? string.Empty).Replace("&", string.Empty).Trim();
+            if (string.Equals(text, "Cancel", StringComparison.OrdinalIgnoreCase)) return ch;
+        }
+
+        foreach (var ch in children)
+        {
+            if (string.Equals(ch.ClassName, "Button", StringComparison.OrdinalIgnoreCase) && ch.ControlId == 2) return ch;
+        }
+
+        return null;
     }
 
-    /// <summary>"Rules a-d minus the foreground test" are all satisfied: worth looking inside (and worth bringing to the foreground).</summary>
-    public static bool IsWorthInspecting(SaveAsStrictFailure windowCheck) =>
-        (windowCheck & ~SaveAsStrictFailure.NotForeground) == SaveAsStrictFailure.None;
+    /// <summary>Full verdict for one window: window tests plus (only when the window tests pass) the content tests.</summary>
+    public static SaveAsRejection Evaluate(SaveAsCandidate c, IReadOnlyList<SaveAsChild> children, IReadOnlyCollection<IntPtr>? baselineHandles) =>
+        CheckWindow(c, baselineHandles) | CheckChildren(children);
 
-    /// <summary>Pioneer-related windows the inventory should describe: visible, Pioneer pid/owner, not excluded, and new since the click or foreground.</summary>
-    public static IReadOnlyList<(SaveAsCandidate Candidate, bool IsNew, bool IsForeground)> InventoryWindows(
-        IReadOnlyList<SaveAsCandidate> all, int pioneerProcessId, IntPtr foregroundHandle,
-        IReadOnlyCollection<IntPtr>? excludedHandles, IReadOnlyCollection<IntPtr>? baselineHandles)
+    /// <summary>The first accepted dialog among <paramref name="all"/> (z-order), or null. <paramref name="childrenOf"/> is only called for windows that pass the window tests.</summary>
+    public static SaveAsDetection? Find(
+        IReadOnlyList<SaveAsCandidate> all, IReadOnlyCollection<IntPtr>? baselineHandles, Func<IntPtr, IReadOnlyList<SaveAsChild>> childrenOf)
     {
-        return all
-            .Where(c => c.IsVisible && c.Handle != IntPtr.Zero
-                        && SaveAsDialogMatcher.BelongsToPioneer(c, pioneerProcessId)
-                        && (excludedHandles is null || !excludedHandles.Contains(c.Handle)))
-            .Select(c => (Candidate: c,
-                          IsNew: baselineHandles is not null && !baselineHandles.Contains(c.Handle),
-                          IsForeground: foregroundHandle != IntPtr.Zero && c.Handle == foregroundHandle))
-            .Where(x => x.IsNew || x.IsForeground)
-            .ToList();
+        foreach (var candidate in all)
+        {
+            if (CheckWindow(candidate, baselineHandles) != SaveAsRejection.None) continue;
+
+            var children = childrenOf(candidate.Handle);
+            if (CheckChildren(children) != SaveAsRejection.None) continue;
+
+            var save = FindSaveButton(children);
+            if (save is null) continue;
+            return new SaveAsDetection(candidate, FindFileNameEdit(children), save.Value, FindCancelButton(children));
+        }
+
+        return null;
     }
 }
+
+/// <summary>An accepted Save As dialog and its own control handles. <paramref name="FileNameEdit"/> is null when an Edit exists but none could be identified as the file-name box.</summary>
+public sealed record SaveAsDetection(SaveAsCandidate Window, SaveAsChild? FileNameEdit, SaveAsChild SaveButton, SaveAsChild? CancelButton);
+
+/// <summary>One row of the "window table" logged when the dialog is not found.</summary>
+public sealed record SaveAsWindowRow(SaveAsCandidate Window, string ProcessName, IReadOnlyList<SaveAsChild>? Children);
+
+/// <summary>
+/// The table of every visible top-level window logged on a timeout. Window
+/// titles are written ONLY when they are in <see cref="SaveAsDialogDetector.AllowedTitles"/>
+/// (otherwise "&lt;hidden, N chars&gt;"); Button captions only when they are in
+/// <see cref="ButtonCaptionAllowlist"/>. No other text from a screen is ever logged.
+/// </summary>
+public static class SaveAsWindowTable
+{
+    public const string Prefix = "save-as: ";
+
+    public static readonly IReadOnlyList<string> ButtonCaptionAllowlist = new[]
+    {
+        "Save", "Cancel", "OK", "Open", "Yes", "No", "Close", "Retry", "Apply", "Export", "Replace", "Browse Folders", "Hide Folders", "Help"
+    };
+
+    public const int MaxRows = 150;
+    public const int MaxDescendantItems = 40;
+
+    public static string TitleText(string? title)
+    {
+        var t = title ?? string.Empty;
+        return SaveAsDialogDetector.IsAllowedTitle(t) ? $"'{t.Trim()}'" : $"<hidden, {t.Length} chars>";
+    }
+
+    public static string CaptionText(string? caption)
+    {
+        var c = (caption ?? string.Empty);
+        var plain = c.Replace("&", string.Empty).Trim();
+        foreach (var allowed in ButtonCaptionAllowlist)
+        {
+            if (string.Equals(plain, allowed, StringComparison.OrdinalIgnoreCase)) return $"'{c.Trim()}'";
+        }
+
+        return $"<hidden, {c.Length} chars>";
+    }
+
+    public static string DescribeRejection(SaveAsRejection failure)
+    {
+        if (failure == SaveAsRejection.None) return "ACCEPTED";
+        var names = new List<string>();
+        foreach (SaveAsRejection flag in Enum.GetValues(typeof(SaveAsRejection)))
+        {
+            if (flag != SaveAsRejection.None && failure.HasFlag(flag)) names.Add(flag.ToString());
+        }
+
+        return string.Join("+", names);
+    }
+
+    public static string FormatRow(SaveAsWindowRow row, IReadOnlyCollection<IntPtr>? baseline)
+    {
+        var c = row.Window;
+        var snapshot = baseline is null ? "unknown" : (baseline.Contains(c.Handle) ? "yes" : "no");
+        var line = $"{Prefix}  hwnd=0x{c.Handle.ToInt64():X} class='{c.ClassName}' process='{row.ProcessName}' pid={c.ProcessId} ownerPid={c.OwnerProcessId} "
+                   + $"title={TitleText(c.Title)} in_pre_click_snapshot={snapshot}";
+        if (SaveAsDialogMatcher.IsDialogClass(c.ClassName) && row.Children is not null)
+        {
+            var verdict = SaveAsDialogDetector.Evaluate(c, row.Children, baseline);
+            line += $" verdict={DescribeRejection(verdict)} descendants=[{DescribeDescendants(row.Children)}]";
+        }
+
+        return line;
+    }
+
+    /// <summary>Descendant classes (with the control id of Edits) and the captions of Buttons (allowlisted captions only).</summary>
+    public static string DescribeDescendants(IReadOnlyList<SaveAsChild> children)
+    {
+        var items = new List<string>();
+        foreach (var ch in children.Take(MaxDescendantItems))
+        {
+            if (string.Equals(ch.ClassName, "Button", StringComparison.OrdinalIgnoreCase)) items.Add($"Button id={ch.ControlId} caption={CaptionText(ch.Text)}");
+            else if (SaveAsDialogDetector.IsEditClass(ch.ClassName)) items.Add($"Edit id={ch.ControlId}");
+            else items.Add(ch.ClassName);
+        }
+
+        if (children.Count > MaxDescendantItems) items.Add($"... +{children.Count - MaxDescendantItems} more");
+        return string.Join("; ", items);
+    }
+
+    public static IReadOnlyList<string> Format(IReadOnlyList<SaveAsWindowRow> rows, IReadOnlyCollection<IntPtr>? baseline, int pioneerProcessId)
+    {
+        var lines = new List<string>
+        {
+            $"{Prefix}window table: {rows.Count} visible top-level windows (pre-click snapshot {(baseline is null ? "unavailable" : baseline.Count + " windows")}; pioneer main pid={pioneerProcessId}); titles are hidden unless one of: {string.Join(", ", SaveAsDialogDetector.AllowedTitles.Select(t => "'" + t + "'"))}."
+        };
+        lines.AddRange(rows.Take(MaxRows).Select(r => FormatRow(r, baseline)));
+        if (rows.Count > MaxRows) lines.Add($"{Prefix}  ... +{rows.Count - MaxRows} more windows not listed");
+        return lines;
+    }
+}
+
 
 /// <summary>
 /// One descendant of the Save As dialog, reduced to the four strings that
@@ -522,26 +674,6 @@ public static class SaveAsCandidateLog
             .Take(maxLines)
             .Select(c => Format(c, pioneerProcessId))
             .ToList();
-    }
-
-    /// <summary>One new/foreground Pioneer window for the "not recognised" inventory: class, pid, ownerPid, flags and size - no title text.</summary>
-    public static string FormatInventoryWindow(SaveAsCandidate c, bool isNew, bool isForeground, int width, int height, SaveAsStrictFailure failure) =>
-        $"{Prefix}  window handle=0x{c.Handle.ToInt64():X} class='{c.ClassName}' pid={c.ProcessId} ownerPid={c.OwnerProcessId} new={(isNew ? "yes" : "no")} foreground={(isForeground ? "yes" : "no")} size={width}x{height} title_len={(c.Title ?? string.Empty).Length} rejected_because={DescribeFailure(failure)}";
-
-    /// <summary>One child control: class and control id only - no text.</summary>
-    public static string FormatInventoryChild(SaveAsChild child) =>
-        $"{Prefix}    control class='{child.ClassName}' id={child.ControlId}";
-
-    public static string DescribeFailure(SaveAsStrictFailure failure)
-    {
-        if (failure == SaveAsStrictFailure.None) return "nothing";
-        var names = new List<string>();
-        foreach (SaveAsStrictFailure flag in Enum.GetValues(typeof(SaveAsStrictFailure)))
-        {
-            if (flag != SaveAsStrictFailure.None && failure.HasFlag(flag)) names.Add(flag.ToString());
-        }
-
-        return string.Join("+", names);
     }
 
     /// <summary>The periodic "still waiting" line: how many windows are new since the export click and how many of those are Pioneer's, plus the foreground window's class/pid - no titles.</summary>

@@ -455,28 +455,6 @@ public class SaveAsDialogTests
         }
 
         [Fact]
-        public void InventoryLinesCarryClassPidFlagsAndSizeButNoTitleOrControlText()
-        {
-            var window = Window("Quick Entry - Jane Doe", className: "WindowsForms10.Window.8.app.0", handle: 0x30);
-            var failure = SaveAsStrictFailure.NotDialogClass | SaveAsStrictFailure.NoEditChild;
-
-            var windowLine = SaveAsCandidateLog.FormatInventoryWindow(window, true, true, 420, 310, failure);
-            var childLine = SaveAsCandidateLog.FormatInventoryChild(new SaveAsChild(new IntPtr(5), new IntPtr(4), "Edit", 1001, "Jane Doe 1234567"));
-
-            Assert.Contains("handle=0x30", windowLine);
-            Assert.Contains($"pid={PioneerPid}", windowLine);
-            Assert.Contains("new=yes", windowLine);
-            Assert.Contains("foreground=yes", windowLine);
-            Assert.Contains("size=420x310", windowLine);
-            Assert.Contains("rejected_because=NotDialogClass+NoEditChild", windowLine);
-            Assert.DoesNotContain("Jane", windowLine);
-            Assert.DoesNotContain("Quick Entry", windowLine);
-            Assert.Equal("save-as:     control class='Edit' id=1001", childLine);
-            Assert.DoesNotContain("Jane", childLine);
-            Assert.DoesNotContain("1234567", childLine);
-        }
-
-        [Fact]
         public void WaitingSummaryCountsNewWindowsAndNamesTheForegroundClassWithoutTitles()
         {
             var all = new List<SaveAsCandidate>
@@ -506,236 +484,323 @@ public class SaveAsDialogTests
         }
     }
 
-    public class StrictDetectionTests
+    public class DetectorTests
     {
         private static HashSet<IntPtr> Baseline(params long[] handles) => new(handles.Select(h => new IntPtr(h)));
-
-        private static SaveAsStrictFailure Check(SaveAsCandidate c, long foreground, IReadOnlyCollection<IntPtr>? baseline, params long[] excluded) =>
-            SaveAsStrictMatcher.CheckWindow(c, PioneerPid, new IntPtr(foreground), excluded.Select(h => new IntPtr(h)).ToList(), baseline);
 
         private static SaveAsChild Child(long handle, string cls, int id, string text = "", long parent = 0) =>
             new(new IntPtr(handle), new IntPtr(parent), cls, id, text);
 
-        // The Vista-style common dialog's Win32 children (control ids from the Windows SDK).
-        private static List<SaveAsChild> RealSaveDialogChildren() => new()
+        // The Vista-style common dialog's Win32 descendants (control ids from the Windows SDK).
+        private static List<SaveAsChild> RealSaveDialogChildren(string saveCaption = "&Save") => new()
         {
-            Child(10, "DUIViewWndClassName", 0),
+            Child(9, "ReBarWindow32", 0),
+            Child(10, "UniversalSearchBand", 0, parent: 9),
+            Child(16, "Edit", 0, parent: 10),            // the toolbar's search box
             Child(11, "ComboBoxEx32", 1148),
             Child(12, "ComboBox", 1148, parent: 11),
-            Child(13, "Edit", 1001, parent: 12),
-            Child(14, "Button", 1, "&Save"),
+            Child(13, "Edit", 1001, parent: 12),         // File name:
+            Child(14, "Button", 1, saveCaption),
             Child(15, "Button", 2, "Cancel")
         };
 
-        [Fact]
-        public void ADialogThatIsNewForegroundPioneerClass32770WithEditAndSaveIsAccepted()
-        {
-            var dialog = Window("anything", handle: 5);
+        private static SaveAsRejection Check(SaveAsCandidate c, IReadOnlyList<SaveAsChild> children, IReadOnlyCollection<IntPtr>? baseline) =>
+            SaveAsDialogDetector.Evaluate(c, children, baseline);
 
-            Assert.Equal(SaveAsStrictFailure.None, Check(dialog, 5, Baseline(1, 2), 1, 2));
-            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(RealSaveDialogChildren(), "Save As"));
+        // The screenshot: a standard "Save As" dialog, new since the click.
+        [Fact]
+        public void TheScreenshotsDialogIsAccepted()
+        {
+            var dialog = Window("Save As", handle: 5, owner: 2, ownerPid: PioneerPid);
+
+            Assert.Equal(SaveAsRejection.None, Check(dialog, RealSaveDialogChildren(), Baseline(1, 2)));
         }
 
-        // The review's blocker: a new foreground Pioneer window that is a form / alert / message box.
+        // Round 2's pid/owner gate rejected exactly this: the dialog lives in another process with no Pioneer owner.
         [Fact]
-        public void ANewForegroundClass32770WithNoEditOrSaveChildrenIsRejected()
+        public void ADialogOwnedByADifferentProcessThanPioneerIsStillAccepted()
         {
-            var messageBox = Window("Notice", handle: 5);
-            var children = new List<SaveAsChild> { Child(1, "Static", 65535, "Something happened"), Child(2, "Button", 2, "OK") };
+            var dialog = Window("Save As", pid: OtherPid, handle: 5, owner: 0, ownerPid: 0);
 
-            Assert.Equal(SaveAsStrictFailure.None, Check(messageBox, 5, Baseline(1)));
-            Assert.Equal(
-                SaveAsStrictFailure.NoEditChild | SaveAsStrictFailure.NoSaveButton | SaveAsStrictFailure.NoSaveEvidence,
-                SaveAsStrictMatcher.CheckChildren(children, "Notice"));
-        }
-
-        [Fact]
-        public void ADataEntryFormWithAnEditButNoSaveButtonIsRejected()
-        {
-            var children = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 2, "Cancel") };
-
-            Assert.Equal(SaveAsStrictFailure.NoSaveButton, SaveAsStrictMatcher.CheckChildren(children, "Save As"));
+            Assert.Equal(SaveAsRejection.None, Check(dialog, RealSaveDialogChildren(), Baseline(1, 2)));
         }
 
         [Fact]
-        public void ASaveButtonWithNoFileNameEditIsRejected()
+        public void ForegroundOwnerAndExcludedHandlesPlayNoPartInTheDecision()
         {
-            var children = new List<SaveAsChild> { Child(1, "Button", 1, "OK"), Child(2, "Edit", 5000) };
+            // CheckWindow has no foreground / owner / pid / exclusion inputs at all; two different owners give the same verdict.
+            var a = Window("Save As", handle: 5, owner: 7, ownerPid: OtherPid);
+            var b = Window("Save As", handle: 5, owner: 0, ownerPid: 0);
 
-            Assert.True(SaveAsStrictMatcher.CheckChildren(children, "Save As").HasFlag(SaveAsStrictFailure.NoEditChild));
+            Assert.Equal(SaveAsDialogDetector.CheckWindow(a, Baseline(1)), SaveAsDialogDetector.CheckWindow(b, Baseline(1)));
         }
 
-        // The re-review's blocker: a Pioneer input dialog (#32770, default Edit id 1001, OK = id 1).
-        [Fact]
-        public void AnInputDialogWithEdit1001AndAnOkButtonIsRejected()
+        [Theory]
+        [InlineData("&Save")]
+        [InlineData("Save")]
+        [InlineData("S&ave")]
+        [InlineData("&SAVE")]
+        public void ASaveButtonWithOrWithoutTheMnemonicAmpersandIsRecognised(string caption)
         {
-            var inputDialog = Window("Enter Quantity", handle: 5);
+            var dialog = Window("Save As", handle: 5);
+            var children = RealSaveDialogChildren(caption);
+
+            Assert.Equal(SaveAsRejection.None, Check(dialog, children, Baseline(1)));
+            Assert.Equal(new IntPtr(14), SaveAsDialogDetector.FindSaveButton(children)!.Value.Handle);
+        }
+
+        [Fact]
+        public void TheFileNameEditNestedInAComboIsFoundByIdAndByComboParentAndTheSearchBoxIsNeverChosen()
+        {
+            Assert.Equal(new IntPtr(13), SaveAsDialogDetector.FindFileNameEdit(RealSaveDialogChildren())!.Value.Handle);
+
+            // No usable id: the Edit under the ComboBoxEx32 / ComboBox is still identified through its combo parent.
+            var noIds = new List<SaveAsChild>
+            {
+                Child(9, "ReBarWindow32", 0), Child(10, "UniversalSearchBand", 0, parent: 9), Child(16, "Edit", 0, parent: 10),
+                Child(11, "ComboBoxEx32", 0), Child(12, "ComboBox", 0, parent: 11), Child(13, "Edit", 0, parent: 12),
+                Child(14, "Button", 1, "&Save")
+            };
+            Assert.Equal(new IntPtr(13), SaveAsDialogDetector.FindFileNameEdit(noIds)!.Value.Handle);
+
+            // Legacy dialog: id 1152.
+            var legacy = new List<SaveAsChild> { Child(1, "Edit", 7), Child(2, "Edit", 1152), Child(3, "Button", 1, "&Save") };
+            Assert.Equal(new IntPtr(2), SaveAsDialogDetector.FindFileNameEdit(legacy)!.Value.Handle);
+        }
+
+        [Fact]
+        public void ADialogWhoseOnlyEditIsUnidentifiedIsStillDetectedButHasNoFileNameEdit()
+        {
+            var children = new List<SaveAsChild> { Child(1, "Edit", 7), Child(2, "Button", 1, "&Save") };
+
+            Assert.Equal(SaveAsRejection.None, Check(Window("Save As", handle: 5), children, Baseline(1)));
+            Assert.Null(SaveAsDialogDetector.FindFileNameEdit(children));
+        }
+
+        [Fact]
+        public void AnEditInsideTheSearchBoxOnlyIsNeverTheFileNameEdit()
+        {
             var children = new List<SaveAsChild>
             {
-                Child(1, "Static", 65535, "Quantity:"),
-                Child(2, "Edit", 1001),
-                Child(3, "Button", 1, "OK"),
-                Child(4, "Button", 2, "Cancel")
+                Child(9, "ReBarWindow32", 0), Child(10, "UniversalSearchBand", 0, parent: 9), Child(16, "Edit", 1001, parent: 10),
+                Child(14, "Button", 1, "&Save")
             };
 
-            // It is new + foreground + Pioneer + #32770 ...
-            Assert.Equal(SaveAsStrictFailure.None, Check(inputDialog, 5, Baseline(1)));
-            // ... but it has no Save button and no Save/Export title or shell child.
-            var failure = SaveAsStrictMatcher.CheckChildren(children, inputDialog.Title);
-            Assert.NotEqual(SaveAsStrictFailure.None, failure);
-            Assert.True(failure.HasFlag(SaveAsStrictFailure.NoSaveButton));
-            Assert.True(failure.HasFlag(SaveAsStrictFailure.NoSaveEvidence));
+            Assert.Null(SaveAsDialogDetector.FindFileNameEdit(children));
+        }
+
+        // The review's blockers: other new windows of Pioneer must never be accepted.
+        [Fact]
+        public void APreExistingUnrelatedDialogIsRejectedAsNotNew()
+        {
+            var old = Window("Save As", handle: 5);
+
+            Assert.Equal(SaveAsRejection.NotNew, Check(old, RealSaveDialogChildren(), Baseline(5)));
+            Assert.Equal(SaveAsRejection.NotNew, Check(old, RealSaveDialogChildren(), baseline: null));
         }
 
         [Fact]
-        public void AnInputDialogWithASaveButtonButNoSaveTitleOrShellChildIsStillRejected()
+        public void ANewDialogWithADisallowedTitleIsRejectedEvenWithAnEditAndASaveButton()
         {
-            var children = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "&Save") };
-
-            Assert.Equal(SaveAsStrictFailure.NoSaveEvidence, SaveAsStrictMatcher.CheckChildren(children, "Enter Quantity"));
+            foreach (var title in new[] { "Enter Quantity", "Confirm Save As", "Export to PDF", "Save As - Jane Doe", "", "Rx 1234567 - Jane Doe" })
+            {
+                var rejection = Check(Window(title, handle: 5), RealSaveDialogChildren(), Baseline(1));
+                Assert.Equal(SaveAsRejection.TitleNotAllowed, rejection);
+            }
         }
 
         [Theory]
         [InlineData("Save As")]
-        [InlineData("Export to PDF")]
-        [InlineData("SAVE")]
-        public void ASaveOrExportTitleSuppliesTheSaveEvidence(string title)
+        [InlineData("Save Print Output As")]
+        [InlineData("Export")]
+        [InlineData("Save")]
+        [InlineData("save as")]
+        [InlineData("  Save As ")]
+        public void EveryAllowlistedTitleIsAccepted(string title)
         {
-            var children = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "&Save") };
-
-            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(children, title));
-        }
-
-        [Theory]
-        [InlineData("DUIViewWndClassName")]
-        [InlineData("SHELLDLL_DefView")]
-        public void AFileDialogShellChildSuppliesTheSaveEvidenceEvenWithALocalizedTitle(string shellClass)
-        {
-            var children = new List<SaveAsChild> { Child(1, shellClass, 0), Child(2, "Edit", 1001), Child(3, "Button", 1, "Save") };
-
-            Assert.Equal(SaveAsStrictFailure.None, SaveAsStrictMatcher.CheckChildren(children, "Guardar como"));
+            Assert.Equal(SaveAsRejection.None, Check(Window(title, handle: 5), RealSaveDialogChildren(), Baseline(1)));
         }
 
         [Fact]
-        public void ANewForegroundPioneerWindowThatIsNotClass32770IsRejected()
-        {
-            var form = Window("Save", className: "WindowsForms10.Window.8.app.0", handle: 5);
-
-            Assert.Equal(SaveAsStrictFailure.NotDialogClass, Check(form, 5, Baseline(1)));
-        }
-
-        [Fact]
-        public void NewAndForegroundBothAreRequired()
+        public void ANewSaveAsTitledDialogWithoutAnEditOrWithoutASaveButtonIsRejected()
         {
             var dialog = Window("Save As", handle: 5);
 
-            Assert.Equal(SaveAsStrictFailure.NotForeground, Check(dialog, 1, Baseline(1)));          // new, not foreground
-            Assert.Equal(SaveAsStrictFailure.NotNew, Check(dialog, 5, Baseline(5)));                 // foreground, was there before the click
-            Assert.Equal(SaveAsStrictFailure.NotNew, Check(dialog, 5, baseline: null));              // no baseline at all
-            Assert.Equal(SaveAsStrictFailure.NotForeground, Check(dialog, 0, Baseline(1)));          // no foreground window known
+            var noEdit = new List<SaveAsChild> { Child(1, "Static", 65535, "Done"), Child(2, "Button", 1, "&Save") };
+            Assert.Equal(SaveAsRejection.NoEditChild, Check(dialog, noEdit, Baseline(1)));
+
+            var noSave = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "OK"), Child(3, "Button", 2, "Cancel") };
+            Assert.Equal(SaveAsRejection.NoSaveButton, Check(dialog, noSave, Baseline(1)));
+
+            var saveAndClose = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Button", 1, "Save and Close") };
+            Assert.Equal(SaveAsRejection.NoSaveButton, Check(dialog, saveAndClose, Baseline(1)));
+
+            var staticSave = new List<SaveAsChild> { Child(1, "Edit", 1001), Child(2, "Static", 1, "Save") };
+            Assert.Equal(SaveAsRejection.NoSaveButton, Check(dialog, staticSave, Baseline(1)));
         }
 
         [Fact]
-        public void OnlyTheForegroundFlagBlocksInspectionSoTheDialogCanBeBroughtForward()
+        public void InvisibleHandleZeroAndNonDialogClassWindowsAreRejected()
         {
-            Assert.True(SaveAsStrictMatcher.IsWorthInspecting(SaveAsStrictFailure.NotForeground));
-            Assert.True(SaveAsStrictMatcher.IsWorthInspecting(SaveAsStrictFailure.None));
-            Assert.False(SaveAsStrictMatcher.IsWorthInspecting(SaveAsStrictFailure.NotNew | SaveAsStrictFailure.NotForeground));
-            Assert.False(SaveAsStrictMatcher.IsWorthInspecting(SaveAsStrictFailure.NotPioneer));
+            Assert.True(Check(Window("Save As", handle: 5, visible: false), RealSaveDialogChildren(), Baseline(1)).HasFlag(SaveAsRejection.NotVisible));
+            Assert.True(Check(Window("Save As", handle: 0), RealSaveDialogChildren(), Baseline(1)).HasFlag(SaveAsRejection.NotVisible));
+            Assert.True(Check(Window("Save As", className: "WindowsForms10.Window.8.app.0", handle: 5), RealSaveDialogChildren(), Baseline(1)).HasFlag(SaveAsRejection.NotDialogClass));
         }
 
         [Fact]
-        public void AdialogInAnotherProcessOwnedByAPioneerWindowIsStillPioneers()
-        {
-            var dialog = Window("Save As", pid: OtherPid, owner: 2, ownerPid: PioneerPid, handle: 9);
-
-            Assert.Equal(SaveAsStrictFailure.None, Check(dialog, 9, Baseline(1, 2), 1, 2));
-        }
-
-        [Fact]
-        public void AnotherApplicationsSaveAsIsNeverAccepted()
-        {
-            var other = Window("Save As", pid: OtherPid, handle: 8);
-
-            Assert.True(Check(other, 8, Baseline(1)).HasFlag(SaveAsStrictFailure.NotPioneer));
-        }
-
-        [Fact]
-        public void MainWindowPreviewConfirmPromptInvisibleAndHandleZeroAreRejected()
-        {
-            Assert.True(Check(Window("Save As", handle: 1), 1, Baseline(), 1, 2).HasFlag(SaveAsStrictFailure.Excluded));
-            Assert.True(Check(Window("Save As", handle: 2), 2, Baseline(), 1, 2).HasFlag(SaveAsStrictFailure.Excluded));
-            Assert.True(Check(Window("Confirm Save As", handle: 5), 5, Baseline()).HasFlag(SaveAsStrictFailure.ConfirmPrompt));
-            Assert.True(Check(Window("Save As", handle: 5, visible: false), 5, Baseline()).HasFlag(SaveAsStrictFailure.NotVisible));
-            Assert.True(Check(Window("Save As", handle: 0), 0, Baseline()).HasFlag(SaveAsStrictFailure.NotVisible));
-        }
-
-        [Fact]
-        public void FileNameEditIsFoundById1001ThenLegacy1152ThenAnyEditInsideACombo()
-        {
-            Assert.Equal(new IntPtr(13), SaveAsStrictMatcher.FindFileNameEdit(RealSaveDialogChildren())!.Value.Handle);
-
-            var legacy = new List<SaveAsChild> { Child(1, "Edit", 7), Child(2, "Edit", 1152) };
-            Assert.Equal(new IntPtr(2), SaveAsStrictMatcher.FindFileNameEdit(legacy)!.Value.Handle);
-
-            var inCombo = new List<SaveAsChild> { Child(1, "Edit", 7), Child(2, "ComboBoxEx32", 3), Child(3, "Edit", 9, parent: 2) };
-            Assert.Equal(new IntPtr(3), SaveAsStrictMatcher.FindFileNameEdit(inCombo)!.Value.Handle);
-
-            var loose = new List<SaveAsChild> { Child(1, "Edit", 7), Child(2, "Edit", 8) };
-            Assert.Null(SaveAsStrictMatcher.FindFileNameEdit(loose));
-        }
-
-        [Theory]
-        [InlineData(5, "&Save")]
-        [InlineData(5, "Save")]
-        [InlineData(5, "SAVE")]
-        public void SaveButtonIsRecognisedByItsSaveText(int id, string text)
-        {
-            var children = new List<SaveAsChild> { Child(1, "Button", 2, "Cancel"), Child(2, "Button", id, text) };
-
-            Assert.Equal(new IntPtr(2), SaveAsStrictMatcher.FindSaveButton(children)!.Value.Handle);
-        }
-
-        [Fact]
-        public void ANonButtonControlWithSaveTextIsNotTheSaveButton()
-        {
-            Assert.Null(SaveAsStrictMatcher.FindSaveButton(new List<SaveAsChild> { Child(1, "Static", 1, "Save") }));
-        }
-
-        [Theory]
-        [InlineData("OK")]
-        [InlineData("")]
-        [InlineData("Save and Close")]
-        public void ControlIdOneAloneIsNotTheSaveButton(string text)
-        {
-            Assert.Null(SaveAsStrictMatcher.FindSaveButton(new List<SaveAsChild> { Child(1, "Button", 1, text) }));
-        }
-
-        [Fact]
-        public void InventoryListsOnlyNewOrForegroundPioneerWindowsBesidesMainAndPreview()
+        public void FindReturnsTheNewDialogAndOnlyInspectsWindowsThatPassTheWindowTests()
         {
             var all = new List<SaveAsCandidate>
             {
-                Window("main", handle: 1),
-                Window("preview", handle: 2),
-                Window("modal", handle: 3),
-                Window("old", handle: 4),
-                Window("notepad", pid: OtherPid, handle: 6),
-                Window("hidden", handle: 7, visible: false)
+                Window("Run Financial Reports", className: "WindowsForms10.Window.8.app.0", handle: 1),
+                Window("Save As", handle: 2),                       // pre-existing: in the baseline
+                Window("Notice", handle: 3),                        // new but not allowlisted
+                Window("Save As", pid: OtherPid, handle: 4),        // the real one, another process
+                Window("Save As", handle: 6)                        // a second candidate: first one wins
             };
+            var inspected = new List<long>();
 
-            var rows = SaveAsStrictMatcher.InventoryWindows(all, PioneerPid, new IntPtr(3), new List<IntPtr> { new IntPtr(1), new IntPtr(2) }, Baseline(1, 2, 4, 6));
+            var found = SaveAsDialogDetector.Find(all, Baseline(1, 2), h =>
+            {
+                inspected.Add(h.ToInt64());
+                return RealSaveDialogChildren();
+            });
 
-            var only = Assert.Single(rows);
-            Assert.Equal(new IntPtr(3), only.Candidate.Handle);
-            Assert.False(only.IsNew && !only.IsForeground);
+            Assert.NotNull(found);
+            Assert.Equal(new IntPtr(4), found!.Window.Handle);
+            Assert.Equal(new IntPtr(13), found.FileNameEdit!.Value.Handle);
+            Assert.Equal(new IntPtr(14), found.SaveButton.Handle);
+            Assert.Equal(new IntPtr(15), found.CancelButton!.Value.Handle);
+            Assert.Equal(new List<long> { 4 }, inspected);
         }
 
         [Fact]
-        public void DescribeFailureNamesEveryFlag()
+        public void FindReturnsNullWhenNothingQualifies()
         {
-            Assert.Equal("nothing", SaveAsCandidateLog.DescribeFailure(SaveAsStrictFailure.None));
-            Assert.Equal("NotNew+NotForeground", SaveAsCandidateLog.DescribeFailure(SaveAsStrictFailure.NotNew | SaveAsStrictFailure.NotForeground));
+            var all = new List<SaveAsCandidate> { Window("Save As", handle: 2), Window("Notice", handle: 3) };
+
+            Assert.Null(SaveAsDialogDetector.Find(all, Baseline(2), _ => RealSaveDialogChildren()));
+            Assert.Null(SaveAsDialogDetector.Find(new List<SaveAsCandidate>(), Baseline(), _ => RealSaveDialogChildren()));
+        }
+
+        [Fact]
+        public void CancelButtonIsFoundByCaptionThenByControlId2()
+        {
+            Assert.Equal(new IntPtr(15), SaveAsDialogDetector.FindCancelButton(RealSaveDialogChildren())!.Value.Handle);
+
+            var byId = new List<SaveAsChild> { Child(1, "Button", 1, "&Save"), Child(2, "Button", 2, "Annuler") };
+            Assert.Equal(new IntPtr(2), SaveAsDialogDetector.FindCancelButton(byId)!.Value.Handle);
+
+            Assert.Null(SaveAsDialogDetector.FindCancelButton(new List<SaveAsChild> { Child(1, "Button", 1, "&Save") }));
+        }
+    }
+
+    public class WindowTableTests
+    {
+        private static SaveAsChild Child(long handle, string cls, int id, string text = "", long parent = 0) =>
+            new(new IntPtr(handle), new IntPtr(parent), cls, id, text);
+
+        private static List<string> Table(IReadOnlyList<SaveAsWindowRow> rows, params long[] baseline) =>
+            SaveAsWindowTable.Format(rows, new HashSet<IntPtr>(baseline.Select(h => new IntPtr(h))), PioneerPid).ToList();
+
+        [Fact]
+        public void APioneerWindowWithAPatientLikeTitleIsNeverLoggedOnlyItsLength()
+        {
+            const string title = "Rx 1234567 - DOE, JANE";
+            var rows = new List<SaveAsWindowRow>
+            {
+                new(Window(title, className: "WindowsForms10.Window.8.app.0", handle: 0x30), "PioneerRx", null),
+                new(Window("Inbox - patient@example.test - Mail", className: "MailWnd", pid: OtherPid, handle: 0x31), "mail", null)
+            };
+
+            var text = string.Join("\n", Table(rows, 0x30));
+
+            Assert.Contains($"title=<hidden, {title.Length} chars>", text);
+            foreach (var word in new[] { "1234567", "DOE", "JANE", "Rx ", "patient", "Inbox", "Mail -" })
+            {
+                Assert.DoesNotContain(word, text);
+            }
+        }
+
+        [Fact]
+        public void AllowlistedTitlesAreShownAndEveryRowCarriesClassProcessPidsAndSnapshotFlag()
+        {
+            var rows = new List<SaveAsWindowRow>
+            {
+                new(Window("Save As", handle: 0x40, pid: OtherPid, ownerPid: 0), "PioneerHelper", new List<SaveAsChild>()),
+                new(Window("Run Financial Reports", className: "WindowsForms10.Window.8.app.0", handle: 0x41, ownerPid: 0), "PioneerRx", null)
+            };
+
+            var lines = Table(rows, 0x41);
+
+            Assert.Contains("hwnd=0x40 class='#32770' process='PioneerHelper' pid=9999 ownerPid=0 title='Save As' in_pre_click_snapshot=no", lines[1]);
+            Assert.Contains("hwnd=0x41 class='WindowsForms10.Window.8.app.0' process='PioneerRx' pid=1234 ownerPid=0 title=<hidden, 21 chars> in_pre_click_snapshot=yes", lines[2]);
+            Assert.DoesNotContain("Run Financial Reports", string.Join("\n", lines));
+        }
+
+        [Fact]
+        public void ADialogRowShowsTheVerdictDescendantClassesAndButtonCaptions()
+        {
+            var children = new List<SaveAsChild>
+            {
+                Child(1, "ComboBoxEx32", 1148), Child(2, "ComboBox", 1148, parent: 1), Child(3, "Edit", 1001, parent: 2),
+                Child(4, "Button", 1, "&Save"), Child(5, "Button", 2, "Cancel"), Child(6, "Button", 9, "Print for DOE, JANE")
+            };
+            var rows = new List<SaveAsWindowRow> { new(Window("Save As", handle: 0x50), "PioneerRx", children) };
+
+            var line = Table(rows)[1];
+
+            Assert.Contains("verdict=ACCEPTED", line);
+            Assert.Contains("ComboBoxEx32; ComboBox; Edit id=1001", line);
+            Assert.Contains("Button id=1 caption='&Save'", line);
+            Assert.Contains("Button id=2 caption='Cancel'", line);
+            Assert.Contains("caption=<hidden, 19 chars>", line);
+            Assert.DoesNotContain("DOE", line);
+        }
+
+        [Fact]
+        public void APreExistingQualifyingDialogShowsNotNewSoTheNextLogExplainsAMiss()
+        {
+            var children = new List<SaveAsChild> { Child(3, "Edit", 1001), Child(4, "Button", 1, "&Save") };
+            var rows = new List<SaveAsWindowRow> { new(Window("Save As", handle: 0x50), "PioneerRx", children) };
+
+            var line = Table(rows, 0x50)[1];
+
+            Assert.Contains("in_pre_click_snapshot=yes", line);
+            Assert.Contains("verdict=NotNew", line);
+        }
+
+        [Fact]
+        public void AMissingSnapshotIsStatedNotGuessed()
+        {
+            var rows = new List<SaveAsWindowRow> { new(Window("x", handle: 1), "p", null) };
+
+            var lines = SaveAsWindowTable.Format(rows, null, PioneerPid);
+
+            Assert.Contains("pre-click snapshot unavailable", lines[0]);
+            Assert.Contains("in_pre_click_snapshot=unknown", lines[1]);
+        }
+
+        [Fact]
+        public void TheHeaderListsTheAllowlistAndTheRowCountIsCapped()
+        {
+            var rows = Enumerable.Range(1, SaveAsWindowTable.MaxRows + 5)
+                .Select(i => new SaveAsWindowRow(Window("t", handle: i), "p", null))
+                .ToList();
+
+            var lines = Table(rows);
+
+            Assert.Contains("'Save As', 'Save Print Output As', 'Export', 'Save'", lines[0]);
+            Assert.Equal(1 + SaveAsWindowTable.MaxRows + 1, lines.Count);
+            Assert.Contains("+5 more windows", lines[^1]);
+        }
+
+        [Fact]
+        public void EveryLineStartsWithThePrefix()
+        {
+            var rows = new List<SaveAsWindowRow> { new(Window("Save As", handle: 0x50), "PioneerRx", new List<SaveAsChild>()) };
+
+            Assert.All(Table(rows), line => Assert.StartsWith("save-as: ", line));
         }
     }
 
@@ -753,9 +818,14 @@ public class SaveAsDialogTests
         public bool ButtonIsChild = true;
         public bool EditExists = true;
         public IntPtr Foreground = new(100);
+        public bool BringToForegroundWorks = true;
         public bool SetTextWorks = true;
         public string? TextAfterSet;           // null = echo what was set
         public bool ClickWorks = true;
+        public bool TypeWorks = true;
+        public string? TextAfterTyping;        // null = echo what was typed
+        public bool LoseForegroundWhileTyping;
+        public bool AltSWorks = true;
         public bool CloseMakesWindowDisappear = true;
         public bool ForegroundSurvivesClose = true;
         public bool AltF4Closes = false;
@@ -774,6 +844,24 @@ public class SaveAsDialogTests
         public bool SetText(IntPtr edit, string text) { Calls.Add("SetText"); _text = text; return SetTextWorks; }
         public string? GetText(IntPtr edit) { Calls.Add("GetText"); return TextAfterSet ?? _text; }
         public bool ClickButton(IntPtr button) { Calls.Add("Click"); return ClickWorks; }
+
+        public bool BringToForeground(IntPtr handle)
+        {
+            Calls.Add("BringToForeground");
+            if (BringToForegroundWorks) Foreground = handle;
+            return BringToForegroundWorks;
+        }
+
+        public bool TypeFileName(string text)
+        {
+            Calls.Add("Type");
+            _text = TextAfterTyping ?? text;
+            TextAfterSet = null;
+            if (LoseForegroundWhileTyping) Foreground = IntPtr.Zero;
+            return TypeWorks;
+        }
+
+        public bool SendAltS() { Calls.Add("Alt+S"); return AltSWorks; }
 
         public bool PostClose(IntPtr handle)
         {
@@ -800,8 +888,16 @@ public class SaveAsDialogTests
         private static readonly IntPtr Edit = new(101);
         private static readonly IntPtr SaveButton = new(102);
 
-        private static SaveAsEntryResult Run(FakeHost host, List<string>? log = null) =>
-            SaveAsActions.EnterNameAndSave(host, Dialog, Edit, SaveButton, Target, m => (log ?? new List<string>()).Add(m));
+        private static SaveAsEntryResult Run(FakeHost host, List<string>? log = null, IntPtr? edit = null) =>
+            SaveAsActions.EnterNameAndSave(host, Dialog, edit ?? Edit, SaveButton, Target, m => (log ?? new List<string>()).Add(m));
+
+        private static void AssertNoKeysAndNoClose(FakeHost host)
+        {
+            Assert.DoesNotContain("Type", host.Calls);
+            Assert.DoesNotContain("Alt+S", host.Calls);
+            Assert.DoesNotContain("Alt+F4", host.Calls);
+            Assert.DoesNotContain("WM_CLOSE", host.Calls);
+        }
 
         [Fact]
         public void WritesTheNameReadsItBackThenClicksSaveAndSendsNoKeys()
@@ -810,52 +906,108 @@ public class SaveAsDialogTests
 
             Assert.Equal(SaveAsEntryResult.Clicked, Run(host));
 
-            Assert.Contains("SetText", host.Calls);
             Assert.True(host.Calls.IndexOf("SetText") < host.Calls.IndexOf("GetText"));
             Assert.True(host.Calls.IndexOf("GetText") < host.Calls.IndexOf("Click"));
+            AssertNoKeysAndNoClose(host);
+        }
+
+        [Fact]
+        public void TheDirectRouteNeedsNoForegroundAndStillSendsNoKeys()
+        {
+            var host = new FakeHost { Foreground = new IntPtr(555) };
+
+            Assert.Equal(SaveAsEntryResult.Clicked, Run(host));
+
+            Assert.DoesNotContain("BringToForeground", host.Calls);
+            AssertNoKeysAndNoClose(host);
+        }
+
+        [Fact]
+        public void AReadBackThatDoesNotMatchFallsBackToTypingAndAltSWhileTheDialogIsForeground()
+        {
+            var host = new FakeHost { TextAfterSet = "something else" };
+
+            Assert.Equal(SaveAsEntryResult.ClickedByKeyboard, Run(host));
+
+            Assert.DoesNotContain("Click", host.Calls);
+            Assert.True(host.Calls.IndexOf("Type") < host.Calls.IndexOf("Alt+S"));
             Assert.DoesNotContain("Alt+F4", host.Calls);
             Assert.DoesNotContain("WM_CLOSE", host.Calls);
         }
 
         [Fact]
-        public void AReadBackThatDoesNotMatchClosesTheDialogAndNeverClicksSave()
+        public void TheKeyboardFallbackNeverSendsAKeyWhenTheDialogCannotBeBroughtToTheForeground()
         {
-            var host = new FakeHost { TextAfterSet = "something else" };
+            var host = new FakeHost { TextAfterSet = "something else", Foreground = new IntPtr(555), BringToForegroundWorks = false };
 
-            Assert.Equal(SaveAsEntryResult.TextMismatch, Run(host));
+            Assert.Equal(SaveAsEntryResult.NotForeground, Run(host));
 
-            Assert.DoesNotContain("Click", host.Calls);
-            Assert.Contains("WM_CLOSE", host.Calls);
-            Assert.DoesNotContain("Alt+F4", host.Calls);
-        }
-
-        [Fact]
-        public void AReadBackThatCannotBeReadCountsAsAMismatch()
-        {
-            var host = new FakeHost { TextAfterSet = "" };
-
-            Assert.Equal(SaveAsEntryResult.TextMismatch, Run(host));
+            Assert.Contains("BringToForeground", host.Calls);
+            AssertNoKeysAndNoClose(host);
             Assert.DoesNotContain("Click", host.Calls);
         }
 
         [Fact]
-        public void ASetTextThatCannotBeDeliveredClosesTheDialogAndNeverClicks()
+        public void TheKeyboardFallbackBringsTheDialogForwardOnceAndThenMayType()
         {
-            var host = new FakeHost { SetTextWorks = false };
+            var host = new FakeHost { SetTextWorks = false, Foreground = new IntPtr(555) };
 
-            Assert.Equal(SaveAsEntryResult.SetTextFailed, Run(host));
+            Assert.Equal(SaveAsEntryResult.ClickedByKeyboard, Run(host));
+
+            Assert.Equal(1, host.Calls.Count(c => c == "BringToForeground"));
+            Assert.True(host.Calls.IndexOf("BringToForeground") < host.Calls.IndexOf("Type"));
+        }
+
+        [Fact]
+        public void LosingTheForegroundWhileTypingStopsBeforeAltS()
+        {
+            var host = new FakeHost { SetTextWorks = false, LoseForegroundWhileTyping = true };
+
+            Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
+
+            Assert.Contains("Type", host.Calls);
+            Assert.DoesNotContain("Alt+S", host.Calls);
+        }
+
+        [Fact]
+        public void ATypedNameThatReadsBackWrongIsNotSaved()
+        {
+            var host = new FakeHost { SetTextWorks = false, TextAfterTyping = "wrong" };
+
+            Assert.Equal(SaveAsEntryResult.KeyboardFailed, Run(host));
+
+            Assert.DoesNotContain("Alt+S", host.Calls);
+        }
+
+        [Fact]
+        public void WhenNoFileNameEditWasIdentifiedNothingIsWrittenToAnyEditAndTheKeyboardRouteRuns()
+        {
+            var host = new FakeHost();
+
+            Assert.Equal(SaveAsEntryResult.ClickedByKeyboard, Run(host, edit: IntPtr.Zero));
+
+            Assert.DoesNotContain("SetText", host.Calls);
             Assert.DoesNotContain("GetText", host.Calls);
-            Assert.DoesNotContain("Click", host.Calls);
-            Assert.Contains("WM_CLOSE", host.Calls);
+            Assert.True(host.Calls.IndexOf("Type") < host.Calls.IndexOf("Alt+S"));
         }
 
         [Fact]
-        public void AClickThatCannotBeDeliveredClosesTheDialog()
+        public void AClickThatCannotBeDeliveredAfterAVerifiedNameFallsBackToAltS()
         {
             var host = new FakeHost { ClickWorks = false };
 
+            Assert.Equal(SaveAsEntryResult.ClickedByKeyboard, Run(host));
+
+            Assert.DoesNotContain("Type", host.Calls);   // the name was already verified
+            Assert.Contains("Alt+S", host.Calls);
+        }
+
+        [Fact]
+        public void AnAltSThatCannotBeSentIsAFailureNotASuccess()
+        {
+            var host = new FakeHost { ClickWorks = false, AltSWorks = false };
+
             Assert.Equal(SaveAsEntryResult.ClickFailed, Run(host));
-            Assert.Contains("WM_CLOSE", host.Calls);
         }
 
         [Theory]
@@ -863,7 +1015,6 @@ public class SaveAsDialogTests
         [InlineData("hidden")]
         [InlineData("otherProcess")]
         [InlineData("otherClass")]
-        [InlineData("notForeground")]
         public void ADialogThatChangedAfterItWasAcceptedGetsNothingAtAll(string change)
         {
             var host = new FakeHost();
@@ -873,15 +1024,13 @@ public class SaveAsDialogTests
                 case "hidden": host.Visible = false; break;
                 case "otherProcess": host.Pid = OtherPid; break;
                 case "otherClass": host.Class = "WindowsForms10.Window.8.app.0"; break;
-                case "notForeground": host.Foreground = new IntPtr(555); break;
             }
 
             Assert.Equal(SaveAsEntryResult.StaleWindow, Run(host));
 
             Assert.DoesNotContain("SetText", host.Calls);
             Assert.DoesNotContain("Click", host.Calls);
-            Assert.DoesNotContain("WM_CLOSE", host.Calls);
-            Assert.DoesNotContain("Alt+F4", host.Calls);
+            AssertNoKeysAndNoClose(host);
         }
 
         [Theory]
@@ -906,7 +1055,7 @@ public class SaveAsDialogTests
 
             Assert.DoesNotContain("SetText", host.Calls);
             Assert.DoesNotContain("Click", host.Calls);
-            Assert.DoesNotContain("WM_CLOSE", host.Calls);
+            AssertNoKeysAndNoClose(host);
         }
 
         [Fact]
