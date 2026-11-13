@@ -127,6 +127,109 @@ public class ReportsLogUploadTests
         Assert.Equal("Reports log - Test date entry stopped. Rx Verify build abc", ReportsLogUpload.BuildHeader("Test date entry", null, "Rx Verify build abc"));
     }
 
+    // ---- privacy: nothing path-like, exception-like or control-name-like leaves the PC ----
+
+    [Fact]
+    public void DefaultOutputFolderPathIsCutToItsLastFolder()
+    {
+        var line = @"10:00:03 Daily files go to: C:\Users\SomeName\Downloads\2026-10_EOM reports";
+
+        var message = ReportsLogUpload.BuildMessage("H", new[] { line });
+
+        Assert.DoesNotContain("SomeName", message);
+        Assert.DoesNotContain(@"C:\", message);
+        Assert.DoesNotContain("Downloads", message);
+        Assert.Equal("H\n10:00:03 Daily files go to: …\\2026-10_EOM reports", message);
+    }
+
+    [Theory]
+    [InlineData(@"10:00:03 Daily files go to: D:\Pharmacy Backup\Alice Smith\Month End", "Month End", new[] { "Alice", "Pharmacy Backup", @"D:\" })]
+    [InlineData(@"10:00:03 Daily files go to: C:/Users/SomeName/Desktop/eom", "eom", new[] { "SomeName", "Desktop", "C:/" })]
+    [InlineData(@"10:00:03 Daily files go to: \\fileserver\shared\SomeName\eom", "eom", new[] { "fileserver", "SomeName", "shared" })]
+    public void CustomPathsAreCutToTheirLastNameOnly(string line, string last, string[] mustNotAppear)
+    {
+        var message = ReportsLogUpload.BuildMessage("H", new[] { line });
+
+        Assert.EndsWith("…\\" + last, message);
+        foreach (var text in mustNotAppear) Assert.DoesNotContain(text, message);
+    }
+
+    [Fact]
+    public void SavedFileLineKeepsTheFileNameButNotTheFolder()
+    {
+        var line = @"10:00:09 Sales Summary: saved to C:\Users\SomeName\Downloads\2026-10_EOM reports\10-31-26_Sales.xlsx (3.2s)";
+
+        var message = ReportsLogUpload.BuildMessage("H", new[] { line });
+
+        Assert.DoesNotContain("SomeName", message);
+        Assert.Contains("10-31-26_Sales.xlsx", message);
+    }
+
+    [Fact]
+    public void OutputFolderExceptionMessageIsDropped()
+    {
+        var line = @"10:00:04 Couldn't create the output folder: Access to the path 'C:\Users\SomeName\Downloads\2026-10_EOM reports' is denied.";
+
+        var message = ReportsLogUpload.BuildMessage("H", new[] { line });
+
+        Assert.DoesNotContain("SomeName", message);
+        Assert.DoesNotContain("Access to the path", message);
+        Assert.Equal("H\n10:00:04 Couldn't create the output folder: (details not sent)", message);
+    }
+
+    [Fact]
+    public void OtherExceptionMessagesWithAPathLoseTheFolder()
+    {
+        var quoted = @"10:00:05 Sales Summary: failed - Could not find a part of the path 'C:\Users\SomeName's PC\Downloads\gone\file.xlsx'.";
+        var bare = @"10:00:06 Sales Summary: failed - Access denied C:\Users\SomeName\Downloads\file.xlsx";
+
+        var message = ReportsLogUpload.BuildMessage("H", new[] { quoted, bare });
+
+        Assert.DoesNotContain("SomeName", message);
+        Assert.DoesNotContain("Downloads", message);
+        Assert.Contains("Could not find a part of the path '…\\file.xlsx'.", message);
+    }
+
+    [Fact]
+    public void ControlNamesAreRedactedButClassAndIdStay()
+    {
+        var line = "10:00:07   focused: class='Edit' name='SYNTHETIC PERSON NAME' id='txtBegin'";
+
+        var message = ReportsLogUpload.BuildMessage("H", new[] { line });
+
+        Assert.DoesNotContain("SYNTHETIC", message);
+        Assert.Contains("class='Edit' name='[redacted]' id='txtBegin'", message);
+    }
+
+    [Fact]
+    public void ReportNamesAndKnownScreenNamesStayReadable()
+    {
+        var reportName = ReportCatalog.All[0].PioneerRowText;
+        var lines = new[]
+        {
+            $"10:00:07   row: class='ListItem' name='{reportName}' id=''",
+            "10:00:08   window: 'Run Financial Reports' class='X' title='Run Financial Reports'",
+            "10:00:08   candidate pid=1 handle=0x1 class='W' title_len=12 title='[redacted]'",
+            "10:00:08   candidate pid=2 handle=0x2 class='W' title_len=12 title='Jane Example'"
+        };
+
+        var message = ReportsLogUpload.BuildMessage("H", lines);
+
+        Assert.Contains($"name='{reportName}'", message);
+        Assert.Contains("title='Run Financial Reports'", message);
+        Assert.DoesNotContain("Jane Example", message);
+        Assert.Contains("title='[redacted]'", message);
+    }
+
+    [Fact]
+    public void LinesWithoutPathsOrNamesAreUnchanged()
+    {
+        foreach (var line in new[] { "10:00:01 Rx Verify build abc 2026-10-31 UTC", "10:00:02 [3/62] Sales Summary for 10-03-26: OK - saved 10-03-26_Sales.xlsx (3.2s).", "Stopped before [4/62] POS Summary for 10-04-26 - the rest was not run." })
+        {
+            Assert.Equal(line, ReportsLogUpload.Sanitize(line));
+        }
+    }
+
     // ---- SendAsync against a fake HTTP sink ----
 
     [Fact]

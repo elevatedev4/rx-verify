@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using RxVerifyOverlay.Reporting;
 
@@ -16,6 +17,11 @@ namespace RxVerifyOverlay.Reports;
 /// /api/rxverify-feedback with OverlaySettings.RxVerifyReportKey (the dedicated
 /// low-privilege key). No new credential. FAIL SOFT: SendAsync never throws
 /// and a failed or skipped send never affects the run.
+///
+/// PRIVACY: the window log shows full paths (they include the Windows account
+/// name), exception messages and UIA control names. None of that leaves this PC:
+/// <see cref="Sanitize"/> runs on every line inside <see cref="BuildMessage"/>
+/// (not at the call sites), so no caller can send an unsanitized line.
 ///
 /// Everything except SendAsync is pure (unit tested).
 /// </summary>
@@ -42,6 +48,61 @@ public static class ReportsLogUpload
     /// <summary>The date-entry test is a diagnostic; send only when it did not complete.</summary>
     public static bool ShouldSend(ReportRunResult result) => result.Status != ReportRunStatus.Saved;
 
+    private const string PathDetailNote = "(details not sent)";
+
+    /// <summary>A path right after a quote, up to the closing quote (an apostrophe inside a folder name does not end it).</summary>
+    private static readonly Regex QuotedPath = new(
+        @"(?<=['""])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])[^\r\n]*?(?=['""](?:[\s.,;:)\]]|$))", RegexOptions.Compiled);
+
+    /// <summary>Any other Windows path (drive or UNC); runs to the end of the line because folder names can hold spaces.</summary>
+    private static readonly Regex AnyPath = new(
+        @"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s'""]+[\\/])[^\r\n]*", RegexOptions.Compiled);
+
+    /// <summary>The UIA control description the driver logs: class='..' name='..' id='..'.</summary>
+    private static readonly Regex ControlName = new(@"\bname='(.*?)'(?= id=')", RegexOptions.Compiled);
+
+    /// <summary>Any remaining name='..' or title='..' value.</summary>
+    private static readonly Regex NameOrTitle = new(@"\b(name|title)='([^']*)'", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Makes one window-log line safe to leave this PC: every Windows path is cut
+    /// down to its last folder or file name (so "C:\Users\SomeName\Downloads\2026-10_EOM reports"
+    /// becomes "…\2026-10_EOM reports"), an output-folder exception message is
+    /// dropped, and control names / titles are redacted unless they are a report
+    /// name, column header or known screen name (the same allowlists the log
+    /// already uses for window titles).
+    /// </summary>
+    public static string Sanitize(string line)
+    {
+        if (string.IsNullOrEmpty(line)) return line;
+
+        const string folderFailure = "Couldn't create the output folder:";
+        var at = line.IndexOf(folderFailure, StringComparison.OrdinalIgnoreCase);
+        if (at >= 0) return line.Substring(0, at + folderFailure.Length) + " " + PathDetailNote;
+
+        line = ControlName.Replace(line, m => "name='" + SafeName(m.Groups[1].Value) + "'");
+        line = NameOrTitle.Replace(line, m => m.Groups[1].Value + "='" + SafeName(m.Groups[2].Value) + "'");
+        line = QuotedPath.Replace(line, m => LastSegment(m.Value));
+        line = AnyPath.Replace(line, m => LastSegment(m.Value));
+        return line;
+    }
+
+    private static string SafeName(string value)
+    {
+        if (value.Length == 0 || value == UiaNameRedaction.RedactedName || value == "<untitled>") return value;
+        if (ReportRowNameRedaction.IsKnownSafeValue(value)) return value;
+        if (MainWindowTitleRedaction.RedactIfNeeded(value) == value) return value;
+        return UiaNameRedaction.RedactedName;
+    }
+
+    private static string LastSegment(string path)
+    {
+        var trimmed = path.TrimEnd('\\', '/', ' ');
+        var cut = trimmed.LastIndexOfAny(new[] { '\\', '/' });
+        var last = cut >= 0 ? trimmed.Substring(cut + 1) : trimmed;
+        return "…\\" + last;
+    }
+
     /// <summary>One header line: which run, counts, build. Counts and fixed text only.</summary>
     public static string BuildHeader(string runKind, string? countsText, string buildSummary) =>
         string.IsNullOrWhiteSpace(countsText)
@@ -65,8 +126,11 @@ public static class ReportsLogUpload
     /// <paramref name="maxChars"/> the OLDEST lines are dropped (the end of the
     /// log is where a run stopped), with a one-line note saying how many.
     /// </summary>
-    public static string BuildMessage(string header, IReadOnlyList<string> lines, int maxChars = MaxMessageChars)
+    public static string BuildMessage(string header, IReadOnlyList<string> rawLines, int maxChars = MaxMessageChars)
     {
+        header = Sanitize(header);
+        var lines = new List<string>(rawLines.Count);
+        foreach (var raw in rawLines) lines.Add(Sanitize(raw));
         header = header.Length > maxChars ? header.Substring(0, maxChars) : header;
         var budget = maxChars - header.Length - 1; // newline after the header
         if (lines.Count == 0 || budget <= 0) return header;
