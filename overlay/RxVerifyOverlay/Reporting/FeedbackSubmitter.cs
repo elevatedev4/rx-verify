@@ -37,8 +37,23 @@ public sealed class FeedbackSubmitter
     private const string EndpointUrl = "https://manager-hq.vercel.app/api/rxverify-feedback";
 
     private readonly OverlaySettings _settings;
+    private readonly HttpClient _http;
+    private readonly string _endpointUrl;
 
-    public FeedbackSubmitter(OverlaySettings settings) => _settings = settings;
+    public FeedbackSubmitter(OverlaySettings settings)
+    {
+        _settings = settings;
+        _http = Http;
+        _endpointUrl = EndpointUrl;
+    }
+
+    /// <summary>Test seam: sends through <paramref name="handler"/> to <paramref name="endpointUrl"/> (a fake HTTP sink) instead of the real endpoint.</summary>
+    public FeedbackSubmitter(OverlaySettings settings, HttpMessageHandler handler, string endpointUrl)
+    {
+        _settings = settings;
+        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+        _endpointUrl = endpointUrl;
+    }
 
     /// <summary>
     /// Never throws — every failure mode (missing key, DNS/timeout/network
@@ -53,13 +68,13 @@ public sealed class FeedbackSubmitter
         try
         {
             var json = JsonSerializer.Serialize(payload, JsonOptions);
-            using var request = new HttpRequestMessage(HttpMethod.Post, EndpointUrl)
+            using var request = new HttpRequestMessage(HttpMethod.Post, _endpointUrl)
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.RxVerifyReportKey);
 
-            using var response = await Http.SendAsync(request).ConfigureAwait(false);
+            using var response = await _http.SendAsync(request).ConfigureAwait(false);
             return response.IsSuccessStatusCode;
         }
         catch

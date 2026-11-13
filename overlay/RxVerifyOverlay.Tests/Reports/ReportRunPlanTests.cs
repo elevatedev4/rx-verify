@@ -105,14 +105,31 @@ public class ReportRunPlanTests
     }
 
     [Fact]
-    public void DefaultOutputFolderIsUnderDocumentsPioneerReportsNamedByEndMonth()
+    public void DefaultOutputFolderIsTheDownloadsEomFolderNamedByEndMonth()
     {
-        var end = new DateTime(2026, 8, 31);
-        var expectedDocuments = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        var downloads = Path.Combine("C:", "Users", "someone", "Downloads");
 
-        var folder = ReportRunPlan.DefaultOutputFolder(end);
+        var folder = ReportRunPlan.DefaultOutputFolder(new DateTime(2026, 10, 31), downloads);
 
-        Assert.Equal(Path.Combine(expectedDocuments, "Pioneer Reports", "2026-08"), folder);
+        Assert.Equal(Path.Combine(downloads, "2026-10_EOM reports"), folder);
+    }
+
+    [Fact]
+    public void MonthlyAndDailyRunsShareTheSameDefaultFolder()
+    {
+        var downloads = Path.Combine("C:", "Users", "someone", "Downloads");
+        var end = new DateTime(2026, 10, 31);
+
+        Assert.Equal(DailySalesPlan.DefaultOutputFolder(end, downloads), ReportRunPlan.DefaultOutputFolder(end, downloads));
+        Assert.Equal(DailySalesPlan.ResolveOutputFolder(null, false, end, downloads), ReportRunPlan.DefaultOutputFolder(end, downloads));
+    }
+
+    [Fact]
+    public void DefaultOutputFolderWithoutDownloadsArgumentUsesTheUserDownloadsFolder()
+    {
+        var folder = ReportRunPlan.DefaultOutputFolder(new DateTime(2026, 8, 31));
+
+        Assert.Equal(Path.Combine(DailySalesPlan.UserDownloadsFolder(), "2026-08_EOM reports"), folder);
     }
 
     [Fact]

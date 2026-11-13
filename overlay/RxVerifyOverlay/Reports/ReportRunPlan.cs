@@ -66,16 +66,19 @@ public static class ReportRunPlan
     }
 
     /// <summary>
-    /// Default output folder: %USERPROFILE%\Documents\Pioneer Reports\&lt;yyyy-MM
-    /// of the End date&gt; — created on run (Directory.CreateDirectory is
-    /// idempotent), not here (this method is pure/no I/O so it stays
+    /// Default output folder (W-Q12, Will: yes): the ONE folder every Reports
+    /// run uses, monthly and daily alike - %USERPROFILE%\Downloads\&lt;yyyy-MM
+    /// of the End date&gt;_EOM reports, decided only by
+    /// DailySalesPlan.EomFolderName. Created on run (Directory.CreateDirectory
+    /// is idempotent), not here (this method does no I/O so it stays
     /// unit-testable without touching the filesystem).
     /// </summary>
-    public static string DefaultOutputFolder(DateTime end)
-    {
-        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        return Path.Combine(documents, "Pioneer Reports", end.ToString("yyyy-MM"));
-    }
+    public static string DefaultOutputFolder(DateTime end) =>
+        DefaultOutputFolder(end, DailySalesPlan.UserDownloadsFolder());
+
+    /// <summary>Same as <see cref="DefaultOutputFolder(DateTime)"/> with the Downloads folder supplied (tests).</summary>
+    public static string DefaultOutputFolder(DateTime end, string downloadsFolder) =>
+        DailySalesPlan.DefaultOutputFolder(end, downloadsFolder);
 
     /// <summary>
     /// Builds the full ReportRunItem for one catalog entry given a

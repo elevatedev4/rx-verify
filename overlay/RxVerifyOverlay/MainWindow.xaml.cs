@@ -627,7 +627,7 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     {
         if (_reportsWindow is null)
         {
-            _reportsWindow = new Reports.ReportsWindow();
+            _reportsWindow = new Reports.ReportsWindow(_settings);
             _reportsWindow.Closed += (_, _) => _reportsWindow = null;
             _reportsWindow.Show();
             return;

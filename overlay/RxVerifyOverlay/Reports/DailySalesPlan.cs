@@ -139,8 +139,8 @@ public static class DailySalesPlan
     /// THE one place the "month and year + _EOM reports" folder name is
     /// decided (Will, W-Q11: "It should make a folder in downloads that has
     /// the month and year + _EOM reports"): e.g. "2026-10_EOM reports". Takes the
-    /// range's END date. If Will wants the monthly reports there too
-    /// (W-Q12), ReportRunPlan.DefaultOutputFolder calls this and nothing else changes.
+    /// range's END date. W-Q12 (yes): the monthly reports use it too
+    /// (ReportRunPlan.DefaultOutputFolder calls this).
     /// </summary>
     public static string EomFolderName(DateTime rangeEnd) => rangeEnd.ToString("yyyy-MM", CultureInfo.InvariantCulture) + "_EOM reports";
 

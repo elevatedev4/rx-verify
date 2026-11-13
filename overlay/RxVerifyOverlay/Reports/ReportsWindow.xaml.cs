@@ -3,8 +3,13 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
+using RxVerifyOverlay.Diagnostics;
+using RxVerifyOverlay.Models;
+using RxVerifyOverlay.Reporting;
 using RxVerifyOverlay.Update;
 
 namespace RxVerifyOverlay.Reports;
@@ -36,9 +41,23 @@ public sealed partial class ReportsWindow : Window
     /// <summary>True once the user typed in or browsed the "Save to" box (set by TextChanged; the window's own default does not count) - a daily run then uses that folder instead of the EOM one.</summary>
     private bool _saveToChosenByUser;
 
+    /// <summary>Settings (for the HQ report key); null = the log is never sent to HQ (tests, designer).</summary>
+    private OverlaySettings? _settings;
+
+    /// <summary>Every line this window's log has shown, as shown (W-Q13: this is all that is ever sent to HQ).</summary>
+    private readonly List<string> _logLines = new();
+    private readonly object _logLinesLock = new();
+    private int _runLogStart;
+
     /// <summary>Production constructor — real PioneerReportDriver (FlaUI/UIA against the live PioneerRx window).</summary>
     public ReportsWindow() : this(new PioneerReportDriver())
     {
+    }
+
+    /// <summary>Production constructor used by MainWindow: same as above, plus the settings that hold the HQ report key so a stopped run's log can be sent to HQ (W-Q13).</summary>
+    public ReportsWindow(OverlaySettings settings) : this(new PioneerReportDriver())
+    {
+        _settings = settings;
     }
 
     /// <summary>Test/DI seam — see RxVerifyOverlay.Tests for why PioneerReportDriver itself isn't unit tested (no UI tests per the GOAL brief; this constructor exists mainly so ReportsWindow's own non-UIA logic could be exercised with a fake if ever needed).</summary>
@@ -190,10 +209,12 @@ public sealed partial class ReportsWindow : Window
         TestDateEntryButton.IsEnabled = false;
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
+        MarkRunLogStart();
 
+        IReadOnlyList<ReportRunOutcome>? outcomes = null;
         try
         {
-            await _coordinator.RunAsync(items, AppendLog, _runCts.Token);
+            outcomes = await _coordinator.RunAsync(items, AppendLog, _runCts.Token);
         }
         finally
         {
@@ -203,6 +224,11 @@ public sealed partial class ReportsWindow : Window
             StopButton.IsEnabled = false;
             _runCts?.Dispose();
             _runCts = null;
+        }
+
+        if (outcomes is not null && ReportsLogUpload.ShouldSend(outcomes))
+        {
+            SendRunLogToHq("Run", ReportsLogUpload.RunCounts(outcomes));
         }
     }
 
@@ -256,10 +282,12 @@ public sealed partial class ReportsWindow : Window
         RunDailyButton.IsEnabled = false;
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
+        MarkRunLogStart();
 
+        ReportRunResult? testResult = null;
         try
         {
-            await _coordinator.TestDateEntryAsync(item, AppendLog, _runCts.Token);
+            testResult = await _coordinator.TestDateEntryAsync(item, AppendLog, _runCts.Token);
         }
         finally
         {
@@ -270,6 +298,11 @@ public sealed partial class ReportsWindow : Window
             _runCts?.Dispose();
             _runCts = null;
         }
+
+        if (testResult is not null && ReportsLogUpload.ShouldSend(testResult))
+        {
+            SendRunLogToHq("Test date entry", null);
+        }
     }
 
     /// <summary>
@@ -279,6 +312,7 @@ public sealed partial class ReportsWindow : Window
     /// </summary>
     private async void OnRunDailyClick(object sender, RoutedEventArgs e)
     {
+        MarkRunLogStart();
         var begin = BeginDatePicker.SelectedDate;
         var end = EndDatePicker.SelectedDate;
         if (begin is null || end is null)
@@ -357,6 +391,13 @@ public sealed partial class ReportsWindow : Window
             _runCts = null;
         }
 
+        // W-Q13: a daily run that stopped (failed, Stop, Search Drawers closed) sends its log to HQ.
+        // Not awaited and never throws, so it cannot hold up the dialog below or the next run.
+        if (summary is not null && ReportsLogUpload.ShouldSend(summary))
+        {
+            SendRunLogToHq("Run daily", ReportsLogUpload.DailyCounts(summary));
+        }
+
         // W-T98: Search Drawers not open is a request, shown on screen - not a silent log line.
         if (summary is { NeedsSearchDrawers: true })
         {
@@ -387,13 +428,56 @@ public sealed partial class ReportsWindow : Window
         }
     }
 
+    /// <summary>Marks where the current run's lines start in <see cref="_logLines"/>.</summary>
+    private void MarkRunLogStart()
+    {
+        lock (_logLinesLock) _runLogStart = _logLines.Count;
+    }
+
+    /// <summary>
+    /// W-Q13: posts this run's log lines (exactly the lines the log box shows) to HQ
+    /// as one message through the existing feedback path. Fire and forget: a missing
+    /// key, no network or an HQ error only adds a line to the log and never touches
+    /// the run or the buttons.
+    /// </summary>
+    private void SendRunLogToHq(string runKind, string? counts)
+    {
+        try
+        {
+            List<string> lines;
+            lock (_logLinesLock) lines = _logLines.GetRange(_runLogStart, _logLines.Count - _runLogStart);
+
+            var message = ReportsLogUpload.BuildMessage(ReportsLogUpload.BuildHeader(runKind, counts, BuildInfo.Summary), lines);
+            var settings = _settings;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var hasKey = settings is not null && !string.IsNullOrWhiteSpace(settings.RxVerifyReportKey);
+                    var outcome = await ReportsLogUpload.SendAsync(new FeedbackSubmitter(settings ?? new OverlaySettings()), hasKey, message, AppDiagnostics.GetCommitSha());
+                    AppendLog(outcome);
+                }
+                catch
+                {
+                    // Never let the HQ send affect the Reports window.
+                }
+            });
+        }
+        catch
+        {
+            // Never let the HQ send affect the Reports window.
+        }
+    }
+
     private void AppendLog(string line)
     {
+        var stamped = $"{DateTime.Now:HH:mm:ss} {line}";
+        lock (_logLinesLock) _logLines.Add(stamped);
         try
         {
             Dispatcher.Invoke(() =>
             {
-                LogTextBox.AppendText($"{DateTime.Now:HH:mm:ss} {line}{Environment.NewLine}");
+                LogTextBox.AppendText($"{stamped}{Environment.NewLine}");
                 LogTextBox.ScrollToEnd();
             });
         }
