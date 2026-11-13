@@ -136,9 +136,6 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     /// <summary>Round 3 (GOAL brief fix 2a): "cap node count ~5,000" for the unlimited-depth RawViewWalker search inside FinancialReportsWorkArea.</summary>
     private const int MaxRowSearchNodes = 5000;
 
-    /// <summary>Round 3 (GOAL brief fix 2b): "step Down one row at a time (max 60)".</summary>
-    private const int MaxGridKeyboardSteps = 60;
-
     /// <summary>Round 3 (GOAL brief fix 2, diagnostic dump extension): "walk the RAW view under FinancialReportsWorkArea to depth 8".</summary>
     private const int MaxRowDiagnosticDumpDepth = 8;
 
@@ -586,6 +583,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             var rowOpened = TrySelectAndOpenReportRow(item.Entry, log, ct);
             if (!rowOpened)
             {
+                log(ReportChooserSelection.BuildNotFoundMessage(item.Entry.PioneerRowText, _lastChooserScan));
                 WriteRowSelectionDiagnosticDump(item.Entry.PioneerRowText, log);
                 return ReportRunResult.Failed($"Report row '{item.Entry.PioneerRowText}' not found", stopwatch.Elapsed);
             }
@@ -782,6 +780,31 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         {
             log($"Automation error: {ex.Message}");
             return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
+        }
+    }
+
+    /// <summary>
+    /// Pre-run check for the daily POS pass: the same detection RunPosSummary
+    /// uses (PosSummaryPlan.FindSearchDrawers over the raw Win32 window list,
+    /// Pioneer pid or owner, visible, title contains "Search Drawers"). Sends
+    /// nothing. When it is not open, logs the Pioneer windows by class and
+    /// title length only.
+    /// </summary>
+    public bool IsSearchDrawersOpen(Action<string> log)
+    {
+        try
+        {
+            var windows = EnumerateAllTopLevelWindowsForSaveAs();
+            var foreground = GetForegroundWindow();
+            if (PosSummaryPlan.FindSearchDrawers(windows, _pioneerProcessId, foreground) is not null) return true;
+
+            log(PosLogPrefix + PosSummaryPlan.DescribePioneerWindows(windows, _pioneerProcessId, foreground));
+            return false;
+        }
+        catch (Exception ex)
+        {
+            log(PosLogPrefix + $"Search Drawers check could not run: {ex.Message}");
+            return false;
         }
     }
 
@@ -2103,6 +2126,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     private bool TryDeepUiaRowSelect(string rowText, Action<string> log)
     {
         log($"    strategy 1/3 (UIA deep search in '{FinancialReportsWorkAreaAutomationId}') for '{rowText}'...");
+        _lastChooserScan = ChooserScanStats.None;
 
         var workArea = FindDescendantByAutomationId(_mainWindow!, FinancialReportsWorkAreaAutomationId);
         if (workArea is null)
@@ -2114,7 +2138,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         var match = DeepFindRowElement(workArea, rowText);
         if (match is null)
         {
-            log("    no matching row element found in the deep UIA search.");
+            var scan = _lastChooserScan;
+            log($"    no matching row element found in the deep UIA search ({scan.ElementsVisited} element(s) searched, {scan.RowLikeElements} row-like).");
             return false;
         }
 
@@ -2130,6 +2155,23 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             // Best-effort - a row already fully on-screen doesn't need this.
         }
 
+        // Select the row by name through UIA first (no keys, no scrolling); the
+        // double-click below is what opens it (Will: each report has to be
+        // double clicked to open the next window).
+        try
+        {
+            if (match.Patterns.SelectionItem.IsSupported)
+            {
+                match.Patterns.SelectionItem.Pattern.Select();
+                log("    [UIA deep search] row selected by name.");
+            }
+        }
+        catch
+        {
+            // Best-effort - not every grid row supports selection by pattern.
+        }
+
+        Thread.Sleep(PollInterval);
         return TryDoubleClickElement(match, log, "UIA deep search");
     }
 
@@ -2145,7 +2187,10 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
     }
 
-    /// <summary>DFS via RawViewWalker (unbounded control-view depth — WinForms/third-party grids commonly hide rows from the CONTROL view), capped at MaxRowSearchNodes so a huge/broken tree can't hang the row-selection step.</summary>
+    /// <summary>What the last row search saw (counts and catalog report names only); read by the not-found log line.</summary>
+    private ChooserScanStats _lastChooserScan = ChooserScanStats.None;
+
+    /// <summary>DFS via RawViewWalker (unbounded control-view depth — WinForms/third-party grids commonly hide rows from the CONTROL view), capped at MaxRowSearchNodes so a huge/broken tree can't hang the row-selection step. Records what it saw in <see cref="_lastChooserScan"/>.</summary>
     private AutomationElement? DeepFindRowElement(AutomationElement root, string rowText)
     {
         if (string.IsNullOrWhiteSpace(rowText)) return null;
@@ -2161,17 +2206,37 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
 
         var visited = 0;
+        var rowLike = 0;
+        var known = new List<string>();
         var stack = new Stack<AutomationElement>();
         stack.Push(root);
+        AutomationElement? found = null;
 
         while (stack.Count > 0 && visited < MaxRowSearchNodes)
         {
             var current = stack.Pop();
             visited++;
 
-            if (!ReferenceEquals(current, root) && IsRowTextMatch(current, rowText))
+            if (!ReferenceEquals(current, root))
             {
-                return current;
+                var texts = TryReadRowTexts(current);
+                if (texts is not null)
+                {
+                    rowLike++;
+                    foreach (var text in texts)
+                    {
+                        if (ReportChooserSelection.IsKnownReportName(text) && !known.Contains(ReportRowTextMatcher.Normalize(text), StringComparer.OrdinalIgnoreCase))
+                        {
+                            known.Add(ReportRowTextMatcher.Normalize(text));
+                        }
+                    }
+
+                    if (ReportChooserSelection.AnyTextMatches(texts, rowText))
+                    {
+                        found = current;
+                        break;
+                    }
+                }
             }
 
             try
@@ -2189,20 +2254,27 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             }
         }
 
-        return null;
+        _lastChooserScan = new ChooserScanStats(true, visited, rowLike, known, found is null && visited >= MaxRowSearchNodes);
+        return found;
     }
 
-    private static bool IsRowTextMatch(AutomationElement element, string rowText)
+    /// <summary>
+    /// Every readable text of a row-like element (Name, Value pattern, and the
+    /// MSAA name and value separately): a grid cell's Name is often generic and
+    /// its real text only in the Value, so no single text may end the check.
+    /// Null when the element is not a row-like control type at all.
+    /// </summary>
+    private static List<string?>? TryReadRowTexts(AutomationElement element)
     {
         ControlType controlType;
-        try { controlType = element.ControlType; } catch { return false; }
-        if (!RowSearchControlTypes.Contains(controlType)) return false;
+        try { controlType = element.ControlType; } catch { return null; }
+        if (!RowSearchControlTypes.Contains(controlType)) return null;
 
-        if (TryGetName(element, out var name) && ReportRowTextMatcher.IsExactMatch(name, rowText)) return true;
-        if (TryGetValuePatternValue(element, out var value) && ReportRowTextMatcher.IsExactMatch(value, rowText)) return true;
-        if (TryGetLegacyIAccessibleNameOrValue(element, out var legacyText) && ReportRowTextMatcher.IsExactMatch(legacyText, rowText)) return true;
-
-        return false;
+        var texts = new List<string?>(4);
+        if (TryGetName(element, out var name)) texts.Add(name);
+        if (TryGetValuePatternValue(element, out var value)) texts.Add(value);
+        TryGetLegacyIAccessibleTexts(element, texts);
+        return texts;
     }
 
     private static bool TryGetName(AutomationElement element, out string? name)
@@ -2282,6 +2354,24 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         return false;
     }
 
+    /// <summary>Adds the MSAA name AND value (both, not the first non-empty) to <paramref name="texts"/>.</summary>
+    private static void TryGetLegacyIAccessibleTexts(AutomationElement element, List<string?> texts)
+    {
+        try
+        {
+            if (!element.Patterns.LegacyIAccessible.IsSupported) return;
+            var pattern = element.Patterns.LegacyIAccessible.Pattern;
+            var name = SafeLegacyIAccessibleValue(() => pattern.Name.ValueOrDefault);
+            if (!string.IsNullOrEmpty(name)) texts.Add(name);
+            var value = SafeLegacyIAccessibleValue(() => pattern.Value.ValueOrDefault);
+            if (!string.IsNullOrEmpty(value)) texts.Add(value);
+        }
+        catch
+        {
+            // best-effort
+        }
+    }
+
     private static string? SafeLegacyIAccessibleValue(Func<string?> read)
     {
         try { return read(); }
@@ -2291,22 +2381,20 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
     // --- Strategy 2b: grid keyboard navigation ---
 
     /// <summary>
-    /// GOAL brief fix 2b: click once inside the grid to focus it, Ctrl+Home,
-    /// type the target's first few characters for incremental search,
-    /// verify via SelectionPattern/focused-element Name/LegacyIAccessible
-    /// value; else step Down one row at a time (max MaxGridKeyboardSteps)
-    /// until the selected/focused row's text exactly matches; then Enter —
-    /// falling back to a direct double-click on the believed-selected row
-    /// if no new Pioneer-owned top-level window appears within
-    /// GridKeyboardEnterConfirmationTimeout (round 6: title-agnostic - see
-    /// WaitForNewPioneerWindow's own doc - rather than the old "titled
-    /// 'Report Parameters'" check, which is exactly what missed the popup
-    /// in Will's build da39140 run and let Enter's own arrow-key fallback
-    /// path scroll the now-open popup's date field instead).
+    /// Strategy 2b (W-T97): type-to-search. Click once inside the grid to
+    /// focus it, then the ReportChooserSelection key plan: Ctrl+Home and the
+    /// whole report name typed so an incremental search lands on it. The
+    /// selected / focused row is then read back and must be EXACTLY the
+    /// requested report before Enter is sent. There is NO arrow-key stepping
+    /// (Will saw the old Down-by-Down loop scroll past the report): if the
+    /// read-back is not the report, this strategy stops with a log line and
+    /// the next strategy (OCR) gets its turn. Enter is confirmed by a new
+    /// Pioneer window, with a direct double-click on the verified row as the
+    /// fallback (round 6: title-agnostic, see WaitForNewPioneerWindow).
     /// </summary>
     private bool TryGridKeyboardRowSelect(string rowText, IReadOnlyCollection<IntPtr> baselineHandles, Action<string> log, CancellationToken ct)
     {
-        log($"    strategy 2/3 (grid keyboard navigation) for '{rowText}'...");
+        log($"    strategy 2/3 (type-to-search, no arrow keys) for '{rowText}'...");
 
         var workArea = FindDescendantByAutomationId(_mainWindow!, FinancialReportsWorkAreaAutomationId);
         if (workArea is null)
@@ -2329,69 +2417,64 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             workAreaRect.X + (int)(workAreaRect.Width * 0.4),
             workAreaRect.Y + FirstDataRowOffsetFromWorkAreaTop);
 
-        if (!TryClickPoint(focusPoint, log, "grid keyboard")) return false;
+        if (!TryClickPoint(focusPoint, log, "type-to-search")) return false;
 
-        try
-        {
-            ct.ThrowIfCancellationRequested();
-            if (!EnsurePioneerForeground(log)) return false;
-            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.HOME);
-            Thread.Sleep(PollInterval);
-
-            ct.ThrowIfCancellationRequested();
-            if (!EnsurePioneerForeground(log)) return false;
-            Keyboard.Type(rowText.Length > 3 ? rowText.Substring(0, 3) : rowText);
-            Thread.Sleep(PollInterval);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch
-        {
-            // fall through to the step-down loop below - incremental
-            // search isn't supported by every grid.
-        }
-
-        var currentText = TryGetSelectedOrFocusedRowText(workArea);
-        var steps = 0;
-        while (!ReportRowTextMatcher.IsExactMatch(currentText, rowText) && steps < MaxGridKeyboardSteps)
+        var plan = ReportChooserSelection.BuildTypeToSearchKeys(rowText);
+        foreach (var step in plan)
         {
             ct.ThrowIfCancellationRequested();
             if (!EnsurePioneerForeground(log)) return false;
 
-            try { Keyboard.Type(VirtualKeyShort.DOWN); }
-            catch { break; }
+            switch (step.Key)
+            {
+                case ChooserKey.CtrlHome:
+                    try { Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.HOME); }
+                    catch { log("    Ctrl+Home could not be sent."); return false; }
+                    Thread.Sleep(PollInterval);
+                    break;
 
-            Thread.Sleep(PollInterval);
-            currentText = TryGetSelectedOrFocusedRowText(workArea);
-            steps++;
+                case ChooserKey.TypeName:
+                    if (!NativeInput.TypeKeystrokes(step.Text ?? string.Empty, (int)NativeInput.KeystrokeCharDelay.TotalMilliseconds, f => log($"    type-to-search: {f}")))
+                    {
+                        log("    the report name could not be typed.");
+                        return false;
+                    }
+
+                    Thread.Sleep(PollInterval * 2);
+                    var readback = ReportChooserSelection.Decide(CollectSelectedOrFocusedRowTexts(workArea), rowText);
+                    if (readback != ChooserReadback.ExactMatch)
+                    {
+                        log(readback == ChooserReadback.OtherRow
+                            ? "    type-to-search: a different row is selected - not pressing Enter."
+                            : "    type-to-search: the selected row could not be read back - not pressing Enter.");
+                        return false;
+                    }
+
+                    log("    type-to-search: the selected row reads back as the report.");
+                    break;
+
+                case ChooserKey.Enter:
+                    try { Keyboard.Type(VirtualKeyShort.RETURN); }
+                    catch { return false; }
+                    break;
+            }
         }
-
-        if (!ReportRowTextMatcher.IsExactMatch(currentText, rowText))
-        {
-            log($"    grid keyboard strategy could not locate row '{rowText}' after {steps} step(s).");
-            return false;
-        }
-
-        if (!EnsurePioneerForeground(log)) return false;
-        try { Keyboard.Type(VirtualKeyShort.RETURN); }
-        catch { return false; }
 
         if (WaitForNewPioneerWindow(baselineHandles, GridKeyboardEnterConfirmationTimeout, log, ct) is not null)
         {
             return true;
         }
 
-        log("    no new Pioneer window appeared after Enter - falling back to a direct double-click on the selected row.");
+        log("    no new Pioneer window appeared after Enter - falling back to a direct double-click on the verified row.");
 
         var focusedElement = SafeFocusedElement();
-        return focusedElement is not null && TryDoubleClickElement(focusedElement, log, "grid keyboard fallback");
+        return focusedElement is not null && TryDoubleClickElement(focusedElement, log, "type-to-search fallback");
     }
 
-    /// <summary>Selected-item Name (via SelectionPattern) if the work area/grid supports it, else the focused element's Name, else its LegacyIAccessible Name/Value — whichever is readable first.</summary>
-    private string? TryGetSelectedOrFocusedRowText(AutomationElement workArea)
+    /// <summary>Every readable text of the selected row (SelectionPattern) and of the focused element: Name, Value and MSAA name/value, so a cell with a generic Name still reads back by its Value.</summary>
+    private List<string?> CollectSelectedOrFocusedRowTexts(AutomationElement workArea)
     {
+        var texts = new List<string?>();
         try
         {
             if (workArea.Patterns.Selection.IsSupported)
@@ -2399,21 +2482,26 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
                 var selection = workArea.Patterns.Selection.Pattern.Selection.ValueOrDefault;
                 if (selection is { Length: > 0 })
                 {
-                    var name = SafeName(selection[0]);
-                    if (!string.IsNullOrEmpty(name)) return name;
+                    if (TryGetName(selection[0], out var selectedName)) texts.Add(selectedName);
+                    if (TryGetValuePatternValue(selection[0], out var selectedValue)) texts.Add(selectedValue);
+                    TryGetLegacyIAccessibleTexts(selection[0], texts);
                 }
             }
         }
         catch
         {
-            // fall through to the focused-element checks below
+            // fall through to the focused-element texts below
         }
 
         var focused = SafeFocusedElement();
-        if (focused is null) return null;
+        if (focused is not null)
+        {
+            if (TryGetName(focused, out var focusedName)) texts.Add(focusedName);
+            if (TryGetValuePatternValue(focused, out var focusedValue)) texts.Add(focusedValue);
+            TryGetLegacyIAccessibleTexts(focused, texts);
+        }
 
-        if (TryGetName(focused, out var focusedName)) return focusedName;
-        return TryGetLegacyIAccessibleNameOrValue(focused, out var legacyText) ? legacyText : null;
+        return texts;
     }
 
     private AutomationElement? SafeFocusedElement()

@@ -313,6 +313,17 @@ public sealed partial class ReportsWindow : Window
             return;
         }
 
+        // W-T98: the date boxes default to last month (31 days), so a run the user meant
+        // to be a few days long is confirmed first, with the range it will actually use.
+        var dayCount = DailySalesPlan.DayCount(begin.Value, end.Value);
+        if (DailySalesPlan.NeedsRangeConfirmation(dayCount)
+            && MessageBox.Show(this, DailySalesPlan.RangeConfirmationText(begin.Value, end.Value, steps.Count),
+                "Run daily - check the dates", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            AppendLog("Daily run not started - change the Begin and End dates, then click Run daily.");
+            return;
+        }
+
         try
         {
             Directory.CreateDirectory(outputFolder);
@@ -323,7 +334,7 @@ public sealed partial class ReportsWindow : Window
             return;
         }
 
-        AppendLog($"Daily run: {steps.Count} report(s) over {(end.Value.Date - begin.Value.Date).Days + 1} day(s). Stops at the first failure.");
+        AppendLog($"Daily run: {DailySalesPlan.DescribeRange(begin.Value, end.Value, steps.Count)}. Stops at the first failure.");
 
         RunButton.IsEnabled = false;
         RunDailyButton.IsEnabled = false;
@@ -331,9 +342,10 @@ public sealed partial class ReportsWindow : Window
         StopButton.IsEnabled = true;
         _runCts = new CancellationTokenSource();
 
+        ReportsCoordinator.DailyRunSummary? summary = null;
         try
         {
-            await _coordinator.RunDailyAsync(steps, AppendLog, _runCts.Token);
+            summary = await _coordinator.RunDailyAsync(steps, AppendLog, _runCts.Token);
         }
         finally
         {
@@ -343,6 +355,13 @@ public sealed partial class ReportsWindow : Window
             StopButton.IsEnabled = false;
             _runCts?.Dispose();
             _runCts = null;
+        }
+
+        // W-T98: Search Drawers not open is a request, shown on screen - not a silent log line.
+        if (summary is { NeedsSearchDrawers: true })
+        {
+            MessageBox.Show(this, PosSummaryPlan.OpenSearchDrawersFirstMessage, "Run daily - Search Drawers first",
+                MessageBoxButton.OK, MessageBoxImage.Information);
         }
     }
 

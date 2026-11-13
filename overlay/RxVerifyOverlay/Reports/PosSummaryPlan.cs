@@ -52,6 +52,35 @@ public static class PosSummaryPlan
     public const string OpenSearchDrawersMessage =
         "POS Summary starts on Pioneer's Search Drawers screen. Open Search Drawers and leave it in front, then run again. Nothing was sent to Pioneer.";
 
+    /// <summary>
+    /// W-T98: the pre-run message when POS Summary is ticked and Search
+    /// Drawers is not open. Shown in a dialog on the Reports window and logged;
+    /// it is a request, not a failure (nothing was sent, no day counted).
+    /// </summary>
+    public const string OpenSearchDrawersFirstMessage =
+        "Open Pioneer's Search Drawers screen, then click Run daily.";
+
+    /// <summary>The log line that goes with the dialog.</summary>
+    public const string OpenSearchDrawersFirstLogLine =
+        "POS Summary starts on Pioneer's Search Drawers screen and it is not open. Open Search Drawers, then click Run daily again. Nothing was sent to Pioneer; this is not counted as a failure.";
+
+    /// <summary>
+    /// One log line describing Pioneer's visible top-level windows by class and
+    /// title LENGTH only (never a title), so a "Search Drawers not found" can
+    /// be diagnosed from the log: which windows existed and how long their
+    /// titles were (the title "Search Drawers" is <see cref="SearchDrawersTitle"/>.Length characters).
+    /// </summary>
+    public static string DescribePioneerWindows(IReadOnlyList<SaveAsCandidate> all, int pioneerProcessId, IntPtr foregroundHandle)
+    {
+        var mine = all
+            .Where(c => c.IsVisible && c.Handle != IntPtr.Zero && SaveAsDialogMatcher.BelongsToPioneer(c, pioneerProcessId))
+            .ToList();
+        if (mine.Count == 0) return "Search Drawers check: no visible Pioneer window found at all.";
+
+        var parts = mine.Select(c => $"class='{c.ClassName}' title_len={c.Title?.Length ?? 0}{(c.Handle == foregroundHandle ? " (foreground)" : string.Empty)}");
+        return $"Search Drawers check: no Pioneer window titled like it ({SearchDrawersTitle.Length}-character title expected). Pioneer windows: {string.Join("; ", parts)}.";
+    }
+
     /// <summary>The macro's keys for one day, in order, with its 100 ms waits after each date.</summary>
     public static IReadOnlyList<PosKeyStep> BuildKeys(DateTime day)
     {

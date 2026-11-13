@@ -165,6 +165,26 @@ public static class DailySalesPlan
         return typed;
     }
 
+    /// <summary>
+    /// Runs longer than this many days ask for a confirmation first (W-T98: the
+    /// Begin/End boxes default to last month, so an untouched run is a full
+    /// month - 31 days - not the 3 days Will meant).
+    /// </summary>
+    public const int ConfirmAboveDays = 7;
+
+    /// <summary>Days in the range, inclusive (Begin = End is 1 day).</summary>
+    public static int DayCount(DateTime begin, DateTime end) => (end.Date - begin.Date).Days + 1;
+
+    public static bool NeedsRangeConfirmation(int dayCount) => dayCount > ConfirmAboveDays;
+
+    /// <summary>"62 report(s) over 31 day(s), 10-01-26 to 10-31-26" - the range the run will use, so it can be checked at a glance.</summary>
+    public static string DescribeRange(DateTime begin, DateTime end, int reportCount) =>
+        $"{reportCount} report(s) over {DayCount(begin, end)} day(s), {DateText(begin)} to {DateText(end)}";
+
+    /// <summary>The question asked before a long run; names the range and says how to change it.</summary>
+    public static string RangeConfirmationText(DateTime begin, DateTime end, int reportCount) =>
+        $"Run {DescribeRange(begin, end, reportCount)}?\n\nIf you meant fewer days, choose No and change the Begin and End dates at the top of this window.";
+
     /// <summary>The line logged before a step: counts and the report name, no patient data.</summary>
     public static string DescribeStep(DailyReportStep step) =>
         $"[{step.Index}/{step.Total}] {DisplayName(step.Kind)} for {DateText(step.Day)}";

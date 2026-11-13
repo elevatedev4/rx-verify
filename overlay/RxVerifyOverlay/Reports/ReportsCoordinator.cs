@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using RxVerifyOverlay.Update;
@@ -157,7 +158,7 @@ public sealed class ReportsCoordinator
     }
 
     /// <summary>Result of <see cref="RunDailyAsync"/>.</summary>
-    public sealed record DailyRunSummary(int Saved, int Total, DailyReportStep? FailedStep, string? FailureReason, bool Stopped);
+    public sealed record DailyRunSummary(int Saved, int Total, DailyReportStep? FailedStep, string? FailureReason, bool Stopped, bool NeedsSearchDrawers = false);
 
     /// <summary>
     /// "Daily Sales + POS": runs each step of DailySalesPlan.Build in order
@@ -200,6 +201,15 @@ public sealed class ReportsCoordinator
             const string notFound = "Could not find the main PioneerRx window - is Pioneer open?";
             WriteLine(notFound);
             return new DailyRunSummary(0, steps.Count, null, notFound, false);
+        }
+
+        // W-T98: POS Summary starts on Pioneer's Search Drawers screen. Check that BEFORE
+        // anything is sent; if it is not open this is a request to the user (NeedsSearchDrawers,
+        // shown as a dialog by the Reports window), not a failure and not a counted day.
+        if (steps.Any(s => s.Kind == DailyReportKind.Pos) && !_driver.IsSearchDrawersOpen(WriteLine))
+        {
+            WriteLine(PosSummaryPlan.OpenSearchDrawersFirstLogLine);
+            return new DailyRunSummary(0, steps.Count, null, null, false, NeedsSearchDrawers: true);
         }
 
         // Macro: <date><ALT>e<date> - Alt+e reaches the End field (Tab only as the driver's fallback).

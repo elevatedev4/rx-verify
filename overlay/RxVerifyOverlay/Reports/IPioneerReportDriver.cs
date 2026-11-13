@@ -104,6 +104,15 @@ public interface IPioneerReportDriver
     Task<ReportRunResult> RunPosSummary(ReportRunItem item, Action<string> log, CancellationToken ct);
 
     /// <summary>
+    /// The pre-run check for the daily POS Summary: is Pioneer's "Search
+    /// Drawers" screen open? Sends nothing to Pioneer. When it is not, the
+    /// implementation logs a plain line (counts and window classes only,
+    /// never a title) so the next run can be diagnosed from the log alone.
+    /// Call after <see cref="FindMainWindow"/>.
+    /// </summary>
+    bool IsSearchDrawersOpen(Action<string> log);
+
+    /// <summary>
     /// "Test date entry" button (W-T92 round 3, GOAL brief step 3): runs
     /// ONLY the date-entry portion (SelectAll/PasteText/Tab, with
     /// read-back verification) against whatever "Report Parameters"

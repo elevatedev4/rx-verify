@@ -16,6 +16,12 @@ namespace RxVerifyOverlay.Tests.Reports;
 public sealed class FakeReportDriver : IPioneerReportDriver
 {
     public bool MainWindowFound { get; set; } = true;
+
+    /// <summary>What <see cref="IsSearchDrawersOpen"/> answers (the pre-run check for the daily POS pass).</summary>
+    public bool SearchDrawersOpen { get; set; } = true;
+
+    /// <summary>How many times the pre-run Search Drawers check was asked (kept out of <see cref="Calls"/>).</summary>
+    public int SearchDrawersChecks { get; private set; }
     public List<string> Calls { get; } = new();
 
     /// <summary>Every item handed to a Run*/TestDateEntry call, in order.</summary>
@@ -35,6 +41,12 @@ public sealed class FakeReportDriver : IPioneerReportDriver
     {
         Calls.Add("FindMainWindow");
         return MainWindowFound;
+    }
+
+    public bool IsSearchDrawersOpen(Action<string> log)
+    {
+        SearchDrawersChecks++;
+        return SearchDrawersOpen;
     }
 
     public Task<ReportRunResult> RunFinancialReport(ReportRunItem item, Action<string> log, CancellationToken ct) =>
