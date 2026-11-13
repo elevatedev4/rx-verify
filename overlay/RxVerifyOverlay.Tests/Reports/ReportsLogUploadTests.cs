@@ -230,6 +230,44 @@ public class ReportsLogUploadTests
         }
     }
 
+    // ---- exception messages: type name only in the HQ text ----
+
+    [Fact]
+    public void MsgReturnsTheFullMessageForTheLocalLog()
+    {
+        var ex = new TimeoutException("Synthetic timeout waiting for the quux-one window");
+
+        Assert.Equal("Synthetic timeout waiting for the quux-one window", ReportsLogUpload.Msg(ex));
+    }
+
+    [Fact]
+    public void FailedAndAutomationErrorLinesSendOnlyTheExceptionTypeName()
+    {
+        var ex1 = new TimeoutException("Synthetic message about SYNTHETIC-PATIENT-ONE on screen");
+        var ex2 = new InvalidOperationException("Synthetic message about SYNTHETIC-PATIENT-TWO in C:\\Users\\SomeName\\x");
+        var local1 = $"10:00:05 Sales Summary: failed - {ReportsLogUpload.Msg(ex1)}";
+        var local2 = $"10:00:06 Automation error: {ReportsLogUpload.Msg(ex2)}";
+        var local3 = $"10:00:07 [2/4] Sales Summary for 10-02-26: FAILED - {ex1.Message}";
+
+        var message = ReportsLogUpload.BuildMessage("H", new[] { local1, local2, local3 });
+
+        Assert.DoesNotContain("SYNTHETIC", message);
+        Assert.DoesNotContain("SomeName", message);
+        Assert.Contains("10:00:05 Sales Summary: failed - TimeoutException", message);
+        Assert.Contains("10:00:06 Automation error: InvalidOperationException", message);
+        Assert.Contains("FAILED - TimeoutException", message);
+        // The local window log text is untouched.
+        Assert.Contains("SYNTHETIC-PATIENT-ONE", local1);
+    }
+
+    [Fact]
+    public void DriverAuthoredFailureReasonsStayReadable()
+    {
+        var line = "10:00:08 Sales Summary: failed - the report window did not appear after Enter. Nothing more was sent.";
+
+        Assert.Equal(line, ReportsLogUpload.Sanitize(line));
+    }
+
     // ---- SendAsync against a fake HTTP sink ----
 
     [Fact]

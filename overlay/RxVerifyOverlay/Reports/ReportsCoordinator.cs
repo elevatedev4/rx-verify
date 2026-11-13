@@ -138,10 +138,10 @@ public sealed class ReportsCoordinator
             }
             catch (Exception ex)
             {
-                result = ReportRunResult.Failed(ex.Message, TimeSpan.Zero);
+                result = ReportRunResult.Failed(ReportsLogUpload.Msg(ex), TimeSpan.Zero);
                 outcomes[i] = outcomes[i] with { Status = result.Status, SavedPath = result.SavedPath, Detail = result.FailureReason };
                 RaiseProgress(outcomes[i]);
-                WriteLine($"{item.Entry.DisplayName}: failed - {ex.Message}");
+                WriteLine($"{item.Entry.DisplayName}: failed - {ReportsLogUpload.Msg(ex)}");
                 continue;
             }
 
@@ -241,7 +241,7 @@ public sealed class ReportsCoordinator
             }
             catch (Exception ex)
             {
-                result = ReportRunResult.Failed(ex.Message, TimeSpan.Zero);
+                result = ReportRunResult.Failed(ReportsLogUpload.Msg(ex), TimeSpan.Zero);
             }
 
             if (result.Status == ReportRunStatus.Saved)

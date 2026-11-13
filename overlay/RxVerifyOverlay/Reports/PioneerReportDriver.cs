@@ -712,8 +712,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Automation error: {ex.Message}");
-            return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
+            log($"Automation error: {ReportsLogUpload.Msg(ex)}");
+            return ReportRunResult.Failed(ReportsLogUpload.Msg(ex), stopwatch.Elapsed);
         }
     }
 
@@ -778,8 +778,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Automation error: {ex.Message}");
-            return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
+            log($"Automation error: {ReportsLogUpload.Msg(ex)}");
+            return ReportRunResult.Failed(ReportsLogUpload.Msg(ex), stopwatch.Elapsed);
         }
     }
 
@@ -803,7 +803,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log(PosLogPrefix + $"Search Drawers check could not run: {ex.Message}");
+            log(PosLogPrefix + $"Search Drawers check could not run: {ReportsLogUpload.Msg(ex)}");
             return false;
         }
     }
@@ -990,8 +990,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Automation error: {ex.Message}");
-            return ReportRunResult.Failed(ex.Message, stopwatch.Elapsed);
+            log($"Automation error: {ReportsLogUpload.Msg(ex)}");
+            return ReportRunResult.Failed(ReportsLogUpload.Msg(ex), stopwatch.Elapsed);
         }
     }
 
@@ -1201,8 +1201,8 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Automation error: {ex.Message}");
-            return Task.FromResult(ReportRunResult.Failed(ex.Message, stopwatch.Elapsed));
+            log($"Automation error: {ReportsLogUpload.Msg(ex)}");
+            return Task.FromResult(ReportRunResult.Failed(ReportsLogUpload.Msg(ex), stopwatch.Elapsed));
         }
     }
 
@@ -2572,7 +2572,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             }
             catch (Exception ex)
             {
-                log($"    OCR capture/recognition failed: {ex.Message}");
+                log($"    OCR capture/recognition failed: {ReportsLogUpload.Msg(ex)}");
                 return false;
             }
 
@@ -2663,7 +2663,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"    [{strategyLabel}] double-click failed: {ex.Message}");
+            log($"    [{strategyLabel}] double-click failed: {ReportsLogUpload.Msg(ex)}");
             return false;
         }
     }
@@ -2690,7 +2690,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"    [{strategyLabel}] click failed: {ex.Message}");
+            log($"    [{strategyLabel}] click failed: {ReportsLogUpload.Msg(ex)}");
             return false;
         }
     }
@@ -2739,7 +2739,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Diagnostics: row selection dump failed - {ex.Message}");
+            log($"Diagnostics: row selection dump failed - {ReportsLogUpload.Msg(ex)}");
         }
     }
 
@@ -2861,7 +2861,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Diagnostics: dump failed - {ex.Message}");
+            log($"Diagnostics: dump failed - {ReportsLogUpload.Msg(ex)}");
         }
     }
 
@@ -3341,7 +3341,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
             }
             catch (Exception ex)
             {
-                log($"  key action '{action.Kind}' failed: {ex.Message}");
+                log($"  key action '{action.Kind}' failed: {ReportsLogUpload.Msg(ex)}");
                 return false;
             }
 
@@ -3816,7 +3816,7 @@ public sealed class PioneerReportDriver : IPioneerReportDriver
         }
         catch (Exception ex)
         {
-            log($"Diagnostics: report-completion status dump failed - {ex.Message}");
+            log($"Diagnostics: report-completion status dump failed - {ReportsLogUpload.Msg(ex)}");
         }
     }
 

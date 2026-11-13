@@ -50,6 +50,56 @@ public static class ReportsLogUpload
 
     private const string PathDetailNote = "(details not sent)";
 
+    // ---- exception messages: shown in the window log, never sent ----
+
+    private const int MaxRememberedMessages = 200;
+    private const int MinRememberedMessageLength = 6;
+    private static readonly object KnownLock = new();
+    private static readonly List<(string Message, string TypeName)> KnownMessages = new();
+
+    /// <summary>
+    /// Use instead of <c>ex.Message</c> wherever the Reports code writes an exception into
+    /// the window log. Returns the same full message (the window log is unchanged) and
+    /// remembers message -&gt; exception type, so <see cref="Sanitize"/> can send only the
+    /// type name (e.g. "failed - TimeoutException") to HQ. Never throws.
+    /// </summary>
+    public static string Msg(Exception ex)
+    {
+        var message = ex.Message;
+        try
+        {
+            if (message is { Length: >= MinRememberedMessageLength })
+            {
+                lock (KnownLock)
+                {
+                    KnownMessages.RemoveAll(k => k.Message == message);
+                    KnownMessages.Add((message, ex.GetType().Name));
+                    if (KnownMessages.Count > MaxRememberedMessages) KnownMessages.RemoveAt(0);
+                }
+            }
+        }
+        catch
+        {
+            // Best effort; an unremembered message is still cut by the path rules.
+        }
+        return message;
+    }
+
+    /// <summary>Replaces every remembered exception message in the line (longest first) with its exception type name.</summary>
+    private static string ReplaceKnownMessages(string line)
+    {
+        List<(string Message, string TypeName)> snapshot;
+        lock (KnownLock) snapshot = new List<(string Message, string TypeName)>(KnownMessages);
+        if (snapshot.Count == 0) return line;
+
+        snapshot.Sort((a, b) => b.Message.Length.CompareTo(a.Message.Length));
+        foreach (var (message, typeName) in snapshot)
+        {
+            if (line.Contains(message, StringComparison.Ordinal)) line = line.Replace(message, typeName, StringComparison.Ordinal);
+        }
+        return line;
+    }
+
     /// <summary>A path right after a quote, up to the closing quote (an apostrophe inside a folder name does not end it).</summary>
     private static readonly Regex QuotedPath = new(
         @"(?<=['""])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])[^\r\n]*?(?=['""](?:[\s.,;:)\]]|$))", RegexOptions.Compiled);
@@ -68,7 +118,7 @@ public static class ReportsLogUpload
     /// Makes one window-log line safe to leave this PC: every Windows path is cut
     /// down to its last folder or file name (so "C:\Users\SomeName\Downloads\2026-10_EOM reports"
     /// becomes "…\2026-10_EOM reports"), an output-folder exception message is
-    /// dropped, and control names / titles are redacted unless they are a report
+    /// dropped, any exception message logged through <see cref="Msg"/> becomes its type name, and control names / titles are redacted unless they are a report
     /// name, column header or known screen name (the same allowlists the log
     /// already uses for window titles).
     /// </summary>
@@ -80,6 +130,7 @@ public static class ReportsLogUpload
         var at = line.IndexOf(folderFailure, StringComparison.OrdinalIgnoreCase);
         if (at >= 0) return line.Substring(0, at + folderFailure.Length) + " " + PathDetailNote;
 
+        line = ReplaceKnownMessages(line);
         line = ControlName.Replace(line, m => "name='" + SafeName(m.Groups[1].Value) + "'");
         line = NameOrTitle.Replace(line, m => m.Groups[1].Value + "='" + SafeName(m.Groups[2].Value) + "'");
         line = QuotedPath.Replace(line, m => LastSegment(m.Value));

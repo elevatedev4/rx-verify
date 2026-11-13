@@ -191,7 +191,7 @@ public sealed partial class ReportsWindow : Window
         }
         catch (Exception ex)
         {
-            AppendLog($"Couldn't create the output folder: {ex.Message}");
+            AppendLog($"Couldn't create the output folder: {ReportsLogUpload.Msg(ex)}");
             return;
         }
 
@@ -364,7 +364,7 @@ public sealed partial class ReportsWindow : Window
         }
         catch (Exception ex)
         {
-            AppendLog($"Couldn't create the output folder: {ex.Message}");
+            AppendLog($"Couldn't create the output folder: {ReportsLogUpload.Msg(ex)}");
             return;
         }
 
