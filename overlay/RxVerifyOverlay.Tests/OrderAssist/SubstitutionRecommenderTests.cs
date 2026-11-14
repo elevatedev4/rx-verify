@@ -218,6 +218,28 @@ public class SubstitutionRecommenderTests
     }
 
     [Fact]
+    public void FindCheapestMcKessonRowIndexIgnoresWhichRowIsFirstOrWhite()
+    {
+        // W-T96: row color is not an input here -- the cheapest McKesson row
+        // wins wherever it sits (first, middle, last), ties go to the lower index.
+        var cheapestLast = new List<CatalogRowInput>
+        {
+            new(0, "McKesson", "9.00"), // white
+            new(1, "McKesson", "8.00"), // blue
+            new(2, "McKesson", "7.00"), // yellow
+            new(3, "McKesson", "6.50"), // selected -> cheapest
+        };
+        Assert.Equal(3, SubstitutionRecommender.FindCheapestMcKessonRowIndex(cheapestLast));
+
+        var tie = new List<CatalogRowInput>
+        {
+            new(0, "McKesson", "7.00"),
+            new(1, "McKesson", "7.00"),
+        };
+        Assert.Equal(0, SubstitutionRecommender.FindCheapestMcKessonRowIndex(tie));
+    }
+
+    [Fact]
     public void FindCheapestMcKessonRowIndexIsNullWithNoMcKessonRow()
     {
         var rows = new List<CatalogRowInput>

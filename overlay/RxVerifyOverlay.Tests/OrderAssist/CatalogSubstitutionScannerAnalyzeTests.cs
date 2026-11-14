@@ -274,6 +274,79 @@ public class CatalogSubstitutionScannerAnalyzeTests
         Assert.Null(annotations.BestSmallPackageMarker);
     }
 
+    // ---- W-T96: cheapest McKesson row must not depend on row color ----
+    //
+    // Row color never reaches this pipeline as data: by the time Analyze sees
+    // OcrWords, a white, blue, yellow or selected row is just words at a Y.
+    // Each grid below labels which on-screen color each row stands for; the
+    // assertions prove that when every row's text IS read, the genuinely
+    // cheapest McKesson row is the baseline whatever its color.
+
+    [Fact]
+    public void ColoredMcKessonRowThatIsTheCheapestIsTheBaseline()
+    {
+        var words = new List<OcrWord>(ThreeColumnHeader());
+        words.AddRange(ThreeColumnRow(40, "McKesson", "30.0000", "10.00")); // white
+        words.AddRange(ThreeColumnRow(60, "McKesson", "30.0000", "6.00"));  // blue -> cheapest
+        words.AddRange(ThreeColumnRow(80, "ANDA", "30.0000", "4.50"));      // white
+
+        var annotations = CatalogSubstitutionScanner.Analyze(words);
+
+        Assert.NotNull(annotations.McKessonBaselineMarker);
+        Assert.Equal(1, annotations.McKessonBaselineMarker!.RowIndex);
+
+        var badge = Assert.Single(annotations.SavingsBadges);
+        Assert.Equal(2, badge.RowIndex);
+        Assert.Equal("25%", badge.SavingsDisplay); // (6-4.5)/6 -- against the blue row, not the white one
+        Assert.True(badge.MeetsThreshold);
+    }
+
+    [Fact]
+    public void MixOfWhiteBlueAndYellowMcKessonRowsPicksTheTrulyCheapest()
+    {
+        var words = new List<OcrWord>(ThreeColumnHeader());
+        words.AddRange(ThreeColumnRow(40, "McKesson", "30.0000", "12.00")); // white (first McKesson row)
+        words.AddRange(ThreeColumnRow(60, "McKesson", "30.0000", "9.00"));  // blue
+        words.AddRange(ThreeColumnRow(80, "McKesson", "30.0000", "7.50"));  // yellow -> cheapest
+        words.AddRange(ThreeColumnRow(100, "McKesson", "30.0000", "8.00")); // white
+        words.AddRange(ThreeColumnRow(120, "ANDA", "30.0000", "6.00"));     // white
+
+        var annotations = CatalogSubstitutionScanner.Analyze(words);
+
+        Assert.NotNull(annotations.McKessonBaselineMarker);
+        Assert.Equal(2, annotations.McKessonBaselineMarker!.RowIndex);
+
+        var badge = Assert.Single(annotations.SavingsBadges);
+        Assert.Equal(4, badge.RowIndex);
+        Assert.Equal("20%", badge.SavingsDisplay); // (7.5-6)/7.5
+        Assert.False(badge.MeetsThreshold);
+    }
+
+    [Theory]
+    [InlineData(0)] // selected row is the first body row
+    [InlineData(2)] // selected row is the last McKesson row
+    public void SelectedMcKessonRowThatIsTheCheapestIsTheBaseline(int selectedIndex)
+    {
+        var costs = new[] { "8.00", "9.00", "8.50" };
+        costs[selectedIndex] = "5.00"; // the selected (blue, white-text) row is cheapest
+
+        var words = new List<OcrWord>(ThreeColumnHeader());
+        for (var i = 0; i < costs.Length; i++)
+        {
+            words.AddRange(ThreeColumnRow(40 + 20 * i, "McKesson", "30.0000", costs[i]));
+        }
+        words.AddRange(ThreeColumnRow(40 + 20 * costs.Length, "ANDA", "30.0000", "4.00"));
+
+        var annotations = CatalogSubstitutionScanner.Analyze(words);
+
+        Assert.NotNull(annotations.McKessonBaselineMarker);
+        Assert.Equal(selectedIndex, annotations.McKessonBaselineMarker!.RowIndex);
+
+        var badge = Assert.Single(annotations.SavingsBadges);
+        Assert.Equal(costs.Length, badge.RowIndex);
+        Assert.Equal("20%", badge.SavingsDisplay); // (5-4)/5
+    }
+
     [Fact]
     public void AnalyzeReturnsAllEmptyAnnotationsWhenColumnsCannotBeResolved()
     {
