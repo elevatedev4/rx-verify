@@ -192,6 +192,17 @@ public sealed class OverlaySettings
     /// </summary>
     public string OrderAssistRowNormalizer { get; set; } = "local";
 
+    /// <summary>
+    /// W-T96 diagnostic, OFF by default. When true (edit settings.json:
+    /// "OrderAssistRowReadDump": true, restart), the Catalog Item
+    /// Substitution screen's per-row read (supplier text, cost text, row
+    /// color class, whether the highlight normalizer rewrote it) is sent to
+    /// HQ as one feedback message whenever it changes (at most one per 15 s,
+    /// 10 per run). Needs RxVerifyReportKey. See
+    /// OrderAssist/Scanning/CatalogRowReadDump for what is and is not sent.
+    /// </summary>
+    public bool OrderAssistRowReadDump { get; set; } = false;
+
     private static string SettingsFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RxVerifyOverlay", "settings.json");
 
