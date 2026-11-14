@@ -219,6 +219,82 @@ public sealed class OrderAssistCoordinator
     /// <summary>Same de-dup pattern as _lastLoggedColumnFailureSignature, for LogSelectionBandsIfChanged (ROUND 2, W-T85 bug 2) — keyed on the actual band Y-range list, so a still-selected row never re-logs every ~1s tick, but a genuinely different capture (a different row now selected, or the selection cleared) does.</summary>
     private string? _lastLoggedSelectionBandsSignature;
 
+    // W-T96 row-read dump bookkeeping (see SendRowReadDumpIfChanged).
+    private const long RowReadDumpMinIntervalMs = 15_000;
+    private const int RowReadDumpMaxSendsPerRun = 10;
+    private string? _lastRowReadDumpSignature;
+    private long _lastRowReadDumpTick = long.MinValue;
+    private int _rowReadDumpSends;
+
+    /// <summary>
+    /// W-T96, opt-in (OverlaySettings.OrderAssistRowReadDump): measures each
+    /// body row's ORIGINAL background (median of a sampled scanline through
+    /// the row, taken from the pre-normalizer copy) and sends supplier text,
+    /// cost text, color class and "normalizer rewrote this row" per row to HQ
+    /// through the existing feedback path (FeedbackSubmitter, the same one the
+    /// Reports log upload uses). Only when the dump changed, at most one per
+    /// 15 s and 10 per run. Never throws; failures are silent.
+    /// </summary>
+    private void SendRowReadDumpIfChanged(Bitmap raw, IReadOnlyList<OcrWord> words, IReadOnlyList<(int Top, int Bottom)> acceptedBands)
+    {
+        try
+        {
+            var bodyRows = CatalogRowReadDump.ReadBodyRows(words);
+            if (bodyRows.Count == 0) return;
+
+            var lines = new List<CatalogRowReadDump.RowLine>(bodyRows.Count);
+            foreach (var row in bodyRows)
+            {
+                var y = (int)Math.Round((row.Top + row.Bottom) / 2.0);
+                y = Math.Max(0, Math.Min(raw.Height - 1, y));
+
+                var pixels = new List<(byte R, byte G, byte B)>();
+                for (var x = 0; x < raw.Width; x += 4)
+                {
+                    var c = raw.GetPixel(x, y);
+                    pixels.Add((c.R, c.G, c.B));
+                }
+                var dominant = RowHighlightColorDetector.EstimateDominantColor(pixels);
+                var (cls, chroma, luminance) = CatalogRowReadDump.ClassifyColor(dominant.R, dominant.G, dominant.B);
+                var normalized = acceptedBands.Any(b => y >= b.Top && y < b.Bottom);
+                lines.Add(new CatalogRowReadDump.RowLine(row.RowIndex, row.Supplier, row.Cost, cls, chroma, luminance, normalized));
+            }
+
+            var header = $"Order Assist row read (Catalog Substitution). {Update.BuildInfo.Summary}";
+            var message = CatalogRowReadDump.BuildMessage(header, lines);
+
+            var signature = string.Join("|", lines.Select(l => $"{CatalogRowReadDump.SanitizeSupplier(l.Supplier)}~{CatalogRowReadDump.SanitizeCost(l.Cost)}~{l.ColorClass}~{l.Normalized}"));
+            if (signature == _lastRowReadDumpSignature) return;
+
+            var now = Environment.TickCount64;
+            if (_rowReadDumpSends >= RowReadDumpMaxSendsPerRun) return;
+            if (_lastRowReadDumpTick != long.MinValue && now >= _lastRowReadDumpTick && now - _lastRowReadDumpTick < RowReadDumpMinIntervalMs) return;
+
+            _lastRowReadDumpSignature = signature;
+            _lastRowReadDumpTick = now;
+            _rowReadDumpSends++;
+
+            var settings = _settings;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var hasKey = !string.IsNullOrWhiteSpace(settings.RxVerifyReportKey);
+                    var outcome = await Reports.ReportsLogUpload.SendAsync(new Reporting.FeedbackSubmitter(settings), hasKey, message, Diagnostics.AppDiagnostics.GetCommitSha());
+                    OcrLogger.LogTiming($"OrderAssist[CatalogSubstitution]: row-read dump: {outcome}");
+                }
+                catch
+                {
+                    // Best-effort diagnostic only.
+                }
+            });
+        }
+        catch
+        {
+            // Best-effort diagnostic only.
+        }
+    }
+
     public OrderAssistCoordinator(OverlaySettings settings, IOcrEngine? ocrEngine = null)
     {
         _settings = settings;
@@ -468,6 +544,15 @@ public sealed class OrderAssistCoordinator
         // binarization. Applies to BOTH target kinds (catalog selection
         // blue, McKesson yellow, in-edit qty rows on Create Recommended
         // Orders). Logging is best-effort and throttled "log on change".
+        // W-T96 row-read dump (opt-in, off by default): keep an untouched copy
+        // so the row's ORIGINAL background color can be measured after OCR.
+        Bitmap? rawCopyForRowReadDump = null;
+        if (_settings.OrderAssistRowReadDump && target.Value.Kind == OrderAssistWindowKind.CatalogSubstitution)
+        {
+            try { rawCopyForRowReadDump = new Bitmap(bitmap); }
+            catch { rawCopyForRowReadDump = null; }
+        }
+
         stageStopwatch.Restart();
         var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap, RowNormalizerWindowPolicy.Resolve(target.Value.Kind, _settings.OrderAssistRowNormalizer));
         var normalizeMs = stageStopwatch.ElapsedMilliseconds;
@@ -478,6 +563,12 @@ public sealed class OrderAssistCoordinator
         var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
         var ocrMs = stageStopwatch.ElapsedMilliseconds;
         LogTickTimingThrottled(target.Value.Kind, captureMs, normalizeMs, ocrMs);
+
+        if (rawCopyForRowReadDump is not null)
+        {
+            try { SendRowReadDumpIfChanged(rawCopyForRowReadDump, ocrResult.Words, highlightResult.AcceptedBands); }
+            finally { rawCopyForRowReadDump.Dispose(); }
+        }
 
         var scale = DpiScaleFor(target.Value.Handle);
 
