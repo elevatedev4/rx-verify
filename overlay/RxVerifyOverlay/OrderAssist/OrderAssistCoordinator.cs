@@ -553,21 +553,32 @@ public sealed class OrderAssistCoordinator
             catch { rawCopyForRowReadDump = null; }
         }
 
-        stageStopwatch.Restart();
-        var highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap, RowNormalizerWindowPolicy.Resolve(target.Value.Kind, _settings.OrderAssistRowNormalizer));
-        var normalizeMs = stageStopwatch.ElapsedMilliseconds;
-        if (highlightResult.SafetyValveTripped) LogNormalizerValveTripped(target.Value.Kind);
-        LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
-
-        stageStopwatch.Restart();
-        var ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
-        var ocrMs = stageStopwatch.ElapsedMilliseconds;
-        LogTickTimingThrottled(target.Value.Kind, captureMs, normalizeMs, ocrMs);
-
-        if (rawCopyForRowReadDump is not null)
+        RowHighlightNormalizer.NormalizeResult highlightResult;
+        long normalizeMs;
+        OcrTextResult ocrResult;
+        long ocrMs;
+        try
         {
-            try { SendRowReadDumpIfChanged(rawCopyForRowReadDump, ocrResult.Words, highlightResult.AcceptedBands); }
-            finally { rawCopyForRowReadDump.Dispose(); }
+            stageStopwatch.Restart();
+            highlightResult = RowHighlightNormalizer.NormalizeInPlace(bitmap, RowNormalizerWindowPolicy.Resolve(target.Value.Kind, _settings.OrderAssistRowNormalizer));
+            normalizeMs = stageStopwatch.ElapsedMilliseconds;
+            if (highlightResult.SafetyValveTripped) LogNormalizerValveTripped(target.Value.Kind);
+            LogSelectionBandsIfChanged(target.Value.Kind, highlightResult.AcceptedBands, highlightResult.RejectedCandidates);
+
+            stageStopwatch.Restart();
+            ocrResult = await _ocrEngine.RecognizeAsync(bitmap, cts.Token);
+            ocrMs = stageStopwatch.ElapsedMilliseconds;
+            LogTickTimingThrottled(target.Value.Kind, captureMs, normalizeMs, ocrMs);
+
+            if (rawCopyForRowReadDump is not null)
+            {
+                SendRowReadDumpIfChanged(rawCopyForRowReadDump, ocrResult.Words, highlightResult.AcceptedBands);
+            }
+        }
+        finally
+        {
+            // Disposed on every path (normalize/OCR throwing or cancellation included).
+            rawCopyForRowReadDump?.Dispose();
         }
 
         var scale = DpiScaleFor(target.Value.Handle);

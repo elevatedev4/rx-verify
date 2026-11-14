@@ -83,6 +83,19 @@ public class CatalogRowReadDumpTests
     }
 
     [Fact]
+    public void BuildMessageNeverExceedsHqsMessageLimitEvenWithWorstCaseRowsAndALongHeader()
+    {
+        var lines = Enumerable.Range(0, 200)
+            .Select(i => new CatalogRowReadDump.RowLine(i, new string('M', 100), new string('9', 100), "other-colored", 255, 255, true))
+            .ToList();
+
+        var message = CatalogRowReadDump.BuildMessage(new string('h', 5000), lines);
+
+        Assert.True(message.Length <= CatalogRowReadDump.MaxMessageChars, $"length {message.Length}");
+        Assert.Contains("more row(s) not listed", message);
+    }
+
+    [Fact]
     public void BuildMessageCapsTheRowCount()
     {
         var lines = Enumerable.Range(0, CatalogRowReadDump.MaxRows + 5)

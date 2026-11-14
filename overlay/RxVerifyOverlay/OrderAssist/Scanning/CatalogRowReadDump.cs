@@ -25,7 +25,12 @@ public static class CatalogRowReadDump
 {
     public const int MaxSupplierChars = 24;
     public const int MaxCostChars = 12;
-    public const int MaxRows = 60;
+    public const int MaxRows = 30;
+
+    /// <summary>HQ rejects a feedback message longer than this (same limit as ReportsLogUpload.MaxMessageChars / FEEDBACK_MESSAGE_MAX_LENGTH).</summary>
+    public const int MaxMessageChars = 4000;
+
+    private const int NoteReserve = 48;
 
     /// <summary>One body row: its cell texts and vertical extent (OCR bitmap pixels) — the extent is used by the caller to sample the row's background color, and is NOT sent.</summary>
     public sealed record BodyRowRead(int RowIndex, string Supplier, string Cost, double Top, double Bottom);
@@ -103,15 +108,20 @@ public static class CatalogRowReadDump
     /// <summary>One line per row; unreadable cells print as "(blank)" so a row the app could not read is visible rather than missing.</summary>
     public static string BuildMessage(string header, IReadOnlyList<RowLine> lines)
     {
-        var sb = new StringBuilder(header);
-        sb.Append('\n').Append($"{lines.Count} body row(s) read");
+        // At most MaxRows rows AND never past MaxMessageChars (HQ rejects longer messages).
+        var head = $"{(header.Length > 300 ? header.Substring(0, 300) : header)}\n{lines.Count} body row(s) read";
+        var sb = new StringBuilder(head);
+        var listed = 0;
         foreach (var l in lines.Take(MaxRows))
         {
             var supplier = SanitizeSupplier(l.Supplier);
             var cost = SanitizeCost(l.Cost);
-            sb.Append('\n').Append($"row {l.RowIndex}: supplier={(supplier.Length == 0 ? "(blank)" : supplier)} cost={(cost.Length == 0 ? "(blank)" : cost)} color={l.ColorClass}(c{l.Chroma},l{l.Luminance}) normalized={(l.Normalized ? "yes" : "no")}");
+            var line = $"row {l.RowIndex}: supplier={(supplier.Length == 0 ? "(blank)" : supplier)} cost={(cost.Length == 0 ? "(blank)" : cost)} color={l.ColorClass}(c{l.Chroma},l{l.Luminance}) normalized={(l.Normalized ? "yes" : "no")}";
+            if (sb.Length + 1 + line.Length > MaxMessageChars - NoteReserve) break;
+            sb.Append('\n').Append(line);
+            listed++;
         }
-        if (lines.Count > MaxRows) sb.Append('\n').Append($"({lines.Count - MaxRows} more row(s) not listed)");
+        if (listed < lines.Count) sb.Append('\n').Append($"({lines.Count - listed} more row(s) not listed)");
         return sb.ToString();
     }
 }
