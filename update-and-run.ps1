@@ -42,14 +42,25 @@
          the repo is at \claude\rx-verify, \rx-verify, or anywhere else,
          since if this script is running, the repo already exists around
          it.
+      2a. (private repo) git is told never to prompt for credentials
+         (GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never). If origin is
+         still the HTTPS URL and a report key is in settings.json, the
+         repo migrates itself to the read-only SSH deploy key HQ hands
+         out (scripts\GitSsh.ps1 - fetch key, pin GitHub's host keys, set
+         the repo-local core.sshCommand, TEST with git ls-remote, and only
+         then switch origin to ssh://git@ssh.github.com:443/... and tell
+         HQ). Any failure keeps HTTPS and carries on.
       3. git fetch origin + git checkout -f -B main origin/main - forces
          the local `main` branch to exactly match GitHub's `main`,
          regardless of local drift (detached HEAD, wrong branch, a
          missing local `main`, a dirty tree, or diverged local commits).
          GitHub is the source of truth on these deploy-and-test
          machines, so this intentionally discards local modifications.
-         If the fetch or checkout fails, the script stops with a
-         plain-English message naming which step failed.
+         If the FETCH fails (offline, GitHub unreachable, no working
+         deploy key), the script does NOT stop: it launches the build
+         already on disk (last good) and exits - it only stops when
+         there is no build at all. If the checkout fails, the script
+         stops with a plain-English message naming that step.
       4. npm install - ONLY if package-lock.json changed since the last
          successful install (hash cached locally), or node_modules is
          missing (first run). This is the one step that's safe to skip
@@ -80,7 +91,7 @@
       8. Launches the freshly built overlay .exe.
 
     Any failed step (a missing prerequisite that still won't resolve,
-    git fetch/checkout, npm install, npm run build, a running overlay
+    git checkout, npm install, npm run build, a running overlay
     that won't stop, dotnet build, or not finding the built .exe) prints
     exactly which step failed and the exact path/command involved, then
     holds the window open with "Press Enter to close" so the error is
@@ -332,6 +343,58 @@ if (-not (Test-Path $CacheDir)) {
 }
 $LockfileHashPath = Join-Path $CacheDir 'lockfile.hash'
 
+$overlayProjectDir = Join-Path $RepoPath 'overlay\RxVerifyOverlay'
+$overlayBinDebugDir = Join-Path $overlayProjectDir 'bin\Debug'
+
+function Find-OverlayExe {
+    if (-not (Test-Path $overlayBinDebugDir)) { return $null }
+    $found = Get-ChildItem -Path $overlayBinDebugDir -Filter 'RxVerifyOverlay.exe' -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($null -eq $found) { return $null }
+    return $found.FullName
+}
+
+# True while a RxVerifyOverlay.exe from THIS checkout's bin directory runs.
+function Test-OwnOverlayRunning {
+    foreach ($p in @(Get-Process -Name 'RxVerifyOverlay' -ErrorAction SilentlyContinue)) {
+        $pPath = $null
+        try { $pPath = $p.Path } catch { $pPath = $null }
+        if (($null -ne $pPath) -and $pPath.StartsWith($overlayBinDebugDir, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+# GitHub unreachable / fetch failed: do NOT stop. Launch the build already on
+# disk (the last good one) and exit 0. Only when there is no build at all is
+# this a real stop. If the overlay is still running here it is given a few
+# seconds to finish closing first (the in-app Update button starts this
+# script and then shuts the app down), then - if it never closes, ie. the
+# shortcut was double-clicked while it was open - nothing more is done.
+function Start-LastGoodBuildAndExit {
+    param([string]$Reason)
+    Write-Host "$Reason - skipping the update and launching the build you already have." -ForegroundColor Yellow
+    $exe = Find-OverlayExe
+    if (($null -eq $exe) -or (-not (Test-Path $exe))) {
+        Stop-WithMessage "$Reason, and there is no previous build to launch yet. Check the network connection and try again."
+    }
+    $waited = 0
+    while ((Test-OwnOverlayRunning) -and ($waited -lt 8)) {
+        Start-Sleep -Seconds 1
+        $waited++
+    }
+    if (Test-OwnOverlayRunning) {
+        Write-Detail 'Rx Verify is already running - nothing to launch.'
+        exit 0
+    }
+    try {
+        Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Path $exe -Parent)
+    } catch {
+        Stop-WithMessage "Failed to launch $exe. Error: $($_.Exception.Message)"
+    }
+    exit 0
+}
+
 # ---------------------------------------------------------------------
 # Step 0: make sure Git, Node.js (20+), and the .NET 8 SDK are present
 # before doing anything else. The Desktop shortcut runs THIS script
@@ -420,12 +483,36 @@ Set-ReportKeyIfProvided -ReportKey $ReportKey
 # settings live in %AppData% and build output is gitignored, so
 # discarding local modifications here is safe and intended.
 # ---------------------------------------------------------------------
+#
+# Step 1-pre (private repo): git must never stop to ask for credentials
+# (an offline/unauthorised PC fails fast instead of hanging on a hidden
+# prompt), and an HTTPS checkout migrates itself to the read-only SSH
+# deploy key - see scripts/GitSsh.ps1. The migration never throws and
+# never blocks: any failure leaves origin on HTTPS and carries on.
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'never'
+
+$gitSshHelperPath = Join-Path $RepoPath 'scripts\GitSsh.ps1'
+if (Test-Path $gitSshHelperPath) {
+    try {
+        . $gitSshHelperPath
+        Write-Step 'Checking how this PC fetches updates (SSH deploy key)...'
+        Invoke-RxVerifySshMigration -RepoPath $RepoPath -ReportKey (Get-RxVerifyReportKeyFromSettings)
+    } catch {
+        Write-Detail "SSH setup skipped: $($_.Exception.Message)"
+    }
+} else {
+    Write-Detail 'scripts\GitSsh.ps1 not found yet - skipping SSH setup (it arrives with the next sync).'
+}
+
 Write-Host "Syncing to latest from GitHub (origin/main)..." -ForegroundColor Cyan
 $fetchOutput = Invoke-NativeCapture { git fetch origin }
 $fetchExitCode = $script:NativeExitCode
 $fetchOutput | ForEach-Object { Write-Detail "$_" }
 if ($fetchExitCode -ne 0) {
-    Stop-WithMessage "git fetch origin failed in $RepoPath. Check the network connection and try again."
+    # Offline, GitHub down, or (private repo) this PC has no working deploy
+    # key yet: never leave a pharmacist without Rx Verify over it.
+    Start-LastGoodBuildAndExit -Reason "git fetch origin failed in $RepoPath (no network, or GitHub not reachable from this PC)"
 }
 
 $checkoutOutput = Invoke-NativeCapture { git checkout -f -B main origin/main }
@@ -483,18 +570,6 @@ if (-not (Test-Path $distEntryPath)) {
 # Will's own test showed dotnet build takes well under a second once
 # warm, so there's no real cost to always rebuilding.
 # ---------------------------------------------------------------------
-$overlayProjectDir = Join-Path $RepoPath 'overlay\RxVerifyOverlay'
-$overlayBinDebugDir = Join-Path $overlayProjectDir 'bin\Debug'
-
-function Find-OverlayExe {
-    if (-not (Test-Path $overlayBinDebugDir)) { return $null }
-    $found = Get-ChildItem -Path $overlayBinDebugDir -Filter 'RxVerifyOverlay.exe' -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-    if ($null -eq $found) { return $null }
-    return $found.FullName
-}
-
 if (-not (Test-Path $overlayProjectDir)) {
     Stop-WithMessage "Overlay project folder not found at $overlayProjectDir. The repo checkout looks incomplete or corrupted."
 }

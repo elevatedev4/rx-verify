@@ -1,88 +1,81 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 
 namespace RxVerifyOverlay.Update;
 
 /// <summary>
-/// One-click "Update" (branch fix/rightclick-all-feedback-compact, task 4)
-/// — launches the exact same pinned bootstrap one-liner from the HQ
-/// pinned-snippet box (README.md / bootstrap-fresh.ps1's own header doc)
-/// in a fresh PowerShell process, then exits this app so the relaunch
-/// (update-and-run.ps1, chained from bootstrap-fresh.ps1's own step 7) can
-/// rebuild/replace it cleanly. Split into a pure command-string builder
-/// (BuildBootstrapCommand — unit tested, see
-/// RxVerifyOverlay.Tests/UpdateLauncherTests.cs) and the actual
-/// Process.Start/Shutdown side effects (LaunchBootstrapAndExit), same
-/// "pure logic tested, transport plumbing isn't" split as Update/
-/// UpdateChecker.cs and Engine/EngineClient.cs.
+/// One-click "Update" (branch fix/rightclick-all-feedback-compact, task 4;
+/// reworked on feat/private-repo-ssh) — runs THIS PC's own checkout of
+/// update-and-run.ps1 in a fresh PowerShell process, then exits this app so
+/// that script can rebuild/replace it cleanly.
+///
+/// It used to run a raw.githubusercontent.com bootstrap one-liner; that URL
+/// stops working the moment the GitHub repo goes private (and would have
+/// fetched a script from the very repo the PC is trying to reach). The local
+/// script already knows how to reach the repo (HTTPS, or the read-only SSH
+/// deploy key via scripts/GitSsh.ps1), reads RxVerifyReportKey out of
+/// settings.json itself, and launches the last good build if GitHub can't
+/// be reached — so no report key is put on a command line here any more.
+///
+/// Split into pure helpers (ResolveUpdateScriptPath, BuildArguments — unit
+/// tested, see RxVerifyOverlay.Tests/UpdateLauncherTests.cs) and the actual
+/// Process.Start/Shutdown side effects (LaunchUpdateAndExit), same "pure
+/// logic tested, transport plumbing isn't" split as Update/UpdateChecker.cs.
 /// </summary>
 public static class UpdateLauncher
 {
     /// <summary>
-    /// Fixed public bootstrap URL — see bootstrap-fresh.ps1's own header
-    /// doc for the full one-liner this is copied from. Not a secret (the
-    /// repo is public); only -ReportKey below is workstation-specific.
+    /// The update script to run: the one in the checkout this app was built
+    /// from, else %USERPROFILE%\claude\rx-verify\update-and-run.ps1 (the
+    /// canonical location every install script uses). Null when neither
+    /// exists. <paramref name="fileExists"/> is injected for tests.
     /// </summary>
-    private const string BootstrapScriptBlock =
-        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1)))";
-
-    /// <summary>
-    /// Builds the full -Command payload passed to powershell.exe —
-    /// BootstrapScriptBlock alone when <paramref name="reportKey"/> is
-    /// null/blank (bootstrap-fresh.ps1's own -ReportKey parameter defaults
-    /// to '', so omitting it entirely is valid — see that script's own
-    /// header doc), or with `-ReportKey '&lt;key&gt;'` appended when set.
-    ///
-    /// Single-quoted, with any embedded single quote doubled ('' is
-    /// PowerShell's own escape for a literal ' inside a single-quoted
-    /// string) — NOT double-quoted: bootstrap-fresh.ps1's own doc
-    /// specifically calls out that Windows PowerShell expands `$` inside a
-    /// double-quoted string, which would silently truncate a key
-    /// containing one with zero diagnostic signal. A report key is a
-    /// low-privilege, report-intake-only bearer secret (see
-    /// Models/OverlaySettings.cs RxVerifyReportKey's own doc) — worth
-    /// getting this escaping right even though it isn't PHI.
-    /// </summary>
-    public static string BuildBootstrapCommand(string? reportKey)
+    public static string? ResolveUpdateScriptPath(string? startDir, string? userProfile, Func<string, bool> fileExists)
     {
-        if (string.IsNullOrWhiteSpace(reportKey)) return BootstrapScriptBlock;
-
-        var escaped = reportKey.Replace("'", "''");
-        return $"{BootstrapScriptBlock} -ReportKey '{escaped}'";
+        var root = RepoLocator.ResolveRepoRoot(startDir, userProfile, fileExists);
+        return root is null ? null : Path.Combine(root, RepoLocator.LauncherScriptName);
     }
 
     /// <summary>
-    /// Launches powershell.exe running BuildBootstrapCommand's output as a
-    /// brand new, independent process (UseShellExecute=false plus a plain
-    /// ArgumentList — NOT a single hand-quoted Arguments string — so .NET's
-    /// own Win32-correct per-argument quoting handles the single quotes/
-    /// spaces inside the script block and report key without this class
-    /// needing to re-derive CommandLineToArgvW's quoting rules itself),
-    /// then calls Application.Current.Shutdown() so this process exits and
-    /// releases whatever file/process locks the rebuild in
-    /// update-and-run.ps1 needs (matching dist/cli.js, the compiled
-    /// RxVerifyOverlay.exe itself). Does NOT catch its own failures — a
-    /// failure to even START powershell.exe (e.g. missing/blocked binary)
-    /// throws out to the caller (see MainWindow.xaml.cs OnUpdateClick,
-    /// which catches and shows a message box, same pattern as
-    /// OpenReportErrorDialog's own catch) rather than being swallowed
-    /// here — Application.Current.Shutdown() must never run when the
-    /// process we were trying to hand off to never actually started,
-    /// which a blanket try/catch inside this method could otherwise mask.
+    /// powershell.exe arguments that run the script. Passed through
+    /// ProcessStartInfo.ArgumentList (not one hand-quoted string) so .NET's
+    /// own per-argument quoting handles a script path containing spaces.
     /// </summary>
-    public static void LaunchBootstrapAndExit(string? reportKey)
+    public static IReadOnlyList<string> BuildArguments(string scriptPath) =>
+        new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath };
+
+    /// <summary>
+    /// Starts update-and-run.ps1 as a brand new, independent process in its
+    /// own visible window (so progress/errors can be read), THEN calls
+    /// Application.Current.Shutdown() so this process releases the file
+    /// locks the script's rebuild needs. Does NOT catch its own failures —
+    /// a missing script or a failure to even START powershell.exe throws out
+    /// to the caller (MainWindow.xaml.cs TriggerUpdate shows a message box)
+    /// BEFORE Shutdown, so the app is never closed when the update never
+    /// started.
+    /// </summary>
+    public static void LaunchUpdateAndExit()
     {
+        var scriptPath = ResolveUpdateScriptPath(
+            AppContext.BaseDirectory,
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            File.Exists);
+        if (scriptPath is null)
+        {
+            throw new FileNotFoundException(
+                $"{RepoLocator.LauncherScriptName} was not found next to this app or in %USERPROFILE%\\claude\\rx-verify.");
+        }
+
         var psi = new ProcessStartInfo("powershell.exe")
         {
             UseShellExecute = false,
-            CreateNoWindow = false
+            CreateNoWindow = false,
+            WorkingDirectory = Path.GetDirectoryName(scriptPath)!
         };
-        psi.ArgumentList.Add("-NoProfile");
-        psi.ArgumentList.Add("-ExecutionPolicy");
-        psi.ArgumentList.Add("Bypass");
-        psi.ArgumentList.Add("-Command");
-        psi.ArgumentList.Add(BuildBootstrapCommand(reportKey));
+        foreach (var arg in BuildArguments(scriptPath)) psi.ArgumentList.Add(arg);
 
         Process.Start(psi);
         Application.Current.Shutdown();

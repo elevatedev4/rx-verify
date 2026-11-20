@@ -191,6 +191,51 @@ Will triages by hand-editing storage), but the whole point of storing
 `reportStatus`/`resolutionNote` is to eventually support this — flagging it
 now so the schema above doesn't need to change later to support it.
 
+## Private-repo endpoints: read-only deploy key + stage-0 installer
+
+The GitHub repo `elevatedev4/rx-verify` is private. PCs authenticate to it
+with ONE read-only SSH deploy key that HQ hands out, gated by the same
+low-privilege `RXVERIFY_REPORT_KEY` as the report endpoints. **The report key
+now also unlocks this read-only deploy key** — it still cannot touch any
+other HQ route. The private key lives only in an HQ env var
+(`RXVERIFY_DEPLOY_KEY`); it is never committed, logged or put in a response
+other than the one below. Client side: `scripts/GitSsh.ps1` and
+`scripts/install.ps1` in this repo.
+
+### GET /api/rxverify-update-key
+
+- **Auth:** `Authorization: Bearer <report key>` (constant-time compare against
+  `RXVERIFY_REPORT_KEY`).
+- **200:** `{"key":"<OpenSSH private key text, ed25519, newline-separated>"}`
+  with `Cache-Control: no-store`.
+- **401:** missing/bad key. **503:** `RXVERIFY_DEPLOY_KEY` not set.
+- Never log the key or the Authorization header.
+
+### POST /api/rxverify-update-key/confirm
+
+- **Auth:** same Bearer report key.
+- **Body:** `{"hostname":"<PC name>","commit":"<git sha the PC is on>"}`.
+  `hostname` is the Windows `COMPUTERNAME` (non-empty, short string; treat as
+  untrusted text and length-cap it, e.g. 100 chars); `commit` is a hex sha
+  (the PC sends the full or abbreviated sha).
+- **204** on success (no body). **401** bad key. **400** malformed body.
+- Purpose: HQ records which PCs have switched to SSH, so the repo is flipped
+  private only once every PC has confirmed. The client retries on its next
+  launch until it gets a 2xx (marker `.launcher-cache\ssh-confirmed`), so the
+  call must be idempotent (upsert by hostname).
+
+### GET /rxverify/install.ps1 (public, no auth)
+
+Serves `scripts/install.ps1` from this repo, byte-identical (<= 150 lines,
+contains no secrets) — the stage-0 installer. It requires `-ReportKey`:
+
+```powershell
+& ([scriptblock]::Create((irm https://manager-hq.vercel.app/rxverify/install.ps1))) -ReportKey '<REPORTKEY>'
+```
+
+When `scripts/install.ps1` changes in this repo, HQ's copy must be refreshed
+to match.
+
 ## What the overlay client already does (context, not a spec for HQ)
 
 - `overlay/RxVerifyOverlay/Reporting/RxReportSubmitter.cs` — POSTs with an

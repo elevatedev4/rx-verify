@@ -19,9 +19,16 @@
     dead everywhere else (see RightClickOutcomeClassifier.cs).
 
 .DESCRIPTION
-    Meant to be run from an interactive PowerShell console by pasting the
-    one-liner from README.md. Because -ReportKey is a real parameter, this
-    is invoked as a downloaded SCRIPTBLOCK, not piped into `iex`:
+    Since the repo went private, the fresh-PC entry point is the stage-0
+    installer (scripts\install.ps1, served by HQ), which fetches the
+    read-only deploy key, clones over SSH, and then runs THIS script from
+    the clone:
+
+        & ([scriptblock]::Create((irm https://manager-hq.vercel.app/rxverify/install.ps1))) -ReportKey '<REPORTKEY>'
+
+    (The pre-private one-liner below still works only while the GitHub repo
+    is public.) Because -ReportKey is a real parameter, it is invoked as a
+    downloaded SCRIPTBLOCK, not piped into `iex`:
 
         [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1))) -ReportKey '<REPORTKEY>'
 
@@ -71,7 +78,11 @@
          PowerShell and paste the same one-liner again - installs already
          done are kept, so it picks up where it left off.
       4. Clones the repo to the canonical path,
-         $env:USERPROFILE\claude\rx-verify, if it isn't already there.
+         $env:USERPROFILE\claude\rx-verify, if it isn't already there
+         (over SSH with HQ's read-only deploy key when scripts\GitSsh.ps1
+         is available; on a normal fresh PC scripts\install.ps1 - the
+         "stage 0" installer in README.md - has already cloned it, so this
+         step is skipped).
          "Already there" is judged by update-and-run.ps1 existing inside
          it, not just the folder existing - a folder with no
          update-and-run.ps1 means a previous clone was interrupted, and
@@ -274,10 +285,33 @@ function Invoke-RxVerifyBootstrap {
         if (-not (Test-Path $ClaudeDir)) {
             New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
         }
-        Write-Detail "Cloning $RepoUrl to $RepoPath..."
-        git clone $RepoUrl $RepoPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "git clone $RepoUrl $RepoPath failed (exit code $LASTEXITCODE). See the git output above for details."
+        # Private repo: clone over SSH with the read-only deploy key via the
+        # shared helper (scripts\GitSsh.ps1). The helper only exists on disk
+        # when this file itself was run from a checkout (a downloaded
+        # scriptblock has no $PSScriptRoot and no repo yet - that legacy
+        # path can only use HTTPS, which works only while the repo is
+        # public; update-and-run.ps1 then migrates the clone to SSH). The
+        # normal fresh-PC path never gets here: scripts\install.ps1
+        # (stage 0) already cloned over SSH, so the folder exists.
+        $gitSshHelperPath = $null
+        if (-not [string]::IsNullOrEmpty($PSScriptRoot)) {
+            $candidate = Join-Path $PSScriptRoot 'scripts\GitSsh.ps1'
+            if (Test-Path $candidate) { $gitSshHelperPath = $candidate }
+        }
+        if ($null -ne $gitSshHelperPath) {
+            . $gitSshHelperPath
+            $cloneKey = $ReportKey
+            if ([string]::IsNullOrWhiteSpace($cloneKey)) { $cloneKey = Get-RxVerifyReportKeyFromSettings }
+            Write-Detail "Cloning $RepoPath (SSH deploy key, HTTPS fallback)..."
+            Invoke-RxVerifyClone -RepoPath $RepoPath -ReportKey $cloneKey
+        } else {
+            $env:GIT_TERMINAL_PROMPT = '0'
+            $env:GCM_INTERACTIVE = 'never'
+            Write-Detail "Cloning $RepoUrl to $RepoPath (legacy HTTPS - only works while the repo is public)..."
+            git clone $RepoUrl $RepoPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "git clone $RepoUrl $RepoPath failed (exit code $LASTEXITCODE). If the repo is private now, use the install one-liner in README.md instead. See the git output above for details."
+            }
         }
     }
 

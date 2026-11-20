@@ -1,59 +1,59 @@
 using System;
-using System.Net.Http;
+using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace RxVerifyOverlay.Update;
 
 /// <summary>
 /// Background "is a newer build available" check (branch
-/// fix/rightclick-all-feedback-compact, task 4) — GETs GitHub's public,
-/// unauthenticated commits/main endpoint for elevatedev4/rx-verify and
-/// compares against this build's own embedded commit via
-/// UpdateChecker.IsUpdateAvailable. Called once at startup and every 4
-/// hours by MainWindow.xaml.cs (see CheckForUpdateIntervalMs there) —
-/// this class owns no timer of its own, same "caller drives the schedule"
-/// split OrderAssistCoordinator uses for its own OCR timer.
+/// fix/rightclick-all-feedback-compact, task 4; reworked on
+/// feat/private-repo-ssh) — runs `git ls-remote origin refs/heads/main`
+/// INSIDE this app's own checkout and compares the answer against this
+/// build's own embedded commit via UpdateChecker.IsUpdateAvailable.
 ///
-/// FAIL SOFT (branch brief, task 4, hard requirement): a DNS/timeout/
-/// network error or non-2xx response NEVER surfaces to the pharmacist and
-/// NEVER blocks startup — CheckAsync is always called fire-and-forget
-/// (`_ = ...`) from MainWindow, and any failure here just means the
-/// banner keeps whatever state it last had (see LastKnownUpdateAvailable's
-/// own doc) rather than flickering to "no update" on a transient hiccup.
+/// It used to GET api.github.com's anonymous commits/main endpoint, which
+/// stops working once the GitHub repo is private. Asking git instead means
+/// the check uses exactly the transport the checkout is configured for:
+/// HTTPS while the repo is public, the read-only SSH deploy key (repo-local
+/// core.sshCommand, see scripts/GitSsh.ps1) afterwards. GIT_TERMINAL_PROMPT=0
+/// and GCM_INTERACTIVE=never guarantee git can never pop a credential
+/// prompt in front of a pharmacist.
 ///
-/// Deliberately NOT unit tested itself (no HTTP-mocking infrastructure in
-/// this test project — same posture as Reporting/RxReportSubmitter.cs and
-/// Reporting/FeedbackSubmitter.cs) — the logic worth testing
-/// (JSON-&gt;sha parsing, stale-vs-current comparison) already lives in the
-/// pure Update/UpdateChecker.cs this class just calls.
+/// Called once at startup and every 4 hours by MainWindow.xaml.cs (see
+/// CheckForUpdateIntervalMs there) — this class owns no timer of its own,
+/// same "caller drives the schedule" split OrderAssistCoordinator uses for
+/// its own OCR timer.
+///
+/// FAIL SOFT (unchanged hard requirement): git missing from PATH, no repo
+/// found, no network, a rejected key, a timeout, or unparseable output NEVER
+/// surfaces to the pharmacist and NEVER blocks startup — CheckAsync is
+/// always called fire-and-forget (`_ = ...`) from MainWindow, and any
+/// failure here just means the banner keeps whatever state it last had (see
+/// LastKnownUpdateAvailable's own doc) rather than flickering to "no update"
+/// on a transient hiccup.
+///
+/// Deliberately NOT unit tested itself (spawns a real git process, same
+/// posture as Reporting/RxReportSubmitter.cs's HTTP) — the logic worth
+/// testing (output->sha parsing, stale-vs-current comparison, repo
+/// discovery) lives in the pure Update/UpdateChecker.cs and
+/// Update/RepoLocator.cs this class just calls.
 /// </summary>
 public sealed class UpdateService
 {
-    /// <summary>Shared across every instance — same "one long-lived HttpClient" reasoning as Reporting/RxReportSubmitter.cs's own Http field.</summary>
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
-
-    /// <summary>
-    /// GitHub's REST API requires SOME User-Agent header on every request
-    /// (an unauthenticated request with none is rejected with 403) — this
-    /// is that header's value, not a secret. No auth token is sent at all:
-    /// this is the same public, unauthenticated read the bootstrap
-    /// one-liner itself already relies on (raw.githubusercontent.com), so
-    /// there is nothing here for a pharmacy workstation to leak.
-    /// </summary>
-    private const string UserAgent = "rx-verify-overlay";
-
-    private const string LatestCommitUrl = "https://api.github.com/repos/elevatedev4/rx-verify/commits/main";
+    /// <summary>How long one `git ls-remote` may take before it is killed (an SSH connect to an unreachable network can otherwise sit for minutes).</summary>
+    private static readonly TimeSpan GitTimeout = TimeSpan.FromSeconds(20);
 
     /// <summary>
     /// True if the most recently COMPLETED successful check found the
     /// remote ahead of this build. Starts false (never nag before the
-    /// first check has ever completed). A failed check (network error,
-    /// non-2xx, unparseable body) leaves this exactly as it was — see
-    /// class doc's FAIL SOFT section — which is the "cache last-checked
+    /// first check has ever completed). A failed check (no network, git
+    /// error, timeout, unparseable output) leaves this exactly as it was —
+    /// see class doc's FAIL SOFT section — which is the "cache last-checked
     /// sha so the banner does not flicker" behavior the branch brief asks
-    /// for: a momentary GitHub API hiccup 4 hours into a shift can never
-    /// make an already-showing banner disappear, and can never make one
-    /// appear before a real successful check has actually confirmed it.
+    /// for: a momentary hiccup 4 hours into a shift can never make an
+    /// already-showing banner disappear, and can never make one appear
+    /// before a real successful check has actually confirmed it.
     /// </summary>
     public bool LastKnownUpdateAvailable { get; private set; }
 
@@ -69,24 +69,65 @@ public sealed class UpdateService
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, LatestCommitUrl);
-            request.Headers.UserAgent.ParseAdd(UserAgent);
+            var repoRoot = RepoLocator.ResolveRepoRoot();
+            if (repoRoot is null) return LastKnownUpdateAvailable;
 
-            using var response = await Http.SendAsync(request).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode) return LastKnownUpdateAvailable;
-
-            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var remoteSha = UpdateChecker.TryParseLatestCommitSha(json);
+            var output = await RunLsRemoteAsync(repoRoot).ConfigureAwait(false);
+            var remoteSha = UpdateChecker.TryParseLsRemoteSha(output);
             if (remoteSha is null) return LastKnownUpdateAvailable;
 
             LastKnownUpdateAvailable = UpdateChecker.IsUpdateAvailable(localCommitSha, remoteSha);
         }
         catch
         {
-            // DNS/timeout/network error/etc — fail soft, see class doc.
-            // LastKnownUpdateAvailable intentionally left untouched.
+            // git not installed/not on PATH, process start failure, etc —
+            // fail soft, see class doc. LastKnownUpdateAvailable intentionally left untouched.
         }
 
         return LastKnownUpdateAvailable;
+    }
+
+    /// <summary>
+    /// stdout of `git ls-remote origin refs/heads/main` run in
+    /// <paramref name="repoRoot"/>, or null on a non-zero exit / timeout.
+    /// The whole process tree is killed on timeout (git spawns ssh).
+    /// </summary>
+    private static async Task<string?> RunLsRemoteAsync(string repoRoot)
+    {
+        var psi = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        psi.ArgumentList.Add("ls-remote");
+        psi.ArgumentList.Add("origin");
+        psi.ArgumentList.Add("refs/heads/main");
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        psi.Environment["GCM_INTERACTIVE"] = "never";
+
+        using var process = Process.Start(psi);
+        if (process is null) return null;
+
+        // Drain both pipes concurrently so a chatty git can never fill a pipe buffer and deadlock.
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+
+        using var cts = new CancellationTokenSource(GitTimeout);
+        try
+        {
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            return null;
+        }
+
+        await stderrTask.ConfigureAwait(false);
+        var stdout = await stdoutTask.ConfigureAwait(false);
+        return process.ExitCode == 0 ? stdout : null;
     }
 }

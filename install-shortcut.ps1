@@ -81,9 +81,29 @@ if (-not (Test-Path $gitDir)) {
     if (-not (Test-Path $parent)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
-    git clone $RepoUrl $RepoPath
-    if ($LASTEXITCODE -ne 0) {
-        Stop-WithMessage 'git clone failed (see the error above - usually no network, or the repo URL/permissions changed).'
+    # Private repo: clone over SSH with the read-only deploy key (shared
+    # helper scripts\GitSsh.ps1, same one update-and-run.ps1 and
+    # bootstrap-fresh.ps1 use). When this script was run without a repo
+    # beside it there is no helper, so fall back to the legacy HTTPS clone
+    # (works only while the repo is public). If the folder already holds a
+    # checkout (the stage-0 installer cloned it) this whole block is skipped
+    # by the .git check above.
+    $gitSshHelperPath = ''
+    if (-not [string]::IsNullOrEmpty($PSScriptRoot)) { $gitSshHelperPath = Join-Path $PSScriptRoot 'scripts\GitSsh.ps1' }
+    if ((-not [string]::IsNullOrEmpty($gitSshHelperPath)) -and (Test-Path $gitSshHelperPath)) {
+        . $gitSshHelperPath
+        try {
+            Invoke-RxVerifyClone -RepoPath $RepoPath -ReportKey (Get-RxVerifyReportKeyFromSettings)
+        } catch {
+            Stop-WithMessage "git clone failed: $($_.Exception.Message)"
+        }
+    } else {
+        $env:GIT_TERMINAL_PROMPT = '0'
+        $env:GCM_INTERACTIVE = 'never'
+        git clone $RepoUrl $RepoPath
+        if ($LASTEXITCODE -ne 0) {
+            Stop-WithMessage 'git clone failed (see the error above - usually no network, or the repo is private now: use the install one-liner in README.md).'
+        }
     }
 }
 

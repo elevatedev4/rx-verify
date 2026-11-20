@@ -137,10 +137,10 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     private Reports.ReportsWindow? _reportsWindow;
 
     // UPDATE-READY CHECK (branch fix/rightclick-all-feedback-compact, task
-    // 4) — how often CheckForUpdateAsync re-polls GitHub's commits/main
+    // 4) — how often CheckForUpdateAsync re-polls the remote main (git ls-remote)
     // after the first, startup-time check (see the constructor's Loaded
     // handler and _updateCheckTimer below). 4 hours per the branch brief;
-    // this is a background poll of a public, unauthenticated endpoint, not
+    // this is a cheap background `git ls-remote` poll, not
     // something that needs to be aggressive — see Update/UpdateService.cs's
     // own FAIL SOFT doc for why a missed/failed check is never a problem.
     private const double CheckForUpdateIntervalHours = 4;
@@ -666,15 +666,12 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     }
 
     /// <summary>
-    /// Launches the pinned bootstrap one-liner in a new PowerShell process
-    /// and exits this app — see Update/UpdateLauncher.LaunchBootstrapAndExit's
-    /// own doc for the exact command construction and why failures aren't
-    /// swallowed inside that method. OverlaySettings.RxVerifyReportKey is
-    /// passed through only when set (LaunchBootstrapAndExit/
-    /// BuildBootstrapCommand already treat null/blank as "omit -ReportKey
-    /// entirely", matching bootstrap-fresh.ps1's own default), so a
-    /// workstation that never had a report key configured updates exactly
-    /// the same way it always could via the manual one-liner.
+    /// Runs this PC's own update-and-run.ps1 in a new PowerShell process
+    /// and exits this app — see Update/UpdateLauncher.LaunchUpdateAndExit's
+    /// own doc for why failures aren't swallowed inside that method. The
+    /// report key is NOT passed on the command line: update-and-run.ps1
+    /// reads RxVerifyReportKey from settings.json itself (needed for the
+    /// read-only SSH deploy key once the GitHub repo is private).
     /// </summary>
     private void OnUpdateClick(object sender, RoutedEventArgs e) => TriggerUpdate();
 
@@ -689,11 +686,11 @@ public partial class MainWindow : Window, IOverlayVisibilityController
     {
         try
         {
-            Update.UpdateLauncher.LaunchBootstrapAndExit(_settings.RxVerifyReportKey);
+            Update.UpdateLauncher.LaunchUpdateAndExit();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Couldn't start the update: {ex.Message}\n\nYou can still update manually — see the pinned setup line from HQ.", "Rx Verify",
+            MessageBox.Show(this, $"Couldn't start the update: {ex.Message}\n\nYou can still update by double-clicking the \"Rx Verify\" Desktop shortcut, or ask Will/dev for the install line.", "Rx Verify",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }

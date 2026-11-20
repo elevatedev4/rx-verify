@@ -1,81 +1,85 @@
+using System.Collections.Generic;
+using System.IO;
 using RxVerifyOverlay.Update;
 using Xunit;
 
 namespace RxVerifyOverlay.Tests;
 
 /// <summary>
-/// Unit tests for UpdateLauncher.BuildBootstrapCommand (Update/UpdateLauncher.cs)
-/// — the pure PowerShell command-string builder behind the "Update ready"
-/// banner's Update button (branch fix/rightclick-all-feedback-compact,
-/// task 4). LaunchBootstrapAndExit itself (Process.Start + app shutdown)
-/// is deliberately not exercised here — same "pure logic tested, OS-level
-/// side effects aren't" split as every other *Launcher/*Submitter class in
-/// this app. Report keys below are synthetic placeholders, not real
-/// secrets.
+/// Unit tests for the pure parts of UpdateLauncher (Update/UpdateLauncher.cs)
+/// — which update-and-run.ps1 the "Update" button runs and the powershell.exe
+/// arguments it gets (branch feat/private-repo-ssh: the button runs THIS PC's
+/// own script instead of a raw.githubusercontent.com one-liner, which dies
+/// when the GitHub repo goes private). LaunchUpdateAndExit itself
+/// (Process.Start + app shutdown) is deliberately not exercised here — same
+/// "pure logic tested, OS-level side effects aren't" split as every other
+/// *Launcher/*Submitter class in this app. Paths below are synthetic.
 /// </summary>
 public class UpdateLauncherTests
 {
-    private const string ExpectedScriptBlock =
-        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1)))";
+    private static string P(params string[] parts) => Path.Combine(parts);
 
-    [Fact]
-    public void OmitsReportKeyEntirelyWhenNull()
+    private static System.Func<string, bool> Exists(params string[] existing)
     {
-        // bootstrap-fresh.ps1's own -ReportKey parameter defaults to ''
-        // (see that script's own doc) — omitting it entirely must remain
-        // valid, not append an empty -ReportKey ''.
-        var command = UpdateLauncher.BuildBootstrapCommand(null);
-
-        Assert.Equal(ExpectedScriptBlock, command);
-        Assert.DoesNotContain("-ReportKey", command);
+        var set = new HashSet<string>(existing);
+        return path => set.Contains(path);
     }
 
     [Fact]
-    public void OmitsReportKeyEntirelyWhenEmpty()
+    public void RunsTheScriptInTheCheckoutTheAppLivesIn()
     {
-        var command = UpdateLauncher.BuildBootstrapCommand("");
+        var root = P(Path.GetTempPath(), "synthetic-rx", "repo");
+        var start = P(root, "overlay", "RxVerifyOverlay", "bin", "Debug", "net8.0-windows");
+        var script = P(root, "update-and-run.ps1");
 
-        Assert.Equal(ExpectedScriptBlock, command);
-        Assert.DoesNotContain("-ReportKey", command);
+        var resolved = UpdateLauncher.ResolveUpdateScriptPath(start, P(Path.GetTempPath(), "synthetic-user"), Exists(script));
+
+        Assert.Equal(script, resolved);
     }
 
     [Fact]
-    public void OmitsReportKeyEntirelyWhenWhitespace()
+    public void FallsBackToTheCanonicalUserProfileCheckout()
     {
-        var command = UpdateLauncher.BuildBootstrapCommand("   ");
+        var profile = P(Path.GetTempPath(), "synthetic-user");
+        var script = P(profile, "claude", "rx-verify", "update-and-run.ps1");
+        var elsewhere = P(Path.GetTempPath(), "somewhere-else", "bin");
 
-        Assert.Equal(ExpectedScriptBlock, command);
-        Assert.DoesNotContain("-ReportKey", command);
+        var resolved = UpdateLauncher.ResolveUpdateScriptPath(elsewhere, profile, Exists(script));
+
+        Assert.Equal(script, resolved);
     }
 
     [Fact]
-    public void AppendsSingleQuotedReportKeyWhenSet()
+    public void ReturnsNullWhenNoScriptExistsAnywhere()
     {
-        var command = UpdateLauncher.BuildBootstrapCommand("SYNTHETIC-KEY-abc123");
+        var resolved = UpdateLauncher.ResolveUpdateScriptPath(
+            P(Path.GetTempPath(), "synthetic-rx", "bin"), P(Path.GetTempPath(), "synthetic-user"), Exists());
 
-        Assert.Equal(ExpectedScriptBlock + " -ReportKey 'SYNTHETIC-KEY-abc123'", command);
+        Assert.Null(resolved);
     }
 
     [Fact]
-    public void DoublesEmbeddedSingleQuotesInTheReportKey()
+    public void PrefersTheCheckoutTheAppLivesInOverTheCanonicalOne()
     {
-        // PowerShell's own escape for a literal ' inside a single-quoted
-        // string is '' — bootstrap-fresh.ps1's own doc is explicit that
-        // this must be single-quoted (not double-quoted, which would
-        // instead expand a $ in the key) — see BuildBootstrapCommand's doc.
-        var command = UpdateLauncher.BuildBootstrapCommand("SYNTHETIC-KEY-o'brien");
+        var profile = P(Path.GetTempPath(), "synthetic-user");
+        var canonical = P(profile, "claude", "rx-verify", "update-and-run.ps1");
+        var root = P(Path.GetTempPath(), "synthetic-rx", "repo");
+        var own = P(root, "update-and-run.ps1");
 
-        Assert.Equal(ExpectedScriptBlock + " -ReportKey 'SYNTHETIC-KEY-o''brien'", command);
+        var resolved = UpdateLauncher.ResolveUpdateScriptPath(P(root, "bin"), profile, Exists(canonical, own));
+
+        Assert.Equal(own, resolved);
     }
 
     [Fact]
-    public void DoesNotExpandDollarSignsInTheReportKey()
+    public void BuildsPowershellArgumentsThatRunTheScriptFileWithNoReportKey()
     {
-        // Single-quoting (not double-quoting) is what makes this safe —
-        // PowerShell never interpolates inside single quotes, so the
-        // literal text must survive verbatim in the built command string.
-        var command = UpdateLauncher.BuildBootstrapCommand("SYNTHETIC$KEY$WITH$DOLLARS");
+        var args = UpdateLauncher.BuildArguments(@"C:\Users\Synthetic User\claude\rx-verify\update-and-run.ps1");
 
-        Assert.Equal(ExpectedScriptBlock + " -ReportKey 'SYNTHETIC$KEY$WITH$DOLLARS'", command);
+        Assert.Equal(
+            new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", @"C:\Users\Synthetic User\claude\rx-verify\update-and-run.ps1" },
+            args);
+        Assert.DoesNotContain("-ReportKey", args);
+        Assert.DoesNotContain("-Command", args);
     }
 }

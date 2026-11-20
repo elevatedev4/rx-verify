@@ -5,61 +5,58 @@ namespace RxVerifyOverlay.Tests;
 
 /// <summary>
 /// Unit tests for UpdateChecker (Update/UpdateChecker.cs) — the pure logic
-/// behind the "Update ready" banner (branch
-/// fix/rightclick-all-feedback-compact, task 4): parsing GitHub's
-/// commits/main response body and deciding whether this build's own
-/// (truncated) commit sha is stale against it.
+/// behind the "Update ready" banner: parsing `git ls-remote origin
+/// refs/heads/main` output (branch feat/private-repo-ssh replaced the old
+/// api.github.com JSON poll) and deciding whether this build's own
+/// (truncated) commit sha is stale against it. Shas below are synthetic.
 /// </summary>
 public class UpdateCheckerTests
 {
-    // ---- TryParseLatestCommitSha ------------------------------------
+    private const string Sha = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b";
+
+    // ---- TryParseLsRemoteSha ------------------------------------------
 
     [Fact]
-    public void TryParseLatestCommitShaReadsTheShaField()
+    public void TryParseLsRemoteShaReadsTheMainLine()
     {
-        const string json = "{\"sha\":\"1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b\",\"commit\":{\"message\":\"synthetic commit message\"}}";
-
-        var sha = UpdateChecker.TryParseLatestCommitSha(json);
-
-        Assert.Equal("1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", sha);
+        Assert.Equal(Sha, UpdateChecker.TryParseLsRemoteSha(Sha + "\trefs/heads/main\n"));
     }
 
     [Fact]
-    public void TryParseLatestCommitShaReturnsNullForMissingShaField()
+    public void TryParseLsRemoteShaToleratesCrLfAndSpaceSeparators()
     {
-        const string json = "{\"commit\":{\"message\":\"no sha at the top level\"}}";
-
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha(json));
+        Assert.Equal(Sha, UpdateChecker.TryParseLsRemoteSha(Sha + " refs/heads/main\r\n"));
     }
 
     [Fact]
-    public void TryParseLatestCommitShaReturnsNullForMalformedJson()
+    public void TryParseLsRemoteShaPicksTheMainLineAmongSeveral()
     {
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha("not json at all"));
+        const string other = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        var output = other + "\trefs/heads/main-old\n" + other + "\trefs/tags/main\n" + Sha + "\trefs/heads/main\n";
+
+        Assert.Equal(Sha, UpdateChecker.TryParseLsRemoteSha(output));
     }
 
     [Fact]
-    public void TryParseLatestCommitShaReturnsNullForNullOrBlankInput()
+    public void TryParseLsRemoteShaReturnsNullWhenThereIsNoMainRef()
     {
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha(null));
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha(""));
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha("   "));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha(Sha + "\trefs/heads/develop\n"));
     }
 
     [Fact]
-    public void TryParseLatestCommitShaReturnsNullWhenShaIsNotAString()
+    public void TryParseLsRemoteShaReturnsNullForErrorTextOrBadSha()
     {
-        const string json = "{\"sha\":12345}";
-
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha(json));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha("fatal: Could not read from remote repository."));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha("nothex-nothex-nothex-nothex-nothex-nothex\trefs/heads/main"));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha("abc123\trefs/heads/main"));
     }
 
     [Fact]
-    public void TryParseLatestCommitShaReturnsNullWhenShaIsEmptyString()
+    public void TryParseLsRemoteShaReturnsNullForNullOrBlankInput()
     {
-        const string json = "{\"sha\":\"\"}";
-
-        Assert.Null(UpdateChecker.TryParseLatestCommitSha(json));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha(null));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha(""));
+        Assert.Null(UpdateChecker.TryParseLsRemoteSha("   "));
     }
 
     // ---- IsUpdateAvailable --------------------------------------------
@@ -68,7 +65,7 @@ public class UpdateCheckerTests
     public void NoUpdateWhenRemoteShaStartsWithTheLocalShortSha()
     {
         // AppDiagnostics.GetCommitSha() returns an 8-char short sha (or
-        // shorter) — GitHub's API returns the full 40-char sha, so the
+        // shorter) — git returns the full 40-char sha, so the
         // comparison must be a prefix match, not equality.
         var available = UpdateChecker.IsUpdateAvailable("2a95682d", "2a95682d1234567890abcdef1234567890abcdef");
 

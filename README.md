@@ -322,14 +322,21 @@ PC with no Git/Node/.NET yet, and is also safe to re-run on a machine
 that already has all of it):
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/elevatedev4/rx-verify/main/bootstrap-fresh.ps1))) -ReportKey '<REPORTKEY>'
+& ([scriptblock]::Create((irm https://manager-hq.vercel.app/rxverify/install.ps1))) -ReportKey '<REPORTKEY>'
 ```
 
-(`-ReportKey` is optional — see below. Omit the whole `-ReportKey '...'`
-part, or run the older `irm ... | iex` form, and this works exactly the
-same, just without seeding a report key.)
+`-ReportKey` is **required** now: the GitHub repo is private, so this
+"stage 0" installer (`scripts/install.ps1`, served by Manager HQ) uses the
+report key to fetch a **read-only SSH deploy key** from HQ (see "Private
+repo: how PCs fetch updates" below), installs Git if missing, clones the
+repo over SSH, saves the report key into `settings.json`, and then runs the
+clone's own `bootstrap-fresh.ps1` — which does everything below, skipping
+its own clone because the folder already exists. (The pre-private one-liner
+that downloaded `bootstrap-fresh.ps1` straight from
+`raw.githubusercontent.com` only works while the repo is public; it no
+longer needs to be used.)
 
-This checks for `winget` (Windows' built-in package manager, present on
+`bootstrap-fresh.ps1` checks for `winget` (Windows' built-in package manager, present on
 any current Windows 10/11 box — if missing, it says so and points you
 at the "App Installer" Store listing, then stops); installs Git,
 Node.js LTS (needs major version 20+), and the .NET 8 SDK via `winget`
@@ -351,6 +358,50 @@ again.
 `-ReportKey` MUST be single-quoted, not double-quoted: Windows
 PowerShell expands `$` inside a double-quoted string, so a key
 containing `$` would silently truncate with zero diagnostic signal.
+
+### Private repo: how PCs fetch updates
+
+The GitHub repo `elevatedev4/rx-verify` is private, so nothing on a pharmacy
+PC reads it anonymously any more. Instead:
+
+- HQ hands out **one read-only deploy key** (an ed25519 key registered as a
+  read-only deploy key on the repo; the private half lives only in HQ's
+  `RXVERIFY_DEPLOY_KEY` env var). **The report key now also unlocks this
+  read-only deploy key:** a PC presents the `RxVerifyReportKey` it already
+  holds (same shared value as HQ's `RXVERIFY_REPORT_KEY`) and gets the key
+  back — see `HQ-ENDPOINT-SPEC.md`:
+  - `GET  https://manager-hq.vercel.app/api/rxverify-update-key` with
+    `Authorization: Bearer <report key>` → `200 {"key":"<OpenSSH private key>"}`
+    (`Cache-Control: no-store`); `401` bad/missing key; `503` env not set.
+  - `POST https://manager-hq.vercel.app/api/rxverify-update-key/confirm`
+    (same auth) with `{"hostname":"…","commit":"<sha>"}` → `204` — how HQ
+    records which PCs have migrated.
+  - `GET  https://manager-hq.vercel.app/rxverify/install.ps1` — the public
+    stage-0 installer (no secrets); canonical copy is `scripts/install.ps1`.
+- The key is saved under `%LocalAppData%\RxVerifyOverlay\` (`deploy_key`,
+  locked to the current user with `icacls`) next to a `known_hosts` file
+  that **pins GitHub's published SSH host keys** (ed25519, ecdsa, rsa — from
+  `https://api.github.com/meta`; fingerprints are checked by
+  `tests/git-ssh-scripts.test.ts`). The checkout gets a repo-local
+  `core.sshCommand` (`ssh -i <key> -o IdentitiesOnly=yes … -o
+  StrictHostKeyChecking=yes -p 443`) and its `origin` becomes
+  `ssh://git@ssh.github.com:443/elevatedev4/rx-verify.git` (SSH over port
+  443 so locked-down pharmacy networks still work).
+- **Existing PCs migrate with zero touch.** While the repo is still public
+  they pull the new `update-and-run.ps1` anonymously; on the next launch it
+  fetches the key, sets up the pinned `known_hosts` and `core.sshCommand`,
+  **tests** them with `git ls-remote`, and only if that works switches
+  `origin` to the SSH URL and POSTs the confirmation to HQ. Any failure
+  keeps the HTTPS origin, logs, and carries on. The repo is flipped private
+  only after every PC has confirmed.
+- All the SSH logic is in one dot-sourced helper, `scripts/GitSsh.ps1`,
+  used by `update-and-run.ps1`, `bootstrap-fresh.ps1` and
+  `install-shortcut.ps1`. Git is run with `GIT_TERMINAL_PROMPT=0` and
+  `GCM_INTERACTIVE=never` so it can never hang on a credential prompt.
+- The in-app "Update ready" check now runs `git ls-remote origin
+  refs/heads/main` in the checkout (same env vars, 20 s timeout, fails soft)
+  instead of polling `api.github.com`, and the Update button runs the local
+  `update-and-run.ps1` instead of a `raw.githubusercontent.com` one-liner.
 
 **2. Re-create shortcut** — only needed if the Desktop shortcut is ever
 deleted or stops working; step 1 already creates it, so most machines

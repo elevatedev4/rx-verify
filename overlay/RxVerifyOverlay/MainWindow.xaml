@@ -648,9 +648,9 @@
                     pure IsUpdateAvailable comparison finds the latest
                     origin/main commit differs from this build's own
                     AppDiagnostics.GetCommitSha(). "Update" launches the
-                    pinned bootstrap one-liner in a new PowerShell process
+                    local update-and-run.ps1 in a new PowerShell process
                     and exits this app (OnUpdateClick) — see UpdateLauncher's
-                    own doc for the exact command construction.
+                    own doc.
                 -->
                 <Border x:Name="UpdateBannerBorder" Background="#FF1B3A1E" BorderBrush="#FF2E7D32" BorderThickness="1"
                         CornerRadius="3" Padding="6,3" Margin="0,0,0,4" Visibility="Collapsed">
